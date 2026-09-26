@@ -1,0 +1,5 @@
+/build/
+/cmake-build-*/
+/tina
+github_addr.txt
+local_host.txt

@@ -1,0 +1,395 @@
+这次我给你定一个最终版：书为主、课程为辅、全程只做一个大项目，不再做一堆小实验
+而且网络只学到 Linux Server 真正需要的深度，不把你带去实现 TCP 协议栈。
+
+你的目标不是“学 Linux”，而是到寒假前形成一个明确画像：
+> C++ / Linux Server / 并发 / Performance
+
+最终主项目固定为：
+> C++20 高性能异步 RPC Runtime + KV Service
+
+KV 只是 workload，真正要展示的是 Server Runtime 和性能工程。
+## 一、资源就这几个
+
+| 定位资源怎么用     |                                                 |
+| 网络快速补齐       | Beej's Guide to Network Programming             | 前期集中读，约一周
+| Linux 机制参考    | TLPI《Linux/UNIX 系统编程手册》                    | 不通读，项目需要什么查什么 
+| Server 架构参考   | 陈硕《Linux 多线程服务端编程》                      | 只读 Reactor / EventLoop / 多线程 Server 部分 
+| 主书              |Brendan Gregg《性能之巅》第2版                     | 项目中后期认真读
+| 课程补充          | MIT 6.1060 Software Performance Engineering     | 只补 performance 思维，不作为主线
+
+Beej 现在仍在持续维护，所以网络入口不会有“二十年前教材”的问题。
+TLPI 虽然是 2010 年出版，但它是 Linux 系统接口的权威参考，而不是我们拿来线性学习的教材；
+作者 Michael Kerrisk 长期维护 Linux man-pages。
+
+真正值得你**完整深入读**的是《Systems Performance 2nd Edition》。
+它覆盖应用、CPU、内存、网络、benchmark、`perf`、Ftrace、BPF，而且第二版特意更新了 Linux/cloud/BPF 相关内容。
+MIT 6.1060 则是性能工程的补充，
+它 2026 年春季仍然开设，课程本身就是 project-based 的高性能、可扩展软件开发，
+包含 cache/memory hierarchy、parallelism、profiling 等。
+陈硕那本书年代比较老，所以**不当技术现状教材**。只拿它看一个今天仍然有价值的问题：`one loop per thread`、EventLoop、Connection ownership 这种 Server 架构是怎样组织起来的。作者自己对书的定位也正是 Linux 多线程 TCP Server 的这一套模型。
+
+# 二、学习顺序固定，不需要你自己决定“下一步看什么”
+整个路线我压成 12～14 周。
+
+### 第 1～2 周：网络够用 + Server 起步
+Beej 集中读完与你有关的部分：
+TCP byte stream
+socket / bind / listen / accept
+connect
+send / recv
+blocking / non-blocking
+partial read / partial write
+select/poll 基本思想
+
+你已经有 CSAPP，所以不要去重新学：
+路由算法、IP 协议实现、拥塞控制算法细节、TCP stack。
+只需要真正理解：
+
+应用程序
+   │
+socket fd
+   │
+kernel socket buffer
+   │
+TCP
+   │
+网络
+
+与此同时直接创建最终仓库。
+第一版已经是你的最终 RPC 项目，只不过能力少：
+
+Client
+  │
+ TCP
+  ↓
+Server
+  ↓
+Frame Parser
+  ↓
+Handler
+
+协议一开始自己定义一个简单 binary frame：
+length
+request_id
+method
+payload
+
+不是写 echo server 玩完就删。
+
+# 第 3～4 周：项目真正进入 Linux Server
+
+现在学：
+non-blocking socket
+        ↓
+epoll
+        ↓
+EventLoop
+        ↓
+Connection
+        ↓
+input/output Buffer
+
+这时候 TLPI 只查这些对应机制，另外以最新 `man-pages` 为最终 API 依据。
+项目内部开始形成：
+
+Server
+ │
+ ├── Acceptor
+ │
+ └── EventLoop
+       │
+       ├── EpollPoller
+       │
+       └── Connection
+              ├── InputBuffer
+              └── OutputBuffer
+
+这阶段最重要的不是 class 写漂亮，而是你必须真正解决：
+
+> TCP 为什么一次可能读半条 RPC？
+> 为什么一次 `read()` 也可能收到三条？
+> 为什么 non-blocking `write()` 可能只写出去一部分？
+> 为什么不能直接 `while(write())` 把线程卡死？
+> 慢客户端为什么可能把 Server 内存撑爆？
+
+到这里，一个靠谱 Linux Server 的“骨架”就出来了。
+
+# 第 5～6 周：多核 Server
+
+这时候再读陈硕关于：
+> Reactor、EventLoop、one-loop-per-thread、多线程 Server 的对应部分。
+然后项目变成：
+                    Acceptor
+                        │
+          ┌─────────────┼─────────────┐
+          ↓             ↓             ↓
+      EventLoop 0   EventLoop 1   EventLoop 2
+          │             │             │
+     Connections   Connections   Connections
+
+重点不是线程池 API。
+而是：
+> 一个 Connection 到底归谁所有？
+> 一个 fd 能不能两个线程同时操作？
+> 跨线程任务怎么通知 EventLoop？
+> response 在另一个线程产生以后怎么回来？
+
+这时候会自然用到：
+thread
+mutex
+atomic
+eventfd
+task queue
+
+你已经做过并发结构，所以这里没必要再上一整本 C++ concurrency。
+
+# 第 7～8 周：把它真正做成 RPC Runtime
+
+现在加入：
+异步 Client
+request_id
+timeout
+timer
+pipelining
+bounded queue
+backpressure
+graceful shutdown
+
+这里才开始和网上常见的：
+> “epoll + threadpool WebServer” 明显拉开。
+例如同时：
+Request 81
+Request 82
+Request 83
+
+服务端执行完成的顺序可能：
+82
+81
+83
+
+Client 要靠 `request_id` 找到对应请求。
+请求 81 已经 timeout，但是 response 又到了怎么办？
+连接突然断掉，挂在这个连接上的 100 个 pending RPC 怎么处理？
+Server 每秒只能处理 20 万请求，客户端每秒灌 100 万进来怎么办？
+这些就是真正的 Server Runtime 问题。
+
+# 第 9 周：加入 KV Service
+注意这一步反而很短。
+RPC Runtime
+     │
+     ↓
+KV Service
+     │
+GET
+SET
+DEL
+TTL
+先：
+std::unordered_map
+std::mutex
+就够。
+
+不自研 HashMap，不写 B+Tree，不把数据库项目重新做一遍。
+
+KV 的唯一任务是制造：
+> 一个稳定、真实、可以并发压测的 workload。
+后面 profiler 真证明锁是瓶颈，再考虑 sharding。
+
+# 第 9～12 周：这里才是这个项目最值钱的部分
+
+开始认真读：
+# 《性能之巅》第 2 版
+不是整本从第一章硬啃。
+按顺序重点读：
+Methodology
+    ↓
+Observability
+    ↓
+Applications
+    ↓
+CPU
+    ↓
+Memory
+    ↓
+Network
+    ↓
+Benchmarking
+    ↓
+perf
+书的完整体系本身就是 OS/application performance、CPU、memory、network、benchmark、`perf`、Ftrace、BPF。
+然后拿自己的 Server 做研究对象。
+例如测：
+
+1 I/O thread
+2
+4
+8
+记录：
+QPS
+P50
+P95
+P99
+
+CPU utilization
+cycles
+instructions
+cache misses
+context switches
+
+然后：
+perf stat
+perf record
+perf report
+
+找到真实瓶颈。
+## 这里才允许你开始“秀技术”
+比如你发现：
+
+8 thread
+吞吐只比 4 thread 高 5%
+P99 却翻倍
+
+先别猜。查。
+最后如果证明是：
+共享 KV mutex
+那么：
+一个全局 HashMap + mutex
+        ↓
+16-way sharding
+        ↓
+重新 benchmark
+
+如果发现：
+malloc/free 占了很多 CPU
+再研究 object pool。
+
+如果发现：
+大量 memcpy
+再研究 scatter/gather I/O 或 buffer ownership。
+
+如果发现：
+跨线程 wakeup 很贵
+再改线程模型。
+
+高级技术只能由 profiler 逼出来。
+这是这个项目与普通“手搓服务器”最大的区别。
+
+# 第 13～14 周：只选一个现代 Linux extension
+我建议：
+## `io_uring`
+不是因为新就硬塞。
+而是在现有：
+RPC Runtime
+    ↓
+epoll backend
+
+旁边增加
+RPC Runtime
+    ↓
+io_uring backend
+
+上面的：
+RPC
+KV
+benchmark
+client
+全部不变。
+
+同机器、同 workload 比：
+epoll vs io_uring
+看：
+QPS
+P99
+CPU cycles/request
+syscalls
+context switches
+
+最后你的结论可能是：
+> io_uring 快很多。
+
+也可能：
+> 对这个 workload 根本没明显优势。
+**后者一样非常有价值，只要你能解释为什么。**
+
+# 三、最终项目应该长成什么样
+不是一个：
+> “高性能 Redis Clone”。
+
+而是：
+> 自己实现 Linux C++ RPC runtime，并围绕实际 workload 完成系统性的性能研究。
+最后仓库应该大概：
+src/
+  net/
+    event_loop
+    epoll_poller
+    connection
+    buffer
+    acceptor
+    timer
+
+  rpc/
+    protocol
+    client
+    server
+    request
+    response
+
+  service/
+    kv
+
+benchmark/
+tests/
+docs/
+不要追求代码量。
+自然做到几千行高质量 C++就够。
+你的大型管理器已经能证明你会写“大项目”；这个项目的任务不是再证明你能堆一万行，而是证明：
+> 你懂 Systems
+
+# 四、到最后简历上真正应该有什么
+
+不是：
+> 熟悉 epoll、Reactor、多线程、io_uring。
+
+而应该出现这种证据链：
+设计并实现基于 non-blocking I/O + epoll 的
+C++20 异步 RPC runtime；
+实现 multi-reactor、多连接管理、RPC timeout、
+backpressure 和异步 request/response；
+
+构建完整 benchmark，
+测量 QPS/P50/P95/P99；
+使用 perf 定位 XX 瓶颈，
+通过 XX 设计将 XXX 从 A 改善至 B；
+实现 io_uring backend，
+在相同 workload 下与 epoll 对照分析。
+A/B 必须是真数据。
+这才是现在这个环境里一个个人 Systems 项目应该达到的完成度。
+
+所以最终你不需要同时上四门课。
+真正的学习主轴是：
+Beej
+网络补齐（短）
+     │
+     ↓
+RPC Server 项目
+     │
+     ├── TLPI / man-pages
+     │   按需查 Linux 机制
+     │
+     ├── muduo书
+     │   只参考 Server architecture
+     │
+     ↓
+《性能之巅》
+认真学 Systems Performance
+     │
+     ↓
+Profiler-driven optimization
+     │
+     ↓
+io_uring extension
+
+书的比重远大于课程。
+课程我现在甚至不会硬塞进计划。MIT 6.1060 可以在你进入性能阶段以后，发现某一块比如 cache/parallel scaling 特别想深入时再挑内容看。它不是一个必须完成的任务。
+这样最符合你现在的状态：不是再接受一次完整本科教育，而是利用你已有的 CSAPP/C++/并发基础，直接把缺失的 Linux Server 能力补起来，然后在 Performance 上做深
+这是你给我的规划，我现在决定结束这快一个月左右的犹豫（虽然中间也学习了Cuda，做了半个数据库），按照这个计划来，这个对话用来进行总的规划学习，每一个部分会新开对话
