@@ -1,82 +1,146 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <errno.h>
 #include <string.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netdb.h>
+#include <arpa/inet.h>
+#include <sys/wait.h>
+#include <signal.h>
+#define PORT "3490" // 提供给用戶连接的 port
+#define BACKLOG 10  // 有多少个特定的连接队列（pending connections queue）
 
-#define MYPORT "3490" // 使用者将连接的 port
-#define BACKLOG 10    // 在队列中可以有多少个连接在等待
-/*
-domain 是 AF_INET 或 AF_INET6，
-type 是 SOCK_STREAM 或 SOCK_DGRAM，
-而 protocol 可以设置为 0，用来帮给予的 type 选择适当的协议。
-或者你可以调用 getprotobyname() 来查询你想要的协议，＂tcp＂或＂udp＂
-*/
-// int socket(int domain, int type, int protocol);
+void sigchld_handler(int s)
+{
+    while (waitpid(-1, NULL, WNOHANG) > 0)
+        ;
+}
 
-/*
-sockfd 是 socket() 传回的 socket file descriptor。
-my_addr 是指向包含你的地址资料丶名称及 IP address 的 struct sockaddr 之指针。
-addrlen 是以 byte 为单位的地址长度
-*/
-// int bind(int sockfd, sockaddr *my_addr, int addrlen);
+void *get_in_addr(sockaddr *sa)
+{
+    if (sa->sa_family == AF_INET)
+    {
+        return &(((sockaddr_in *)sa)->sin_addr);
+    }
+    return &(((struct sockaddr_in6 *)sa)->sin6_addr);
+}
 
-// int connect(int sockfd, sockaddr *serv_addr, int addrlen);
-
-/*
-backlog 是进入的队列（incoming queue）中所允许的连接数目
-*/
-// int listen(int sockfd, int backlog);
-
-/*
-sockfd 是正在进行 listen() 的 socket descriptor。
-很简单，addr 通常是一个指向 local struct sockaddr_storage 的指针，
-关於进来的连接将往哪里去的资料［而你可以用它来得知是哪一台主机从哪一个 port 调用你的］。
-addrlen 是一个 local 的整数变量，应该在将它的地址传递给 accept() 以前，将它设置为 sizeof(sockaddr_storage)
-从backlog拿一个出来
-*/
-// int accept(int sockfd, sockaddr *addr, socklen_t *addrlen);
-
-/*
-sockfd 是你想要送资料过去的 socket descriptor［
-不论它是不是 socket() 返回的，或是你用 accept() 取得的］。
-msg 是一个指向你想要传送资料之指标，而 len 是以 byte 为单位的资料长度。
-而 flags 设置为 0 就好
-*/
-// int send(int sockfd, const void *msg, int len, int flags);
-
-/*
-sockfd 是要读取的 socket descriptor，
-buf 是要记录读到资料的缓冲区（buffer），
-len 是缓冲区的最大长度，
-而 flags 可以再设置为 0
-*/
-// int recv(int sockfd, void *buf, int len, int flags);
-
-// sendto(int sockfd, const void *msg, int len, unsigned int flags, const sockaddr *to, socklen_t tolen);
-
-// int recvfrom(int sockfd, void *buf, int len, unsigned int flags, sockaddr *from, int *fromlen);
 int main()
 {
-    sockaddr_storage their_addr;
-    socklen_t addr_size;
-    addrinfo hints, *res;
-    int sockfd, new_fd;
+    addrinfo hints, *server_info, *p;
 
-    // !! 不要忘了帮这些调用做错误检查 !!
-    // 首先，使用 getaddrinfo() 载入 address struct：
     memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_UNSPEC; // 使用 IPv4 或 IPv6，都可以
+    hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
-    hints.ai_flags = AI_PASSIVE; // 帮我填上我的 IP
+    hints.ai_flags = AI_PASSIVE;
 
-    getaddrinfo(NULL, MYPORT, &hints, &res);
+    int rv;
+    if ((rv = getaddrinfo(NULL, PORT, &hints, &server_info)) != 0)
+    {
+        fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rv));
+        return 1;
+    }
 
-    sockfd = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
-    bind(sockfd, res->ai_addr, res->ai_addrlen);
-    listen(sockfd, BACKLOG);
+    int sockfd, yes = 1;
+    // 以循环找出全部的结果，并绑定（bind）到第一个能用的结果
+    for (p = server_info; p; p = p->ai_next)
+    {
+        if ((sockfd = socket(p->ai_family, p->ai_socktype,
+                             p->ai_protocol)) == -1)
+        {
+            perror("server: socket");
+            continue;
+        }
 
-    // 现在接受一个进入的连接：
-    addr_size = sizeof their_addr;
-    new_fd = accept(sockfd, (sockaddr *)&their_addr, &addr_size);
+        /*
+        SOL_SOCKET 表示通用套接字层选项（与具体传输协议无关）
+        SO_REUSEADDR：具体的配置项名称，表示“允许重用本地地址与端口”
+        */
+        if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &yes,
+                       sizeof(int)) == -1)
+        {
+            perror("setsockopt");
+            exit(1);
+        }
+
+        if (bind(sockfd, p->ai_addr, p->ai_addrlen) == -1)
+        {
+            close(sockfd);
+            perror("server: bind");
+            continue;
+        }
+
+        break;
+    }
+
+    if (p == NULL)
+    {
+        fprintf(stderr, "server: failed to bind\n");
+        return 2;
+    }
+
+    freeaddrinfo(server_info);
+
+    if (listen(sockfd, BACKLOG) == -1)
+    {
+        perror("listen");
+        exit(1);
+    }
+
+    /*
+    如果不管这些子进程，僵尸进程就会随连接数不断累加，最终耗尽操作系统的可用 PID 上限
+    当任何一个子进程终止时，Linux 内核会自动向其父进程投递一个 SIGCHLD（子进程状态改变信号）。
+    如果不做任何配置，内核对 SIGCHLD 的默认处理行为是 忽略（SIG_IGN）。
+    为了让父进程感知并清理子进程，代码使用现代 POSIX 接口 sigaction 接管了该信号
+    */
+    struct sigaction sa;
+    sa.sa_handler = sigchld_handler; // 收拾全部死掉的 processes
+    // 清空屏蔽信号集
+    sigemptyset(&sa.sa_mask);
+
+    // 设置了 SA_RESTART 标志后，操作系统内核会在信号处理函数执行完毕后，
+    // 自动重启被中断的 accept() 系统调用，而不会让 accept() 抛出 EINTR 错误退出
+    sa.sa_flags = SA_RESTART;
+    // 向内核注册
+    if (sigaction(SIGCHLD, &sa, NULL) == -1)
+    {
+        perror("sigaction");
+        exit(1);
+    }
+
+    printf("server: waiting for connections...\n");
+    sockaddr_storage their_addr;
+    char s[INET6_ADDRSTRLEN];
+    while (1)
+    {
+        socklen_t sin_size = sizeof their_addr;
+        int new_fd = accept(sockfd, (sockaddr *)&their_addr, &sin_size);
+        if (new_fd == -1)
+        {
+            perror("accept");
+            continue;
+        }
+
+        // 二进制 IP 转可读字符串
+        inet_ntop(their_addr.ss_family,
+                  get_in_addr((sockaddr *)&their_addr),
+                  s, sizeof s);
+        printf("server: got connection from %s\n", s);
+
+        if (!fork())
+        {                  // fork 返回 0，这个是 child process
+            close(sockfd); // child 不需要 listener
+
+            if (send(new_fd, "Hello, world!", 13, 0) == -1)
+                perror("send");
+
+            close(new_fd);
+
+            exit(0);
+        }
+        close(new_fd); // parent 不需要这个
+    }
 }
