@@ -9,6 +9,9 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# 为 VS Code 的补全和 GCC 诊断导出真实编译参数。
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # 自动查找 src/ 及其子目录中的普通源码和 C++ 模块接口。
 # CONFIGURE_DEPENDS 让新增文件在下次构建时触发 CMake 重新配置。
 file(GLOB_RECURSE APP_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/*.cpp")

@@ -1,0 +1,23 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "CMake: 配置",
+            "type": "process",
+            "command": "cmake",
+            "args": ["-S", "${workspaceFolder}", "-B", "${workspaceFolder}/build", "-G", "Ninja"],
+            "problemMatcher": []
+        },
+        {
+            // Ctrl+Shift+B：构建并更新新增/改名模块的映射和缓存。
+            "label": "CMake: 构建",
+            "type": "process",
+            "command": "cmake",
+            "args": ["--build", "${workspaceFolder}/build"],
+            "dependsOn": "CMake: 配置",
+            "options": { "cwd": "${workspaceFolder}" },
+            "problemMatcher": ["$gcc"],
+            "group": { "kind": "build", "isDefault": true }
+        }
+    ]
+}
