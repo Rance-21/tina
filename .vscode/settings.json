@@ -5,16 +5,13 @@
         "*.ixx": "cpp"
     },
     "[cpp]": {
-        "editor.defaultFormatter": "ms-vscode.cpptools",
+        "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd",
         "editor.formatOnSave": true,
         "editor.formatOnSaveMode": "file",
         "editor.detectIndentation": false,
         "editor.insertSpaces": true,
         "editor.tabSize": 4
     },
-    "C_Cpp.formatting": "clangFormat",
-    "C_Cpp.clang_format_style": "file",
-
     // 使用项目预设固定 Clang，避免先前选择的 GCC 工具包覆盖模块编译配置。
     "cmake.useCMakePresets": "always",
     "cmake.configureOnOpen": true

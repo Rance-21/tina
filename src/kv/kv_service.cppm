@@ -1,18 +1,14 @@
-export module tina.kv.service;
+export module kv.service;
 
 import std;
-import tina.rpc.protocol;
+import rpc.protocol;
 
-export namespace tina::kv
-{
+export namespace kv {
 
-class Service
-{
-public:
-    rpc::Response handle(const rpc::Request& request)
-    {
-        switch (request.method)
-        {
+class Service {
+  public:
+    rpc::Response handle(const rpc::Request &request) {
+        switch (request.method) {
         case rpc::Method::ping:
             return {request.request_id, rpc::Status::ok, "PONG"};
 
@@ -26,27 +22,17 @@ public:
             return handle_del(request);
         }
 
-        return {
-            request.request_id,
-            rpc::Status::bad_request,
-            "unknown method"
-        };
+        return {request.request_id, rpc::Status::bad_request, "unknown method"};
     }
 
-private:
-    rpc::Response handle_set(const rpc::Request& request)
-    {
+  private:
+    rpc::Response handle_set(const rpc::Request &request) {
         // v0.1 为了简单，SET payload 暂时定义为：
         // key\nvalue
         std::size_t separator = request.payload.find('\n');
 
-        if (separator == std::string::npos)
-        {
-            return {
-                request.request_id,
-                rpc::Status::bad_request,
-                "SET requires key and value"
-            };
+        if (separator == std::string::npos) {
+            return {request.request_id, rpc::Status::bad_request, "SET requires key and value"};
         }
 
         std::string key = request.payload.substr(0, separator);
@@ -57,31 +43,19 @@ private:
         return {request.request_id, rpc::Status::ok, "OK"};
     }
 
-    rpc::Response handle_get(const rpc::Request& request)
-    {
+    rpc::Response handle_get(const rpc::Request &request) {
         auto it = data_.find(request.payload);
 
-        if (it == data_.end())
-        {
-            return {
-                request.request_id,
-                rpc::Status::not_found,
-                "NOT_FOUND"
-            };
+        if (it == data_.end()) {
+            return {request.request_id, rpc::Status::not_found, "NOT_FOUND"};
         }
 
         return {request.request_id, rpc::Status::ok, it->second};
     }
 
-    rpc::Response handle_del(const rpc::Request& request)
-    {
-        if (data_.erase(request.payload) == 0)
-        {
-            return {
-                request.request_id,
-                rpc::Status::not_found,
-                "NOT_FOUND"
-            };
+    rpc::Response handle_del(const rpc::Request &request) {
+        if (data_.erase(request.payload) == 0) {
+            return {request.request_id, rpc::Status::not_found, "NOT_FOUND"};
         }
 
         return {request.request_id, rpc::Status::ok, "OK"};
@@ -90,4 +64,4 @@ private:
     std::unordered_map<std::string, std::string> data_;
 };
 
-}
+} // namespace kv
