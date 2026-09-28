@@ -1,12 +1,12 @@
-export module tina.rpc.server;
+export module rpc.server;
 
 import std;
 
-import tina.net.socket;
-import tina.rpc.protocol;
-import tina.service.kv;
+import net.socket;
+import rpc.protocol;
+import service.kv;
 
-export namespace tina::rpc {
+export namespace rpc {
 
 void run_server(std::string_view port) {
     auto listener = net::Socket::listen_tcp(port);
@@ -37,4 +37,4 @@ void run_server(std::string_view port) {
     }
 }
 
-} // namespace tina::rpc
+} // namespace rpc

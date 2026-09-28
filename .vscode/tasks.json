@@ -5,7 +5,8 @@
             "label": "CMake: 配置",
             "type": "process",
             "command": "cmake",
-            "args": ["-S", "${workspaceFolder}", "-B", "${workspaceFolder}/build", "-G", "Ninja"],
+            "args": ["--preset", "default"],
+            "options": { "cwd": "${workspaceFolder}" },
             "problemMatcher": []
         },
         {
@@ -13,7 +14,7 @@
             "label": "CMake: 构建",
             "type": "process",
             "command": "cmake",
-            "args": ["--build", "${workspaceFolder}/build"],
+            "args": ["--build", "--preset", "default"],
             "dependsOn": "CMake: 配置",
             "options": { "cwd": "${workspaceFolder}" },
             "problemMatcher": ["$gcc"],

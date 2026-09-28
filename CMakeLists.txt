@@ -9,7 +9,7 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# 为 VS Code 的补全和 GCC 诊断导出真实编译参数。
+# 为 VS Code 的语言服务导出真实编译参数。
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # 自动查找 src/ 及其子目录中的普通源码和 C++ 模块接口。
@@ -18,6 +18,10 @@ file(GLOB_RECURSE APP_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/*.cpp
 file(GLOB_RECURSE APP_MODULES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/*.cppm")
 
 add_executable(${PROJECT_NAME} ${APP_SOURCES})
+# 编译与编辑器使用相同的常用警告选项。
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Wpedantic)
+endif()
 # 允许源码直接 import std，不需要标准库头文件。
 set_target_properties(${PROJECT_NAME} PROPERTIES CXX_MODULE_STD ON)
 if(APP_MODULES)

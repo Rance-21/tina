@@ -1,9 +1,9 @@
 module;
 #include <arpa/inet.h>
-export module tina.rpc.protocol;
+export module rpc.protocol;
 import std;
-import tina.net.socket;
-export namespace tina::rpc {
+import net.socket;
+export namespace rpc {
 
 enum class Method : std::uint8_t { ping = 1, set = 2, get = 3, del = 4 };
 enum class Status : std::uint8_t { ok = 0, not_found = 1, bad_request = 2 };
@@ -129,4 +129,4 @@ bool recv_response(net::Socket &socket, Response &response) {
     return true;
 }
 
-} // namespace tina::rpc
+} // namespace rpc

@@ -15,18 +15,7 @@
     "C_Cpp.formatting": "clangFormat",
     "C_Cpp.clang_format_style": "file",
 
-    // 补全使用实际编译参数；尚未加入编译数据库的文件也默认使用 C++23。
-    "C_Cpp.default.compilerPath": "/usr/bin/g++",
-    "C_Cpp.default.cppStandard": "c++23",
-    "C_Cpp.default.intelliSenseMode": "linux-gcc-x64",
-    "C_Cpp.default.compileCommands": ["${workspaceFolder}/build/compile_commands.json"],
-
-    // 沿用已安装的 GCC Live Diagnostics 提供真实红线/黄线，避免重复诊断。
-    "C_Cpp.errorSquiggles": "disabled",
-    "gccLiveDiagnostics.compilerPath": "/usr/bin/g++",
-
-    // 与编译数据库、模块缓存使用同一个构建目录。
-    "cmake.generator": "Ninja",
-    "cmake.buildDirectory": "${workspaceFolder}/build",
+    // 使用项目预设固定 Clang，避免先前选择的 GCC 工具包覆盖模块编译配置。
+    "cmake.useCMakePresets": "always",
     "cmake.configureOnOpen": true
 }

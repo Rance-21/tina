@@ -1,11 +1,11 @@
-export module tina.rpc.client;
+export module rpc.client;
 
 import std;
 
-import tina.net.socket;
-import tina.rpc.protocol;
+import net.socket;
+import rpc.protocol;
 
-export namespace tina::rpc {
+export namespace rpc {
 
 Response call(Method method, std::string payload, std::string_view host = "127.0.0.1",
               std::string_view port = "3490") {
@@ -23,4 +23,4 @@ Response call(Method method, std::string payload, std::string_view host = "127.0
     return response;
 }
 
-} // namespace tina::rpc
+} // namespace rpc

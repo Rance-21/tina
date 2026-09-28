@@ -4,10 +4,10 @@ module;
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
-export module tina.net.socket;
+export module net.socket;
 import std;
 
-export namespace tina::net {
+export namespace net {
 class Socket {
   public:
     ~Socket() {
@@ -177,4 +177,4 @@ class Socket {
     }
     int fd_;
 };
-} // namespace tina::net
+} // namespace net
