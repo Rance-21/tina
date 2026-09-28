@@ -1,9 +1,9 @@
-export module tina.service.kv;
+export module service.kv;
 
 import std;
-import tina.rpc.protocol;
+import rpc.protocol;
 
-export namespace tina::service {
+export namespace service {
 
 class KvService {
   public:
@@ -69,4 +69,4 @@ class KvService {
     std::unordered_map<std::string, std::string> data_;
 };
 
-} // namespace tina::service
+} // namespace service
