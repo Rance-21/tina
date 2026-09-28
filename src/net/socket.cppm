@@ -11,8 +11,9 @@ export namespace net {
 class Socket {
   public:
     ~Socket() {
-        if (fd_ >= 0)
-            ::close(fd_);
+        if (fd_ >= 0) {
+            close(fd_);
+        }
     }
 
     Socket(const Socket &) = delete;
@@ -23,11 +24,13 @@ class Socket {
     }
 
     Socket &operator=(Socket &&other) noexcept {
-        if (this == &other)
+        if (this == &other) {
             return *this;
+        }
 
-        if (fd_ >= 0)
+        if (fd_ >= 0) {
             ::close(fd_);
+        }
 
         fd_ = other.fd_;
         other.fd_ = -1;
@@ -45,35 +48,37 @@ class Socket {
         addrinfo *results = nullptr;
         std::string port_string{port};
 
-        int rv = ::getaddrinfo(nullptr, port_string.c_str(), &hints, &results);
+        int rv = getaddrinfo(nullptr, port_string.c_str(), &hints, &results);
 
-        if (rv != 0)
+        if (rv != 0) {
             throw std::runtime_error(::gai_strerror(rv));
+        }
 
         for (addrinfo *p = results; p != nullptr; p = p->ai_next) {
             int fd = ::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
 
-            if (fd == -1)
+            if (fd == -1) {
                 continue;
+            }
 
             int yes = 1;
-            ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 
-            if (::bind(fd, p->ai_addr, p->ai_addrlen) == -1) {
-                ::close(fd);
+            if (bind(fd, p->ai_addr, p->ai_addrlen) == -1) {
+                close(fd);
                 continue;
             }
 
-            if (::listen(fd, 128) == -1) {
-                ::close(fd);
+            if (listen(fd, 128) == -1) {
+                close(fd);
                 continue;
             }
 
-            ::freeaddrinfo(results);
+            freeaddrinfo(results);
             return Socket{fd};
         }
 
-        ::freeaddrinfo(results);
+        freeaddrinfo(results);
         throw std::runtime_error("failed to bind/listen");
     }
 
@@ -88,39 +93,43 @@ class Socket {
         std::string host_string{host};
         std::string port_string{port};
 
-        int rv = ::getaddrinfo(host_string.c_str(), port_string.c_str(), &hints, &results);
+        int rv = getaddrinfo(host_string.c_str(), port_string.c_str(), &hints, &results);
 
-        if (rv != 0)
+        if (rv != 0) {
             throw std::runtime_error(::gai_strerror(rv));
+        }
 
         for (addrinfo *p = results; p != nullptr; p = p->ai_next) {
-            int fd = ::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+            int fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
 
-            if (fd == -1)
-                continue;
-
-            if (::connect(fd, p->ai_addr, p->ai_addrlen) == -1) {
-                ::close(fd);
+            if (fd == -1) {
                 continue;
             }
 
-            ::freeaddrinfo(results);
+            if (connect(fd, p->ai_addr, p->ai_addrlen) == -1) {
+                close(fd);
+                continue;
+            }
+
+            freeaddrinfo(results);
             return Socket{fd};
         }
 
-        ::freeaddrinfo(results);
+        freeaddrinfo(results);
         throw std::runtime_error("failed to connect");
     }
 
     Socket accept_client() const {
         while (true) {
-            int client_fd = ::accept(fd_, nullptr, nullptr);
+            int client_fd = accept(fd_, nullptr, nullptr);
 
-            if (client_fd >= 0)
+            if (client_fd >= 0) {
                 return Socket{client_fd};
+            }
 
-            if (errno == EINTR)
+            if (errno == EINTR) {
                 continue;
+            }
 
             throw std::runtime_error(std::string{"accept: "} + ::strerror(errno));
         }
@@ -133,7 +142,7 @@ class Socket {
         std::size_t received = 0;
 
         while (received < bytes) {
-            ssize_t n = ::recv(fd_, data + received, bytes - received, 0);
+            ssize_t n = recv(fd_, data + received, bytes - received, 0);
 
             if (n == 0) {
                 if (received == 0)
@@ -161,7 +170,7 @@ class Socket {
         std::size_t sent = 0;
 
         while (sent < bytes) {
-            ssize_t n = ::send(fd_, data + sent, bytes - sent, MSG_NOSIGNAL);
+            ssize_t n = send(fd_, data + sent, bytes - sent, MSG_NOSIGNAL);
 
             if (n < 0) {
                 if (errno == EINTR)

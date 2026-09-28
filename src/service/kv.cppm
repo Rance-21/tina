@@ -10,7 +10,7 @@ class KvService {
     rpc::Response handle(const rpc::Request &request) {
         switch (request.method) {
         case rpc::Method::ping:
-            return {request.request_id, rpc::Status::ok, "PONG"};
+            return {request.id, rpc::Status::ok, "PONG"};
 
         case rpc::Method::set:
             return handle_set(request);
@@ -22,7 +22,7 @@ class KvService {
             return handle_del(request);
         }
 
-        return {request.request_id, rpc::Status::bad_request, "unknown method"};
+        return {request.id, rpc::Status::bad_request, "unknown method"};
     }
 
   private:
@@ -34,7 +34,7 @@ class KvService {
         std::size_t separator = request.payload.find('\n');
 
         if (separator == std::string::npos) {
-            return {request.request_id, rpc::Status::bad_request, "SET requires key and value"};
+            return {request.id, rpc::Status::bad_request, "SET requires key and value"};
         }
 
         std::string key = request.payload.substr(0, separator);
@@ -43,27 +43,27 @@ class KvService {
 
         data_[std::move(key)] = std::move(value);
 
-        return {request.request_id, rpc::Status::ok, "OK"};
+        return {request.id, rpc::Status::ok, "OK"};
     }
 
     rpc::Response handle_get(const rpc::Request &request) {
         auto it = data_.find(request.payload);
 
         if (it == data_.end()) {
-            return {request.request_id, rpc::Status::not_found, "NOT_FOUND"};
+            return {request.id, rpc::Status::not_found, "NOT_FOUND"};
         }
 
-        return {request.request_id, rpc::Status::ok, it->second};
+        return {request.id, rpc::Status::ok, it->second};
     }
 
     rpc::Response handle_del(const rpc::Request &request) {
         std::size_t count = data_.erase(request.payload);
 
         if (count == 0) {
-            return {request.request_id, rpc::Status::not_found, "NOT_FOUND"};
+            return {request.id, rpc::Status::not_found, "NOT_FOUND"};
         }
 
-        return {request.request_id, rpc::Status::ok, "OK"};
+        return {request.id, rpc::Status::ok, "OK"};
     }
 
     std::unordered_map<std::string, std::string> data_;
