@@ -2,17 +2,20 @@ module;
 #include <sys/socket.h>
 #include <netdb.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <errno.h>
 #include <string.h>
+
 export module net.socket;
 import std;
 
 export namespace net {
+
 class Socket {
   public:
     ~Socket() {
         if (fd_ >= 0) {
-            close(fd_);
+            ::close(fd_);
         }
     }
 
@@ -38,7 +41,6 @@ class Socket {
         return *this;
     }
 
-    // 创建 bind + listen 完成后的 TCP listening socket。
     static Socket listen_tcp(std::string_view port) {
         addrinfo hints{};
         hints.ai_family = AF_UNSPEC;
@@ -48,8 +50,7 @@ class Socket {
         addrinfo *results = nullptr;
         std::string port_string{port};
 
-        int rv = getaddrinfo(nullptr, port_string.c_str(), &hints, &results);
-
+        int rv = ::getaddrinfo(nullptr, port_string.c_str(), &hints, &results);
         if (rv != 0) {
             throw std::runtime_error(::gai_strerror(rv));
         }
@@ -62,27 +63,26 @@ class Socket {
             }
 
             int yes = 1;
-            setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+            ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
 
-            if (bind(fd, p->ai_addr, p->ai_addrlen) == -1) {
-                close(fd);
+            if (::bind(fd, p->ai_addr, p->ai_addrlen) == -1) {
+                ::close(fd);
                 continue;
             }
 
-            if (listen(fd, 128) == -1) {
-                close(fd);
+            if (::listen(fd, 128) == -1) {
+                ::close(fd);
                 continue;
             }
 
-            freeaddrinfo(results);
+            ::freeaddrinfo(results);
             return Socket{fd};
         }
 
-        freeaddrinfo(results);
+        ::freeaddrinfo(results);
         throw std::runtime_error("failed to bind/listen");
     }
 
-    // 创建一个 TCP socket，并连接服务器。
     static Socket connect_tcp(std::string_view host, std::string_view port) {
         addrinfo hints{};
         hints.ai_family = AF_UNSPEC;
@@ -93,35 +93,52 @@ class Socket {
         std::string host_string{host};
         std::string port_string{port};
 
-        int rv = getaddrinfo(host_string.c_str(), port_string.c_str(), &hints, &results);
-
+        int rv = ::getaddrinfo(host_string.c_str(), port_string.c_str(), &hints, &results);
         if (rv != 0) {
             throw std::runtime_error(::gai_strerror(rv));
         }
 
         for (addrinfo *p = results; p != nullptr; p = p->ai_next) {
-            int fd = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+            int fd = ::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
 
             if (fd == -1) {
                 continue;
             }
 
-            if (connect(fd, p->ai_addr, p->ai_addrlen) == -1) {
-                close(fd);
+            if (::connect(fd, p->ai_addr, p->ai_addrlen) == -1) {
+                ::close(fd);
                 continue;
             }
 
-            freeaddrinfo(results);
+            ::freeaddrinfo(results);
             return Socket{fd};
         }
 
-        freeaddrinfo(results);
+        ::freeaddrinfo(results);
         throw std::runtime_error("failed to connect");
     }
 
-    Socket accept_client() const {
+    // 把 socket 设置为 non-blocking。
+    void set_non_blocking() {
+        int flags = ::fcntl(fd_, F_GETFL, 0);
+
+        if (flags == -1) {
+            throw std::runtime_error(std::string{"fcntl F_GETFL: "} + ::strerror(errno));
+        }
+
+        if (::fcntl(fd_, F_SETFL, flags | O_NONBLOCK) == -1) {
+            throw std::runtime_error(std::string{"fcntl F_SETFL: "} + ::strerror(errno));
+        }
+    }
+
+    // non-blocking accept。
+    // 有连接：
+    //     返回 Socket
+    // 当前 accept queue 为空：
+    //     返回 nullopt
+    std::optional<Socket> try_accept() const {
         while (true) {
-            int client_fd = accept(fd_, nullptr, nullptr);
+            int client_fd = ::accept4(fd_, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
 
             if (client_fd >= 0) {
                 return Socket{client_fd};
@@ -131,29 +148,91 @@ class Socket {
                 continue;
             }
 
-            throw std::runtime_error(std::string{"accept: "} + ::strerror(errno));
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return std::nullopt;
+            }
+
+            throw std::runtime_error(std::string{"accept4: "} + ::strerror(errno));
         }
     }
 
-    // 接收恰好 bytes 字节。
-    // 如果一个字节都没收到连接就关闭，返回 false。
+    // non-blocking recv。
+    // > 0:
+    //     实际读取字节数
+    // == 0:
+    //     对方关闭连接
+    // nullopt:
+    //     当前没有更多数据（EAGAIN）
+    std::optional<std::size_t> try_recv(void *buffer, std::size_t bytes) const {
+        while (true) {
+            ssize_t n = ::recv(fd_, buffer, bytes, 0);
+
+            if (n > 0) {
+                return static_cast<std::size_t>(n);
+            }
+
+            if (n == 0) {
+                return std::size_t{0};
+            }
+
+            if (errno == EINTR) {
+                continue;
+            }
+
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return std::nullopt;
+            }
+
+            throw std::runtime_error(std::string{"recv: "} + ::strerror(errno));
+        }
+    }
+
+    // non-blocking send。
+    // 返回：
+    //     实际发送出去的字节数。
+    // nullopt：
+    //     send buffer 暂时没有空间。
+    std::optional<std::size_t> try_send(const void *buffer, std::size_t bytes) const {
+        while (true) {
+            ssize_t n = ::send(fd_, buffer, bytes, MSG_NOSIGNAL);
+
+            if (n >= 0) {
+                return static_cast<std::size_t>(n);
+            }
+
+            if (errno == EINTR) {
+                continue;
+            }
+
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return std::nullopt;
+            }
+
+            throw std::runtime_error(std::string{"send: "} + ::strerror(errno));
+        }
+    }
+
+    // 下面两个函数暂时保留给 blocking client 使用。
     bool recv_exact(void *buffer, std::size_t bytes) const {
         auto *data = static_cast<char *>(buffer);
+
         std::size_t received = 0;
 
         while (received < bytes) {
-            ssize_t n = recv(fd_, data + received, bytes - received, 0);
+            ssize_t n = ::recv(fd_, data + received, bytes - received, 0);
 
             if (n == 0) {
-                if (received == 0)
+                if (received == 0) {
                     return false;
+                }
 
                 throw std::runtime_error("peer closed in the middle of a frame");
             }
 
             if (n < 0) {
-                if (errno == EINTR)
+                if (errno == EINTR) {
                     continue;
+                }
 
                 throw std::runtime_error(std::string{"recv: "} + ::strerror(errno));
             }
@@ -164,26 +243,36 @@ class Socket {
         return true;
     }
 
-    // send() 不保证一次全部写完，所以这里循环。
     void send_all(const void *buffer, std::size_t bytes) const {
         const auto *data = static_cast<const char *>(buffer);
+
         std::size_t sent = 0;
 
         while (sent < bytes) {
-            ssize_t n = send(fd_, data + sent, bytes - sent, MSG_NOSIGNAL);
+            ssize_t n = ::send(fd_, data + sent, bytes - sent, MSG_NOSIGNAL);
 
             if (n < 0) {
-                if (errno == EINTR)
+                if (errno == EINTR) {
                     continue;
+                }
+
                 throw std::runtime_error(std::string{"send: "} + ::strerror(errno));
             }
+
             sent += static_cast<std::size_t>(n);
         }
+    }
+
+    [[nodiscard]]
+    int native_handle() const noexcept {
+        return fd_;
     }
 
   private:
     explicit Socket(int fd) : fd_(fd) {
     }
-    int fd_;
+
+    int fd_{-1};
 };
+
 } // namespace net
