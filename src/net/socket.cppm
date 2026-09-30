@@ -171,14 +171,17 @@ class Socket {
                 return static_cast<std::size_t>(n);
             }
 
+            // 调用方关闭连接
             if (n == 0) {
                 return std::size_t{0};
             }
 
+            // 中断或挂起
             if (errno == EINTR) {
                 continue;
             }
 
+            // 如果内核 TCP 接收队列空
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 return std::nullopt;
             }

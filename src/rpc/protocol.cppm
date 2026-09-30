@@ -3,6 +3,8 @@ module;
 export module rpc.protocol;
 import std;
 import net.socket;
+
+// 本地和网络的简单协议
 export namespace rpc {
 
 enum class Method : std::uint8_t { ping = 1, set = 2, get = 3, del = 4 };
