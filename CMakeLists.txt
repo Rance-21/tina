@@ -32,7 +32,8 @@ foreach(MODULE_FILE IN LISTS APP_MODULE_CANDIDATES)
     endif()
 endforeach()
 
-add_executable(${PROJECT_NAME} ${APP_SOURCES})
+add_executable(${PROJECT_NAME} ${APP_SOURCES}
+    src/net/event_loop_thread_poll.cppm)
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(${PROJECT_NAME} PRIVATE
