@@ -14,5 +14,21 @@
     },
     // 使用项目预设固定 Clang，避免先前选择的 GCC 工具包覆盖模块编译配置。
     "cmake.useCMakePresets": "always",
-    "cmake.configureOnOpen": true
+    "cmake.configureOnOpen": true,
+    // 保留当前 clangd，与实际编译器同为 22.1.8；模块解析和语义诊断由它负责。
+    "C_Cpp.intelliSenseEngine": "disabled",
+    "clangd.path": "/home/rance/.local/lib/clangd-22.1.8/bin/clangd",
+    "clangd.arguments": [
+        "--experimental-modules-support",
+        "--background-index",
+        "--resource-dir=/usr/lib/clang/22",
+        "--compile-commands-dir=${workspaceFolder}/build",
+        "--query-driver=/usr/bin/clang++"
+    ],
+    "clangd.fallbackFlags": [
+        "-std=c++23",
+        "-Wall",
+        "-Wextra",
+        "-Wpedantic"
+    ]
 }

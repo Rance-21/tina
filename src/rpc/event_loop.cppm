@@ -22,9 +22,7 @@ class EventLoop {
 
             for (const auto &event : events) {
                 if (event.fd == listener_.native_handle()) {
-
                     handle_accept();
-
                     continue;
                 }
 
@@ -64,8 +62,6 @@ class EventLoop {
         auto it = connections_.find(event.fd);
 
         // 理论上不应该出现。
-        // 但 event 可能来自已经被移除的旧状态，
-        // 这里直接忽略即可。
         if (it == connections_.end()) {
             return;
         }
@@ -78,7 +74,6 @@ class EventLoop {
             // EPOLLIN / RDHUP / HUP 都尝试把
             // 内核 receive queue 中剩余的数据读出来。
             if (keep && (event.readable() || event.peer_closed() || event.hangup())) {
-
                 keep = connection.read(kv_);
             }
 
@@ -86,12 +81,10 @@ class EventLoop {
             // 所以不需要等下一轮 EPOLLOUT，
             // 先主动尝试发送一次。
             if (keep && connection.wants_write()) {
-
                 connection.write();
             }
 
             if (keep && connection.finished()) {
-
                 keep = false;
             }
 
@@ -100,7 +93,6 @@ class EventLoop {
             }
         } catch (const std::exception &error) {
             std::cerr << "connection " << event.fd << " error: " << error.what() << '\n';
-
             keep = false;
         }
 

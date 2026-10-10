@@ -1,37 +1,64 @@
 cmake_minimum_required(VERSION 4.3)
-
-# CMake 4.3 中的 import std 支持仍需开启实验开关；升级 CMake 时需检查此 ID。
 set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD 451f2fe2-a8a2-47c3-bc32-94786d8fc91b)
 project(tina LANGUAGES CXX)
 
-# 使用标准 C++23，不启用编译器特有的语言扩展。
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-
-# 为 VS Code 的语言服务导出真实编译参数。
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# 自动查找 src/ 及其子目录中的普通源码和 C++ 模块接口。
-# CONFIGURE_DEPENDS 让新增文件在下次构建时触发 CMake 重新配置。
-file(GLOB_RECURSE APP_SOURCES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/*.cpp")
-file(GLOB_RECURSE APP_MODULES CONFIGURE_DEPENDS "${PROJECT_SOURCE_DIR}/src/*.cppm")
+# Linux 线程与日志库。
+find_package(Threads REQUIRED)
+find_package(spdlog CONFIG REQUIRED)
+
+# 自动发现源码和模块。
+file(GLOB_RECURSE APP_SOURCES CONFIGURE_DEPENDS
+    "${PROJECT_SOURCE_DIR}/src/*.cpp"
+)
+file(GLOB_RECURSE APP_MODULE_CANDIDATES CONFIGURE_DEPENDS
+    "${PROJECT_SOURCE_DIR}/src/*.cppm"
+)
+
+# 只有声明了 export module 的文件才是模块接口；空文件和笔记不参与构建。
+# 修改已有占位文件时也重新配置，补上模块声明后即可自动加入构建。
+set(APP_MODULES)
+foreach(MODULE_FILE IN LISTS APP_MODULE_CANDIDATES)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${MODULE_FILE}")
+    file(STRINGS "${MODULE_FILE}" MODULE_DECLARATION
+        REGEX "^[ \t]*export[ \t]+module[ \t]+"
+    )
+    if(MODULE_DECLARATION)
+        list(APPEND APP_MODULES "${MODULE_FILE}")
+    endif()
+endforeach()
 
 add_executable(${PROJECT_NAME} ${APP_SOURCES})
-# 编译与编辑器使用相同的常用警告选项。
+
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra -Wpedantic)
-endif()
-# 允许源码直接 import std，不需要标准库头文件。
-set_target_properties(${PROJECT_NAME} PROPERTIES CXX_MODULE_STD ON)
-if(APP_MODULES)
-    target_sources(${PROJECT_NAME} PRIVATE FILE_SET CXX_MODULES FILES ${APP_MODULES})
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+    )
 endif()
 
-# 多配置生成器也直接把可执行文件放在项目根目录。
+set_target_properties(${PROJECT_NAME} PROPERTIES
+    CXX_MODULE_STD ON
+)
+
+if(APP_MODULES)
+    target_sources(${PROJECT_NAME}
+        PRIVATE
+        FILE_SET CXX_MODULES
+        FILES ${APP_MODULES}
+    )
+endif()
+
+target_link_libraries(${PROJECT_NAME} PRIVATE
+    Threads::Threads
+    spdlog::spdlog
+)
+
 set_target_properties(${PROJECT_NAME} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "$<1:${PROJECT_SOURCE_DIR}>"
 )
-
-# 以后引入静态库或动态库时，在这里链接其 CMake 目标：
-# target_link_libraries(${PROJECT_NAME} PRIVATE your_library)

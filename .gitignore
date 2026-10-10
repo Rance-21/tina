@@ -6,3 +6,5 @@ local_host.txt
 .clang-format
 .vscode
 /src/epoll/epoll_kl.cppm
+1.cpp
+.clangd
