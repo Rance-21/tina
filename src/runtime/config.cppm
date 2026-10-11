@@ -10,6 +10,7 @@ struct ServerConfig {
     // WorkerPool 中最多允许排队的任务数。
     std::size_t max_pending_tasks{4096};
 
+    // 验证合法性
     void validate() const {
         if (io_threads == 0) {
             throw std::invalid_argument("io_threads must be > 0");
