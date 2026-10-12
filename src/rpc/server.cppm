@@ -101,8 +101,6 @@ void run_server(std::string_view port) {
                     break;
 
                 auto &loop = io_pool.next_loop();
-
-                // 把新 Socket 的所有权移交给目标 I/O 线程。
                 bool accepted = loop.post([socket = std::move(*client), &loop, &workers,
                                            kv]() mutable {
                     auto conn = std::make_shared<Connection>(std::move(socket));

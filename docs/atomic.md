@@ -51,10 +51,10 @@ auto prev = next_id.fetch_sub(1);   // 返回旧值，并将自身减 1
 
 | API | 含义 | 典型场景 |
 | --- | --- | --- |
-| `load(order)` | 原子读 | 读取退出标志 / 统计值 |
-| `store(value, order)` | 原子写 | 发布状态 |
+| `load(order)` | 原子读 | 读取退出标志 / 统计值 | 对齐缓存行，必须读缓存行而不是寄存器
+| `store(value, order)` | 原子写 | 发布状态 | MESI锁
 | `exchange(value, order)` | 原子交换并返回旧值 | “只有第一个调用者能成功启动” |
-| `fetch_add / fetch_sub` | 原子加减并返回旧值 | 计数器、分配唯一 ID |
+| `fetch_add / fetch_sub` | 原子加减并返回旧值 | 计数器、分配唯一 ID | MESI锁
 | `fetch_and / fetch_or / fetch_xor` | 原子位运算 | 状态位掩码 |
 | `compare_exchange_weak/strong` | 比较并有条件地更新（CAS） | 状态机、自旋锁、无锁算法 |
 | `wait / notify_one / notify_all`（C++20） | 等值等待和通知 | 简单状态变化通知 |
@@ -162,13 +162,13 @@ CAS 是实现很多自旋锁、无锁链表和状态机的基本积木，但无�
 
 `std::memory_order` 里最常见的是：
 
-| 顺序 | 人话理解 | 适用 |
-| --- | --- | --- |
-| `relaxed` | 这次操作仍然原子，但不额外承担跨变量同步任务 | 独立计数器、唯一 ID |
-| `release` | 发布：本线程此前的读写不能被移到这次发布之后 | 生产者写 ready |
-| `acquire` | 接收：本线程之后的读写不能被移到这次获取之前 | 消费者读 ready |
-| `acq_rel` | 对同一 RMW 同时获得 acquire 和 release 效果 | CAS / exchange 同时接力同步 |
-| `seq_cst` | 在上述相应约束之外，让所有 seq_cst 原子操作服从一个全局一致的顺序 | 默认值；不确定时先用它 |
+| 顺序       | 人话理解                                                        | 适用 |
+|           | ---                                                            | --- |
+| `relaxed` | 这次操作仍然原子，但不额外承担跨变量同步任务                          | 独立计数器、唯一 ID |
+| `release` | 发布：本线程此前的读写不能被移到这次发布之后                          | 生产者写 ready |
+| `acquire` | 接收：本线程之后的读写不能被移到这次获取之前                          | 消费者读 ready |
+| `acq_rel` | 对同一 RMW 同时获得 acquire 和 release 效果                       | CAS / exchange 同时接力同步 |
+| `seq_cst` | 在上述相应约束之外，让所有 seq_cst 原子操作服从一个全局一致的顺序       | 默认值；不确定时先用它 |
 
 `memory_order_consume` 历史上与依赖关系有关，语义和实现长期有争议，**当前学习与项目代码中不要依赖它**。
 
@@ -190,6 +190,8 @@ void consumer() {
     // 这里读取 payload == 42 是有同步保障的
     use(payload);
 }
+
+// 如果不 release，就算 core2 读到了 ready = true，可能 core1 还在流水线寄存器，core2 会读到脏数据
 ~~~
 
 关键**不是**“ready 的新值比较神奇”，而是：

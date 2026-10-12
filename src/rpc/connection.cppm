@@ -160,6 +160,7 @@ class Connection {
     static constexpr std::size_t max_output = 4 * 1024 * 1024;
 
     net::Socket socket_;
+
     net::Buffer input_;
     net::Buffer output_;
 

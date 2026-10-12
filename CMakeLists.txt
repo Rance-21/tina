@@ -1,6 +1,24 @@
 cmake_minimum_required(VERSION 4.3)
 set(CMAKE_EXPERIMENTAL_CXX_IMPORT_STD 451f2fe2-a8a2-47c3-bc32-94786d8fc91b)
+
+# 普通 cmake -S . -B build 也沿用既有 Clang，避免省略预设时选回系统 GCC。
+# 不覆盖命令行、工具链文件或已有缓存中明确指定的编译器。
+if(NOT DEFINED CMAKE_CXX_COMPILER AND NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+    set(CMAKE_CXX_COMPILER /usr/bin/clang++ CACHE FILEPATH "C++ compiler")
+endif()
 project(tina LANGUAGES CXX)
+
+# VS Code 的 clangd 固定读取 build/；该目录不能混入 GCC 的模块映射和参数。
+# 其他编译器可使用独立构建目录。
+if(CMAKE_BINARY_DIR STREQUAL "${CMAKE_SOURCE_DIR}/build"
+   AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    message(FATAL_ERROR
+        "build/ is reserved for the Clang configuration used by VS Code. "
+        "Current compiler: ${CMAKE_CXX_COMPILER_ID} (${CMAKE_CXX_COMPILER}). "
+        "Restore it with: cmake --fresh --preset default. "
+        "Use a different build directory for other compilers."
+    )
+endif()
 
 set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -63,3 +81,44 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
 set_target_properties(${PROJECT_NAME} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "$<1:${PROJECT_SOURCE_DIR}>"
 )
+
+
+# 启用 CTest。
+enable_testing()
+
+# 测试程序自己的 main()。
+add_executable(test_buffer test/buffer.cpp)
+
+# 测试程序也使用 C++23 import std。
+set_target_properties(test_buffer PROPERTIES
+    CXX_MODULE_STD ON
+)
+
+# 编译测试依赖的 net.buffer 模块。
+target_sources(test_buffer
+    PRIVATE
+    FILE_SET CXX_MODULES
+    FILES src/net/buffer.cppm
+)
+
+# 注册测试。
+add_test(NAME buffer COMMAND test_buffer)
+
+# KV Service 单元测试
+add_executable(test_kv test/kv.cpp)
+
+set_target_properties(test_kv PROPERTIES
+    CXX_MODULE_STD ON
+)
+
+target_sources(test_kv
+    PRIVATE
+    FILE_SET CXX_MODULES
+    FILES
+        src/net/socket.cppm
+        src/rpc/protocol.cppm
+        src/service/kv.cppm
+)
+
+add_test(NAME kv COMMAND test_kv)
+
