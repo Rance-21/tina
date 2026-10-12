@@ -28,13 +28,26 @@ class Connection {
     }
 
     [[nodiscard]]
+    bool draining() const noexcept {
+        return draining_;
+    }
+
+    // 停止读取新的 RPC 请求，已提交的 Worker 任务和响应仍然有效。
+    void begin_shutdown() noexcept {
+        draining_ = true;
+    }
+
+    [[nodiscard]]
     bool finished() const noexcept {
-        return peer_eof_ && pending_ == 0 && output_.empty();
+        return (peer_eof_ || draining_) && pending_ == 0 && output_.empty();
     }
 
     // 读取 Socket，解析请求并提交给线程池。
     // submit(Request) 返回 false 表示拒绝任务，此时关闭连接。
     template <typename Submit> bool read(Submit &&submit) {
+        if (draining_)
+            return true;
+
         std::array<char, 8192> chunk{};
 
         // 每次事件最多读 64 KiB，避免一个连接长期占用 I/O 线程。
@@ -145,12 +158,10 @@ class Connection {
             return false;
 
         put_u32(output_, static_cast<std::uint32_t>(response.payload.size() + 5));
-
         put_u32(output_, response.request_id);
 
         char status = static_cast<char>(response.status);
         output_.append(&status, 1);
-
         output_.append(response.payload.data(), response.payload.size());
 
         return true;
@@ -160,7 +171,6 @@ class Connection {
     static constexpr std::size_t max_output = 4 * 1024 * 1024;
 
     net::Socket socket_;
-
     net::Buffer input_;
     net::Buffer output_;
 
@@ -168,6 +178,7 @@ class Connection {
     std::size_t pending_{0};
 
     bool peer_eof_{false};
+    bool draining_{false};
 };
 
 } // namespace rpc
