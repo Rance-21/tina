@@ -20,7 +20,12 @@ int main(int argc, char *argv[]) {
         std::string command = argv[1];
 
         if (command == "server") {
-            rpc::run_server("3490");
+            if (argc > 3) {
+                std::cerr << "usage: ./tina server [port]\n";
+                return 1;
+            }
+
+            rpc::run_server(argc == 3 ? argv[2] : "3490");
             return 0;
         }
 

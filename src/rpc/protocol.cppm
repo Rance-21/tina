@@ -46,6 +46,7 @@ void send_request(net::Socket &socket, const Request &request) {
     }
 }
 
+// 抛弃
 bool recv_request(net::Socket &socket, Request &request) {
     std::uint32_t network_length;
 

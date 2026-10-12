@@ -122,3 +122,17 @@ target_sources(test_kv
 
 add_test(NAME kv COMMAND test_kv)
 
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+
+add_test(
+    NAME rpc_integration
+    COMMAND
+        "${Python3_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/test/rpc_integration.py"
+        "$<TARGET_FILE:tina>"
+)
+
+set_tests_properties(rpc_integration PROPERTIES
+    TIMEOUT 20
+    RUN_SERIAL TRUE
+)
