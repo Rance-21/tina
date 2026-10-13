@@ -240,6 +240,7 @@ class RpcClient {
                                   [state](net::EpollEvent event) {
                                       state->on_event(event);
                                   });
+                // 唤醒主线程
                 ready->set_value();
             } catch (...) {
                 ready->set_exception(std::current_exception());
