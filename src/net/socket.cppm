@@ -83,6 +83,62 @@ class Socket {
         throw std::runtime_error("failed to bind/listen");
     }
 
+    static Socket connect_tcp_nonblocking(std::string_view host, std::string_view port) {
+        addrinfo hints{};
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+
+        addrinfo *results = nullptr;
+
+        std::string host_string{host};
+        std::string port_string{port};
+
+        int rc = ::getaddrinfo(host_string.c_str(), port_string.c_str(), &hints, &results);
+
+        if (rc != 0)
+            throw std::runtime_error(::gai_strerror(rc));
+
+        int last_error = ECONNREFUSED;
+
+        for (addrinfo *p = results; p != nullptr; p = p->ai_next) {
+            //  不会让当前线程挂起（Sleep），而是立即返回错误码
+            int fd = ::socket(p->ai_family, p->ai_socktype | SOCK_NONBLOCK | SOCK_CLOEXEC,
+                              p->ai_protocol);
+
+            if (fd < 0) {
+                last_error = errno;
+                continue;
+            }
+
+            rc = ::connect(fd, p->ai_addr, p->ai_addrlen);
+
+            if (rc == 0 || (rc < 0 && errno == EINPROGRESS)) {
+                ::freeaddrinfo(results);
+                return Socket{fd};
+            }
+
+            last_error = errno;
+            ::close(fd);
+        }
+
+        ::freeaddrinfo(results);
+
+        throw std::system_error(last_error, std::generic_category(), "connect");
+    }
+
+    void check_connect_result() const {
+        int error = 0;
+        socklen_t length = sizeof(error);
+
+        if (::getsockopt(fd_, SOL_SOCKET, SO_ERROR, &error, &length) < 0) {
+            throw std::system_error(errno, std::generic_category(), "getsockopt");
+        }
+
+        if (error != 0) {
+            throw std::system_error(error, std::generic_category(), "connect");
+        }
+    }
+
     static Socket connect_tcp(std::string_view host, std::string_view port) {
         addrinfo hints{};
         hints.ai_family = AF_UNSPEC;
