@@ -83,52 +83,6 @@ struct KvState {
     service::KvService service;
 };
 
-// 仅在对应的 I/O 线程中读写，供退出时枚举活跃连接。
-struct IoConnections {
-    std::unordered_map<int, std::shared_ptr<rpc::Connection>> entries;
-};
-
-// 记录全体 I/O 线程的活跃连接数，供 Acceptor 等待排空。
-class ConnectionCounter {
-  public:
-    void opened() {
-        std::lock_guard lock(mutex_);
-        ++count_;
-    }
-
-    void closed() {
-        {
-            std::lock_guard lock(mutex_);
-            --count_;
-        }
-        cv_.notify_all();
-    }
-
-    [[nodiscard]] bool wait_empty_for(std::chrono::seconds timeout) {
-        std::unique_lock lock(mutex_);
-        return cv_.wait_for(lock, timeout, [this] {
-            return count_ == 0;
-        });
-    }
-
-  private:
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    std::size_t count_{0};
-};
-
-// 注销监听后再释放 Connection，防止 epoll 中留下旧 fd。
-void close_connection(net::EventLoop &loop, IoConnections &connections, ConnectionCounter &counter,
-                      int fd) {
-    auto it = connections.entries.find(fd);
-    if (it == connections.entries.end())
-        return;
-
-    loop.del_event(fd);
-    connections.entries.erase(it);
-    counter.closed();
-}
-
 net::EpollInterest interests(const rpc::Connection &conn) {
     auto mask = static_cast<net::EpollInterest>(EPOLLONESHOT);
 
@@ -142,10 +96,10 @@ net::EpollInterest interests(const rpc::Connection &conn) {
 }
 
 // 只能由 Connection 所属的 I/O 线程调用。
-void refresh(net::EventLoop &loop, IoConnections &connections, ConnectionCounter &counter,
+void refresh(net::EventLoop &loop, rpc::ConnectionMap &connections, rpc::ConnectionCounter &counter,
              const std::shared_ptr<rpc::Connection> &conn) {
     if (conn->finished()) {
-        close_connection(loop, connections, counter, conn->fd());
+        rpc::close_connection(loop, connections, counter, conn->fd());
         return;
     }
 
@@ -180,7 +134,8 @@ void run_server(std::string_view port) {
 
     struct IoSlot {
         net::EventLoop *loop;
-        std::unique_ptr<IoConnections> connections;
+        // 仅在对应的 I/O 线程中读写，供退出时枚举活跃连接。
+        ConnectionMap connections;
     };
 
     // 析构顺序：先回收 Worker，再回收 I/O 线程，最后销毁连接登记表。
@@ -190,7 +145,7 @@ void run_server(std::string_view port) {
 
     slots.reserve(config.io_threads);
     for (std::size_t i = 0; i < config.io_threads; ++i)
-        slots.push_back({&io_pool.next_loop(), std::make_unique<IoConnections>()});
+        slots.push_back({&io_pool.next_loop(), {}});
 
     std::size_t next_io = 0;
     runtime::log::info("tina listening on port " + std::string(port));
@@ -227,7 +182,7 @@ void run_server(std::string_view port) {
                 IoSlot &slot = slots[next_io];
                 next_io = (next_io + 1) % slots.size();
                 auto *loop = slot.loop;
-                auto *connections = slot.connections.get();
+                auto *connections = &slot.connections;
 
                 bool accepted = loop->post_task([socket = std::move(*client), loop, connections,
                                                  &workers, &connection_counter, kv]() mutable {
@@ -235,7 +190,7 @@ void run_server(std::string_view port) {
                     int fd = conn->fd();
                     std::weak_ptr<Connection> weak = conn;
 
-                    connections->entries.emplace(fd, conn);
+                    connections->.emplace(fd, conn);
                     try {
                         loop->add_event(
                             fd, interests(*conn),
@@ -310,7 +265,7 @@ void run_server(std::string_view port) {
                                 }
                             });
                     } catch (...) {
-                        connections->entries.erase(fd);
+                        connections->.erase(fd);
                         throw;
                     }
                     connection_counter.opened();
@@ -331,11 +286,11 @@ void run_server(std::string_view port) {
     auto frozen = std::make_shared<std::latch>(static_cast<std::ptrdiff_t>(slots.size()));
     for (auto &slot : slots) {
         auto *loop = slot.loop;
-        auto *connections = slot.connections.get();
+        auto *connections = &slot.connections;
 
         bool posted = loop->post_task([loop, connections, &connection_counter, frozen] {
             try {
-                for (auto it = connections->entries.begin(); it != connections->entries.end();) {
+                for (auto it = connections->.begin(); it != connections->.end();) {
                     auto conn = it->second;
                     ++it; // refresh 可能删除当前连接。
                     conn->begin_shutdown();
@@ -367,12 +322,12 @@ void run_server(std::string_view port) {
         auto closed = std::make_shared<std::latch>(static_cast<std::ptrdiff_t>(slots.size()));
         for (auto &slot : slots) {
             auto *loop = slot.loop;
-            auto *connections = slot.connections.get();
+            auto *connections = &slot.connections;
 
             bool posted = loop->post_task([loop, connections, &connection_counter, closed] {
                 try {
-                    while (!connections->entries.empty()) {
-                        int fd = connections->entries.begin()->first;
+                    while (!connections->.empty()) {
+                        int fd = connections->.begin()->first;
                         close_connection(*loop, *connections, connection_counter, fd);
                     }
                 } catch (...) {
