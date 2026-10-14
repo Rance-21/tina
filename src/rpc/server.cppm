@@ -2,7 +2,6 @@ module;
 #include <errno.h>
 #include <pthread.h>
 #include <signal.h>
-#include <sys/epoll.h>
 #include <sys/signalfd.h>
 #include <unistd.h>
 
@@ -20,8 +19,7 @@ import runtime.worker_pool;
 import runtime.log;
 
 import rpc.connection;
-import rpc.protocol;
-import service.kv;
+import rpc.connection_handler;
 
 namespace {
 
@@ -77,39 +75,6 @@ class StopSignals {
     int fd_{-1};
 };
 
-// 所有 Worker 共享一个 KV Service。
-struct KvState {
-    std::mutex mutex;
-    service::KvService service;
-};
-
-net::EpollInterest interests(const rpc::Connection &conn) {
-    auto mask = static_cast<net::EpollInterest>(EPOLLONESHOT);
-
-    if (!conn.peer_eof() && !conn.draining())
-        mask = mask | net::EpollInterest::read | net::EpollInterest::peer_closed;
-
-    if (conn.wants_write())
-        mask = mask | net::EpollInterest::write;
-
-    return mask;
-}
-
-// 只能由 Connection 所属的 I/O 线程调用。
-void refresh(net::EventLoop &loop, rpc::ConnectionMap &connections, rpc::ConnectionCounter &counter,
-             const std::shared_ptr<rpc::Connection> &conn) {
-    if (conn->finished()) {
-        rpc::close_connection(loop, connections, counter, conn->fd());
-        return;
-    }
-
-    // 没有新数据要读，也没有需要发送的数据，等 Worker 回调即可。
-    if ((conn->peer_eof() || conn->draining()) && !conn->wants_write())
-        return;
-
-    loop.modify_inst(conn->fd(), interests(*conn));
-}
-
 } // namespace
 
 export namespace rpc {
@@ -129,7 +94,7 @@ void run_server(std::string_view port) {
     accept_epoll.add(listener->native_handle(), net::EpollInterest::read);
     accept_epoll.add(signals.fd(), net::EpollInterest::read);
 
-    auto kv = std::make_shared<KvState>();
+    auto kv = std::make_shared<detail::KvState>();
     ConnectionCounter connection_counter;
 
     struct IoSlot {
@@ -181,95 +146,10 @@ void run_server(std::string_view port) {
 
                 IoSlot &slot = slots[next_io];
                 next_io = (next_io + 1) % slots.size();
-                auto *loop = slot.loop;
-                auto *connections = &slot.connections;
 
-                bool accepted = loop->post_task([socket = std::move(*client), loop, connections,
-                                                 &workers, &connection_counter, kv]() mutable {
-                    auto conn = std::make_shared<Connection>(std::move(socket));
-                    int fd = conn->fd();
-                    std::weak_ptr<Connection> weak = conn;
-
-                    connections->emplace(fd, conn);
-                    try {
-                        loop->add_event(
-                            fd, interests(*conn),
-                            [conn, weak, loop, connections, &workers, &connection_counter,
-                             kv](net::EpollEvent event) {
-                                if (event.error()) {
-                                    close_connection(*loop, *connections, connection_counter,
-                                                     conn->fd());
-                                    return;
-                                }
-
-                                try {
-                                    if (!conn->peer_eof() && !conn->draining() &&
-                                        (event.readable() || event.peer_closed() ||
-                                         event.hangup())) {
-                                        bool ok = conn->read([&](Request request) -> bool {
-                                            return workers.try_submit([request = std::move(request),
-                                                                       weak, loop, connections,
-                                                                       &connection_counter,
-                                                                       kv]() mutable {
-                                                Response response{request.id, Status::bad_request,
-                                                                  "internal server error"};
-                                                try {
-                                                    std::lock_guard lock(kv->mutex);
-                                                    response = kv->service.handle(request);
-                                                } catch (...) {
-                                                    // 将错误响应返回客户端。
-                                                }
-
-                                                (void)loop->post_task(
-                                                    [weak, loop, connections, &connection_counter,
-                                                     response = std::move(response)]() mutable {
-                                                        auto connection = weak.lock();
-                                                        if (!connection)
-                                                            return;
-
-                                                        try {
-                                                            if (!connection->complete_response(
-                                                                    response)) {
-                                                                close_connection(*loop,
-                                                                                 *connections,
-                                                                                 connection_counter,
-                                                                                 connection->fd());
-                                                                return;
-                                                            }
-                                                            if (connection->wants_write())
-                                                                connection->write();
-                                                            refresh(*loop, *connections,
-                                                                    connection_counter, connection);
-                                                        } catch (...) {
-                                                            close_connection(*loop, *connections,
-                                                                             connection_counter,
-                                                                             connection->fd());
-                                                        }
-                                                    });
-                                            });
-                                        });
-
-                                        if (!ok) {
-                                            close_connection(*loop, *connections,
-                                                             connection_counter, conn->fd());
-                                            return;
-                                        }
-                                    }
-
-                                    if (conn->wants_write())
-                                        conn->write();
-                                    refresh(*loop, *connections, connection_counter, conn);
-                                } catch (...) {
-                                    close_connection(*loop, *connections, connection_counter,
-                                                     conn->fd());
-                                }
-                            });
-                    } catch (...) {
-                        connections->erase(fd);
-                        throw;
-                    }
-                    connection_counter.opened();
-                });
+                bool accepted = detail::post_connection(std::move(*client), *slot.loop,
+                                                        slot.connections, workers,
+                                                        connection_counter, kv);
 
                 if (!accepted)
                     runtime::log::warn("I/O EventLoop rejected connection");
@@ -292,9 +172,9 @@ void run_server(std::string_view port) {
             try {
                 for (auto it = connections->begin(); it != connections->end();) {
                     auto conn = it->second;
-                    ++it; // refresh 可能删除当前连接。
+                    ++it; // refresh_connection 可能删除当前连接。
                     conn->begin_shutdown();
-                    refresh(*loop, *connections, connection_counter, conn);
+                    detail::refresh_connection(*loop, *connections, connection_counter, conn);
                 }
             } catch (...) {
                 // 不允许异常跳过屏障通知，否则管理线程会永久等待。
