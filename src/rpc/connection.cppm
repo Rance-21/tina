@@ -3,6 +3,7 @@ export module rpc.connection;
 import std;
 import net.buffer;
 import net.socket;
+import net.event_loop;
 import rpc.protocol;
 
 export namespace rpc {
@@ -183,5 +184,48 @@ class Connection {
     // true 时已经清空
     bool draining_{false};
 };
+
+using ConnectionMap = std::unordered_map<int, std::shared_ptr<Connection>>;
+
+// 记录全体 I/O 线程的活跃连接数，供 Acceptor 等待排空。
+class ConnectionCounter {
+  public:
+    void opened() {
+        std::lock_guard lock(mutex_);
+        ++count_;
+    }
+
+    void closed() {
+        {
+            std::lock_guard lock(mutex_);
+            --count_;
+        }
+        cv_.notify_all();
+    }
+
+    [[nodiscard]] bool wait_empty_for(std::chrono::seconds timeout) {
+        std::unique_lock lock(mutex_);
+        return cv_.wait_for(lock, timeout, [this] {
+            return count_ == 0;
+        });
+    }
+
+  private:
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::size_t count_{0};
+};
+
+// 注销监听后再释放 Connection，防止 epoll 中留下旧 fd。
+void close_connection(net::EventLoop &loop, ConnectionMap &connections, ConnectionCounter &counter,
+                      int fd) {
+    auto it = connections.find(fd);
+    if (it == connections.end())
+        return;
+
+    loop.del_event(fd);
+    connections.erase(it);
+    counter.closed();
+}
 
 } // namespace rpc
