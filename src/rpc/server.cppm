@@ -190,7 +190,7 @@ void run_server(std::string_view port) {
                     int fd = conn->fd();
                     std::weak_ptr<Connection> weak = conn;
 
-                    connections->.emplace(fd, conn);
+                    connections->emplace(fd, conn);
                     try {
                         loop->add_event(
                             fd, interests(*conn),
@@ -265,7 +265,7 @@ void run_server(std::string_view port) {
                                 }
                             });
                     } catch (...) {
-                        connections->.erase(fd);
+                        connections->erase(fd);
                         throw;
                     }
                     connection_counter.opened();
@@ -290,7 +290,7 @@ void run_server(std::string_view port) {
 
         bool posted = loop->post_task([loop, connections, &connection_counter, frozen] {
             try {
-                for (auto it = connections->.begin(); it != connections->.end();) {
+                for (auto it = connections->begin(); it != connections->end();) {
                     auto conn = it->second;
                     ++it; // refresh 可能删除当前连接。
                     conn->begin_shutdown();
@@ -326,8 +326,8 @@ void run_server(std::string_view port) {
 
             bool posted = loop->post_task([loop, connections, &connection_counter, closed] {
                 try {
-                    while (!connections->.empty()) {
-                        int fd = connections->.begin()->first;
+                    while (!connections->empty()) {
+                        int fd = connections->begin()->first;
                         close_connection(*loop, *connections, connection_counter, fd);
                     }
                 } catch (...) {
