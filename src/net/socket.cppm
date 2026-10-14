@@ -139,41 +139,6 @@ class Socket {
         }
     }
 
-    static Socket connect_tcp(std::string_view host, std::string_view port) {
-        addrinfo hints{};
-        hints.ai_family = AF_UNSPEC;
-        hints.ai_socktype = SOCK_STREAM;
-
-        addrinfo *results = nullptr;
-
-        std::string host_string{host};
-        std::string port_string{port};
-
-        int rv = ::getaddrinfo(host_string.c_str(), port_string.c_str(), &hints, &results);
-        if (rv != 0) {
-            throw std::runtime_error(::gai_strerror(rv));
-        }
-
-        for (addrinfo *p = results; p != nullptr; p = p->ai_next) {
-            int fd = ::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
-
-            if (fd == -1) {
-                continue;
-            }
-
-            if (::connect(fd, p->ai_addr, p->ai_addrlen) == -1) {
-                ::close(fd);
-                continue;
-            }
-
-            ::freeaddrinfo(results);
-            return Socket{fd};
-        }
-
-        ::freeaddrinfo(results);
-        throw std::runtime_error("failed to connect");
-    }
-
     // 把 socket 设置为 non-blocking。
     void set_non_blocking() {
         int flags = ::fcntl(fd_, F_GETFL, 0);
@@ -268,57 +233,6 @@ class Socket {
             }
 
             throw std::runtime_error(std::string{"send: "} + ::strerror(errno));
-        }
-    }
-
-    // 下面两个函数暂时保留给 blocking client 使用。
-    bool recv_exact(void *buffer, std::size_t bytes) const {
-        auto *data = static_cast<char *>(buffer);
-
-        std::size_t received = 0;
-
-        while (received < bytes) {
-            ssize_t n = ::recv(fd_, data + received, bytes - received, 0);
-
-            if (n == 0) {
-                if (received == 0) {
-                    return false;
-                }
-
-                throw std::runtime_error("peer closed in the middle of a frame");
-            }
-
-            if (n < 0) {
-                if (errno == EINTR) {
-                    continue;
-                }
-
-                throw std::runtime_error(std::string{"recv: "} + ::strerror(errno));
-            }
-
-            received += static_cast<std::size_t>(n);
-        }
-
-        return true;
-    }
-
-    void send_all(const void *buffer, std::size_t bytes) const {
-        const auto *data = static_cast<const char *>(buffer);
-
-        std::size_t sent = 0;
-
-        while (sent < bytes) {
-            ssize_t n = ::send(fd_, data + sent, bytes - sent, MSG_NOSIGNAL);
-
-            if (n < 0) {
-                if (errno == EINTR) {
-                    continue;
-                }
-
-                throw std::runtime_error(std::string{"send: "} + ::strerror(errno));
-            }
-
-            sent += static_cast<std::size_t>(n);
         }
     }
 

@@ -7,6 +7,7 @@ import rpc.protocol;
 
 export namespace rpc {
 
+// Server 用
 class Connection {
   public:
     explicit Connection(net::Socket socket) : socket_(std::move(socket)) {

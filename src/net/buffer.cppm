@@ -68,8 +68,7 @@ class Buffer {
             return;
         }
 
-        // 前面至少浪费 4 KB，并且已经占整个 storage 的一半以上，
-        // 才真正移动剩余数据。
+        // 前面至少浪费 4 KB，并且已经占整个 storage 的一半以上， 才真正移动剩余数据。
         if (read_index_ < 4096 || read_index_ < storage_.size() / 2) {
             return;
         }
