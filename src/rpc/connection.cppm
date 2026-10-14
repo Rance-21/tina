@@ -179,6 +179,8 @@ class Connection {
     std::size_t pending_{0};
 
     bool peer_eof_{false};
+
+    // true 时已经清空
     bool draining_{false};
 };
 

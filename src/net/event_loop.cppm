@@ -39,44 +39,44 @@ class EventLoop {
     EventLoop &operator=(const EventLoop &) = delete;
 
     // 在所属 I/O 线程调用，注册一个 Socket 的事件处理函数。
-    void watch(int fd, EpollInterest interest, Handler handler) {
+    void add_event(int fd, EpollInterest interest, Handler handler) {
         if (fd < 0 || fd == wake_fd_ || !handler)
             throw std::invalid_argument("invalid event handler");
 
-        if (handlers_.contains(fd))
+        if (event_handlers_.contains(fd))
             throw std::logic_error("fd already registered");
 
         // shared_ptr 保证回调执行期间可以安全注销自身。
         auto callback = std::make_shared<Handler>(std::move(handler));
-        handlers_.emplace(fd, std::move(callback));
+        event_handlers_.emplace(fd, std::move(callback));
 
         try {
             epoll_.add(fd, interest);
         } catch (...) {
-            handlers_.erase(fd);
+            event_handlers_.erase(fd);
             throw;
         }
     }
 
     // 更新文件 inst
-    void modify(int fd, EpollInterest interest) {
-        if (!handlers_.contains(fd))
+    void modify_inst(int fd, EpollInterest interest) {
+        if (!event_handlers_.contains(fd))
             throw std::logic_error("fd not registered");
 
         epoll_.modify(fd, interest);
     }
 
     // 必须先注销事件，再关闭 Socket。
-    void unwatch(int fd) {
-        if (!handlers_.contains(fd))
+    void del_event(int fd) {
+        if (!event_handlers_.contains(fd))
             return;
 
         epoll_.remove(fd);
-        handlers_.erase(fd);
+        event_handlers_.erase(fd);
     }
 
     // 提交一个任务
-    [[nodiscard]] bool post(Task task) {
+    [[nodiscard]] bool post_task(Task task) {
         if (!task)
             return false;
 
@@ -102,12 +102,12 @@ class EventLoop {
             for (const auto event : epoll_.wait()) {
                 if (event.fd == wake_fd_) {
                     drain_wakeup();
-                    run_pending();
+                    run_pending_tasks();
                     continue;
                 }
 
-                auto it = handlers_.find(event.fd);
-                if (it == handlers_.end())
+                auto it = event_handlers_.find(event.fd);
+                if (it == event_handlers_.end())
                     continue;
 
                 // 保持回调存活，即使它调用 unwatch()。
@@ -123,15 +123,15 @@ class EventLoop {
 
                     // 出错的回调不再接收新事件。
                     try {
-                        unwatch(event.fd);
+                        del_event(event.fd);
                     } catch (...) {
                     }
                 }
             }
         }
 
-        // 停止时执行已经接受的跨线程任务。
-        run_pending();
+        // 停止时执行剩下的的跨线程任务。
+        run_pending_tasks();
     }
 
     // 可以由其他线程调用。
@@ -165,6 +165,7 @@ class EventLoop {
         }
     }
 
+    // 清零 wakefd 计数器
     void drain_wakeup() noexcept {
         std::uint64_t value;
 
@@ -184,7 +185,7 @@ class EventLoop {
         }
     }
 
-    void run_pending() {
+    void run_pending_tasks() {
         std::deque<Task> pending;
 
         {
@@ -208,8 +209,7 @@ class EventLoop {
     Epoll epoll_;
     int wake_fd_{-1};
 
-    // 仅所属 I/O 线程访问。
-    std::unordered_map<int, std::shared_ptr<Handler>> handlers_;
+    std::unordered_map<int, std::shared_ptr<Handler>> event_handlers_;
 
     // 多生产者、单消费者任务队列。
     std::mutex mutex_;

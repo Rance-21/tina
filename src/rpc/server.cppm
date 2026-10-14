@@ -124,7 +124,7 @@ void close_connection(net::EventLoop &loop, IoConnections &connections, Connecti
     if (it == connections.entries.end())
         return;
 
-    loop.unwatch(fd);
+    loop.del_event(fd);
     connections.entries.erase(it);
     counter.closed();
 }
@@ -153,7 +153,7 @@ void refresh(net::EventLoop &loop, IoConnections &connections, ConnectionCounter
     if ((conn->peer_eof() || conn->draining()) && !conn->wants_write())
         return;
 
-    loop.modify(conn->fd(), interests(*conn));
+    loop.modify_inst(conn->fd(), interests(*conn));
 }
 
 } // namespace
@@ -229,15 +229,15 @@ void run_server(std::string_view port) {
                 auto *loop = slot.loop;
                 auto *connections = slot.connections.get();
 
-                bool accepted = loop->post([socket = std::move(*client), loop, connections,
-                                            &workers, &connection_counter, kv]() mutable {
+                bool accepted = loop->post_task([socket = std::move(*client), loop, connections,
+                                                 &workers, &connection_counter, kv]() mutable {
                     auto conn = std::make_shared<Connection>(std::move(socket));
                     int fd = conn->fd();
                     std::weak_ptr<Connection> weak = conn;
 
                     connections->entries.emplace(fd, conn);
                     try {
-                        loop->watch(
+                        loop->add_event(
                             fd, interests(*conn),
                             [conn, weak, loop, connections, &workers, &connection_counter,
                              kv](net::EpollEvent event) {
@@ -265,7 +265,7 @@ void run_server(std::string_view port) {
                                                     // 将错误响应返回客户端。
                                                 }
 
-                                                (void)loop->post(
+                                                (void)loop->post_task(
                                                     [weak, loop, connections, &connection_counter,
                                                      response = std::move(response)]() mutable {
                                                         auto connection = weak.lock();
@@ -333,7 +333,7 @@ void run_server(std::string_view port) {
         auto *loop = slot.loop;
         auto *connections = slot.connections.get();
 
-        bool posted = loop->post([loop, connections, &connection_counter, frozen] {
+        bool posted = loop->post_task([loop, connections, &connection_counter, frozen] {
             try {
                 for (auto it = connections->entries.begin(); it != connections->entries.end();) {
                     auto conn = it->second;
@@ -369,7 +369,7 @@ void run_server(std::string_view port) {
             auto *loop = slot.loop;
             auto *connections = slot.connections.get();
 
-            bool posted = loop->post([loop, connections, &connection_counter, closed] {
+            bool posted = loop->post_task([loop, connections, &connection_counter, closed] {
                 try {
                     while (!connections->entries.empty()) {
                         int fd = connections->entries.begin()->first;

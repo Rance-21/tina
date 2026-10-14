@@ -120,7 +120,7 @@ class RpcClient {
             if (!connected || !output.empty())
                 interest = interest | net::EpollInterest::write;
 
-            loop.modify(socket->native_handle(), interest);
+            loop.modify_inst(socket->native_handle(), interest);
         }
 
         // 网络连接失败或客户端关闭，所有尚未完成的请求都失败。
@@ -132,7 +132,7 @@ class RpcClient {
 
             if (socket) {
                 try {
-                    loop.unwatch(socket->native_handle());
+                    loop.del_event(socket->native_handle());
                 } catch (...) {
                 }
 
@@ -141,7 +141,7 @@ class RpcClient {
 
             if (timer_fd >= 0) {
                 try {
-                    loop.unwatch(timer_fd);
+                    loop.del_event(timer_fd);
                 } catch (...) {
                 }
 
@@ -389,21 +389,22 @@ class RpcClient {
         auto ready = std::make_shared<std::promise<void>>();
         auto future = ready->get_future();
 
-        bool posted = loop_->post([state = state_, ready] {
+        bool posted = loop_->post_task([state = state_, ready] {
             try {
                 // Socket 和 timerfd 注册到同一个 EventLoop。
-                state->loop.watch(state->socket->native_handle(),
-                                  net::EpollInterest::read | net::EpollInterest::write |
-                                      net::EpollInterest::peer_closed,
-                                  [state](net::EpollEvent event) {
-                                      state->on_event(event);
-                                  });
+                state->loop.add_event(state->socket->native_handle(),
+                                      net::EpollInterest::read | net::EpollInterest::write |
+                                          net::EpollInterest::peer_closed,
+                                      [state](net::EpollEvent event) {
+                                          state->on_event(event);
+                                      });
 
-                state->loop.watch(state->timer_fd, net::EpollInterest::read,
-                                  [state](net::EpollEvent event) {
-                                      state->on_timer(event);
-                                  });
+                state->loop.add_event(state->timer_fd, net::EpollInterest::read,
+                                      [state](net::EpollEvent event) {
+                                          state->on_timer(event);
+                                      });
 
+                // 唤醒 ready
                 ready->set_value();
 
             } catch (...) {
@@ -422,7 +423,7 @@ class RpcClient {
     ~RpcClient() {
         // 不允许与 async_call 并发析构。
         try {
-            (void)loop_->post([state = state_] {
+            (void)loop_->post_task([state = state_] {
                 state->fail(std::make_exception_ptr(std::runtime_error("RPC client destroyed")));
             });
         } catch (...) {
@@ -450,8 +451,8 @@ class RpcClient {
         const auto deadline = Clock::now() + timeout;
 
         try {
-            if (!loop_->post([state = state_, method, payload = std::move(payload), deadline,
-                              promise]() mutable {
+            if (!loop_->post_task([state = state_, method, payload = std::move(payload), deadline,
+                                   promise]() mutable {
                     try {
                         state->submit(method, std::move(payload), deadline, promise);
                     } catch (...) {
