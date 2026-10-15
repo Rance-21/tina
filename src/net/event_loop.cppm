@@ -154,6 +154,7 @@ class EventLoop {
             if (n == sizeof(value))
                 return;
 
+            // 连接中断，再试一次
             if (n < 0 && errno == EINTR)
                 continue;
 

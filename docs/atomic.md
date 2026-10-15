@@ -251,7 +251,7 @@ void consumer() {
 
 ## 5. atomic_flag 与 TTAS 自旋锁：和你的数据库锁对应起来
 
-你之前做过 TTAS（Test-and-Test-and-Set）锁。为什么要“先普通读取，再尝试写锁”？
+你之前做过 TTAS（Test-and-Test-and-_Set_）锁。为什么要“先普通读取，再尝试写锁”？
 
 因为多个核心反复执行会修改缓存行所有权的 RMW，会造成更多缓存一致性流量。TTAS 在锁被占用时尽量只读，只有看起来空闲才执行 RMW。
 

@@ -28,7 +28,7 @@ RpcClient::RpcClient(std::string_view host, std::string_view port)
         try {
             State::start(state);
 
-            // 唤醒 ready
+            // promise 唤醒 ready
             ready->set_value();
         } catch (...) {
             auto error = std::current_exception();
@@ -107,7 +107,7 @@ RpcClient::State::~State() {
 
 // 所有 RPC 共用一个 timerfd。
 // 每次只为最早的 Deadline 设置定时器。
-void RpcClient::State::arm_timer() {
+void RpcClient::State::update_timer() {
     itimerspec spec{};
 
     if (!deadlines.empty()) {
@@ -140,13 +140,15 @@ void RpcClient::State::on_timer(net::EpollEvent event) {
 
         std::uint64_t expirations{};
 
-        // 必须读取 timerfd，清除可读状态。
+        // 读取 timerfd，清除可读状态。
         while (true) {
             const ssize_t n = ::read(timer_fd, &expirations, sizeof(expirations));
 
+            // 如果没有超时却读到
             if (n == sizeof(expirations) || (n < 0 && errno == EAGAIN))
                 break;
 
+            // syscall 被打断
             if (n < 0 && errno == EINTR)
                 continue;
 
@@ -165,17 +167,17 @@ void RpcClient::State::on_timer(net::EpollEvent event) {
 
             expired_ids.insert(id);
 
-            auto it = pending.find(id);
+            auto it = pendings.find(id);
             auto promise = it->second.promise;
 
-            pending.erase(it);
+            pendings.erase(it);
             deadlines.erase(deadlines.begin());
 
             promise->set_exception(std::make_exception_ptr(TimeoutError{}));
         }
 
         // 为剩余请求中最近的 Deadline 重新计时。
-        arm_timer();
+        update_timer();
     } catch (...) {
         fail(std::current_exception());
     }

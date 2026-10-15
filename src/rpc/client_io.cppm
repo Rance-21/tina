@@ -60,6 +60,8 @@ void RpcClient::State::on_event(net::EpollEvent event) {
 void RpcClient::State::refresh() {
     auto interest = net::EpollInterest::read | net::EpollInterest::peer_closed;
 
+    // Socket 在大部分时间里都是可写的。如果一直监听 EPOLLOUT，即使没有数据需要发送，epoll
+    // 也会不断返回可写事件，造成不必要的唤醒
     if (!connected || !output.empty())
         interest = interest | net::EpollInterest::write;
 
@@ -92,14 +94,14 @@ void RpcClient::State::fail(std::exception_ptr error) noexcept {
         timer_fd = -1;
     }
 
-    for (auto &[id, request] : pending) {
+    for (auto &[id, request] : pendings) {
         try {
             request.promise->set_exception(error);
         } catch (...) {
         }
     }
 
-    pending.clear();
+    pendings.clear();
     deadlines.clear();
     expired_ids.clear();
 }
@@ -108,7 +110,7 @@ void RpcClient::State::fail(std::exception_ptr error) noexcept {
 // Deadline 在调用线程计算，不在这里重新开始计时。
 void RpcClient::State::send(Method method, std::string payload, Clock::time_point deadline,
                             Promise promise) {
-    if (closed || payload.size() > max_payload_size || pending.size() >= max_inflight ||
+    if (closed || payload.size() > max_payload_size || pendings.size() >= max_inflight ||
         output.readable_bytes() + payload.size() + 9 > max_output) {
         promise->set_exception(std::make_exception_ptr(
             std::runtime_error("RPC client closed or request limit exceeded")));
@@ -127,11 +129,11 @@ void RpcClient::State::send(Method method, std::string payload, Clock::time_poin
 
         if (next_id == 0)
             next_id = 1;
-    } while (id == 0 || pending.contains(id) || expired_ids.contains(id));
+    } while (id == 0 || pendings.contains(id) || expired_ids.contains(id));
 
     const bool earliest = deadlines.empty() || DeadlineEntry{deadline, id} < *deadlines.begin();
 
-    pending.emplace(id, Pending{promise, deadline});
+    pendings.emplace(id, Pending{promise, deadline});
     deadlines.emplace(deadline, id);
 
     // 请求帧：[length][request_id][method][payload]
@@ -144,7 +146,7 @@ void RpcClient::State::send(Method method, std::string payload, Clock::time_poin
 
     // 避免每次提交请求都调用 timerfd_settime。EventLoop::post(
     if (earliest)
-        arm_timer();
+        update_timer();
 
     if (connected)
         send_pending();
@@ -195,9 +197,9 @@ void RpcClient::State::decode() {
             break;
 
         const std::uint32_t id = get_u32(frame + 4);
-        auto it = pending.find(id);
+        auto it = pendings.find(id);
 
-        if (it == pending.end()) {
+        if (it == pendings.end()) {
             // 已经超时的请求可能晚些时候才返回。
             // 识别后直接丢弃，不影响其他 Future。
             if (expired_ids.erase(id) == 0)
@@ -213,7 +215,7 @@ void RpcClient::State::decode() {
         const bool earliest = !deadlines.empty() && deadlines.begin()->second == id;
 
         deadlines.erase(DeadlineEntry{deadline, id});
-        pending.erase(it);
+        pendings.erase(it);
 
         if (Clock::now() >= deadline) {
             // 即使 timerfd 事件还没有执行，
@@ -232,7 +234,7 @@ void RpcClient::State::decode() {
 
         // 仅当最近的 Deadline 改变时才修改 timerfd。
         if (earliest)
-            arm_timer();
+            update_timer();
     }
 }
 

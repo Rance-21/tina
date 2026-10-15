@@ -101,7 +101,7 @@ class Socket {
         int last_error = ECONNREFUSED;
 
         for (addrinfo *p = results; p != nullptr; p = p->ai_next) {
-            //  不会让当前线程挂起（Sleep），而是立即返回错误码
+            // 不会让当前线程挂起（Sleep），而是立即返回错误码
             int fd = ::socket(p->ai_family, p->ai_socktype | SOCK_NONBLOCK | SOCK_CLOEXEC,
                               p->ai_protocol);
 
@@ -112,6 +112,7 @@ class Socket {
 
             rc = ::connect(fd, p->ai_addr, p->ai_addrlen);
 
+            // 已经 connect 上或者正在建立
             if (rc == 0 || (rc < 0 && errno == EINPROGRESS)) {
                 ::freeaddrinfo(results);
                 return Socket{fd};

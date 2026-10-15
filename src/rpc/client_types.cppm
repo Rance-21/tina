@@ -38,7 +38,8 @@ class RpcClient {
     // 服务器持续不响应时，不允许无限积累过期请求记录。
     static constexpr std::size_t max_expired_ids = 1024;
 
-    // 以下状态只能由客户端所属的 I/O 线程操作。
+    // State 是供 I/O 线程操作的连接运行状态，
+    // 管理当前这条 TCP 连接上所有尚未完成的 RPC
     struct State {
         explicit State(net::Socket s, net::EventLoop &l);
         ~State();
@@ -65,8 +66,8 @@ class RpcClient {
         net::Buffer input;
         net::Buffer output;
 
-        // request_id -> Pending
-        std::unordered_map<std::uint32_t, Pending> pending;
+        // request_id -> Pending，目前单线程执行，没必要加锁
+        std::unordered_map<std::uint32_t, Pending> pendings;
 
         // 按截止时间排序，begin() 永远是最近要超时的请求。
         std::set<DeadlineEntry> deadlines;
@@ -85,7 +86,7 @@ class RpcClient {
         void send_pending();
         void receive();
         void decode();
-        void arm_timer();
+        void update_timer();
     };
 
     net::EventLoopThreadPool io_pool_;
