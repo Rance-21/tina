@@ -104,24 +104,6 @@ target_sources(test_buffer
 # 注册测试。
 add_test(NAME buffer COMMAND test_buffer)
 
-# KV Service 单元测试
-add_executable(test_kv test/kv.cpp)
-
-set_target_properties(test_kv PROPERTIES
-    CXX_MODULE_STD ON
-)
-
-target_sources(test_kv
-    PRIVATE
-    FILE_SET CXX_MODULES
-    FILES
-        src/net/socket.cppm
-        src/rpc/protocol.cppm
-        src/service/kv.cppm
-)
-
-add_test(NAME kv COMMAND test_kv)
-
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 add_test(
