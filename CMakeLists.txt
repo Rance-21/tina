@@ -118,3 +118,25 @@ set_tests_properties(rpc_integration PROPERTIES
     TIMEOUT 20
     RUN_SERIAL TRUE
 )
+
+add_executable(test_broker_protocol
+    test/broker_protocol.cpp
+)
+
+set_target_properties(test_broker_protocol PROPERTIES
+    CXX_MODULE_STD ON
+)
+
+target_sources(test_broker_protocol
+    PRIVATE
+    FILE_SET CXX_MODULES
+    FILES
+        src/net/socket.cppm
+        src/rpc/protocol.cppm
+        src/broker/protocol.cppm
+)
+
+add_test(
+    NAME broker_protocol
+    COMMAND test_broker_protocol
+)
