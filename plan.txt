@@ -393,3 +393,67 @@ io_uring extension
 课程我现在甚至不会硬塞进计划。MIT 6.1060 可以在你进入性能阶段以后，发现某一块比如 cache/parallel scaling 特别想深入时再挑内容看。它不是一个必须完成的任务。
 这样最符合你现在的状态：不是再接受一次完整本科教育，而是利用你已有的 CSAPP/C++/并发基础，直接把缺失的 Linux Server 能力补起来，然后在 Performance 上做深
 这是你给我的规划，我现在决定结束这快一个月左右的犹豫（虽然中间也学习了Cuda，做了半个数据库），按照这个计划来，这个对话用来进行总的规划学习，每一个部分会新开对话
+
+
+二、八个开发阶段
+
+阶段 1：消息协议
+基础
+
+rpc/protocol.cppm、broker/protocol.cppm
+增加 PUBLISH、FETCH、COMMIT_OFFSET 三种 RPC Method，设计 Topic、Partition ID、Offset、消息内容及返回状态的二进制编码。
+验收：各种消息请求可以正确编解码，不破坏已有 KV RPC。
+
+
+阶段 2：内存版 Message Broker
+核心逻辑
+
+service/partition.cppm、service/broker.cppm
+实现 Partition、递增 Offset、并发 PUBLISH 和 FETCH。初期消息存在内存中，只使用一个 Topic、一个 Partition，先保证顺序正确。
+验收：多个线程同时发布消息，Offset 唯一、连续，按 Offset 可以正确读取数据。
+
+
+阶段 3：接入 RPC
+第一个完整闭环
+
+rpc/connection_handler.cppm、rpc/server.cppm，随后完善 broker/client.cppm 和 CLI。
+Broker 与 KV 使用独立的业务锁，保持现有 WorkerPool 和 EventLoop。通过两个真实进程完成发布和消费。
+验收：./tina publish 和 ./tina consume 可通过 TCP 工作，原有 KV 测试通过。
+
+
+阶段 4：消息日志持久化
+Linux 文件 I/O
+
+service/log.cppm、修改 service/partition.cppm
+从内存消息转成 Append-only Log，使用 write/pwrite 追加消息；增加消息校验、启动恢复、末尾不完整记录处理，研究 fdatasync 的持久化语义。
+验收：消息写入后重启进程，仍能正确读取；崩溃后能恢复完整记录并识别损坏尾部。
+
+
+阶段 5：可靠消费与实际应用
+可用于简历的首个版本
+
+service/offset_store.cppm、broker/client.cppm
+实现不同 Consumer 的消费位置、消费失败重试和进度持久化。增加真实日志采集 Producer 与日志审计 Consumer。
+验收：消费者处理中断后，重启能继续消费，允许重复但不能无故跳过已持久化的消息。
+
+
+阶段 6：批处理、并发与背压
+性能基础
+
+扩展多 Partition、Batch PUBLISH/FETCH、有界队列、磁盘空间限制和简单日志保留策略。根据测试决定是否分离磁盘写入执行资源。
+验收：高并发下内存有上限，Partition 内顺序正确，慢消费者不会无限制耗尽磁盘。
+
+
+阶段 7：Performance
+核心成果
+
+benchmark/broker_bench.py、性能报告
+测量消息吞吐、QPS、P50/P99、CPU、内存、磁盘写入与 Worker 扩展性。使用 perf 定位瓶颈，进行有证据的优化。
+验收：有可复现的前后对比数据，能完整解释性能瓶颈及优化机制。
+
+
+阶段 8：轻量分布式
+最后进行
+
+两个 Broker 进程，静态 Partition 分布、客户端路由与故障处理。可选单主单从复制实验。
+验收：两个节点能分别处理不同 Partition，并能够验证跨节点路由。暂不宣称高可用。
