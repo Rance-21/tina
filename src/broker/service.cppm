@@ -1,3 +1,4 @@
+
 export module broker.service;
 
 import std;
@@ -8,29 +9,62 @@ export namespace broker {
 
 class BrokerService {
   public:
-    // 这些只是内存版本的安全上限。
-    // max_bytes_per_partition 只统计消息内容，不含容器开销。
+    // 限制都是单个 Topic / Partition 的局部上限
     static constexpr std::size_t max_topics = 128;
+    static constexpr std::size_t max_partitions_per_topic = 64;
     static constexpr std::size_t max_messages_per_partition = 65536;
     static constexpr std::size_t max_bytes_per_partition = 64 * 1024 * 1024;
     static constexpr std::size_t max_consumers_per_partition = 1024;
 
     BrokerService() = default;
-
     BrokerService(const BrokerService &) = delete;
     BrokerService &operator=(const BrokerService &) = delete;
 
-    // PUBLISH：向 Topic 的 Partition 末尾追加消息。
+    // 显式创建 Topic，Partition 编号 [0, partition_count)。
+    // 当前不支持删除 Topic，也不支持调整 Partition 数量。
+    void create_topic(std::string name, std::size_t partition_count) {
+        if (!valid_name(name) || partition_count == 0 || partition_count > max_partitions_per_topic)
+            throw std::invalid_argument("invalid topic name or partition count");
+
+        Topic topic;
+        topic.partitions.reserve(partition_count);
+
+        for (std::size_t i = 0; i < partition_count; ++i)
+            topic.partitions.push_back(std::make_shared<Partition>());
+
+        std::lock_guard lock(topics_mutex_);
+
+        if (topics_.contains(name))
+            throw std::invalid_argument("topic already exists");
+
+        if (topics_.size() >= max_topics)
+            throw std::length_error("too many broker topics");
+
+        topics_.emplace(std::move(name), std::move(topic));
+    }
+
+    [[nodiscard]]
+    // 锁住 topics_ 并获取 partition 数量
+    std::size_t partition_count(const std::string &topic) const {
+        if (!valid_name(topic))
+            throw std::invalid_argument("invalid topic name");
+
+        std::lock_guard lock(topics_mutex_);
+
+        auto it = topics_.find(topic);
+        if (it == topics_.end())
+            throw std::out_of_range("topic not found");
+
+        return it->second.partitions.size();
+    }
+
+    // PUBLISH：追加消息，只锁目标 Partition。
     [[nodiscard]]
     protocol::PublishResult publish(const protocol::Publish &request) {
-        validate_address(request.topic, request.partition);
-
         if (request.message.size() > protocol::max_message_size)
             throw std::invalid_argument("message exceeds protocol limit");
 
-        auto partition = get_or_create_partition(request.topic);
-
-        // 仅锁住目标 Partition，其他 Topic 可以并发操作。
+        auto partition = find_partition(request.topic, request.partition);
         std::lock_guard lock(partition->mutex);
 
         if (partition->messages.size() >= max_messages_per_partition ||
@@ -40,25 +74,23 @@ class BrokerService {
 
         const auto offset = partition->next_offset;
 
-        // push_back 可能因为内存分配失败抛异常。只有追加成功，才推进 Offset 和字节计数。
+        // 若 push_back 抛异常，Offset 和容量计数不会改变。
         partition->messages.push_back(request.message);
-
         partition->stored_bytes += request.message.size();
         ++partition->next_offset;
 
         return {offset};
     }
 
-    // FETCH：从指定 Offset 开始读取，返回一批消息。
+    // FETCH：按指定 Partition 的 Offset 读取
     [[nodiscard]]
     protocol::FetchResult fetch(const protocol::Fetch &request) const {
-        validate_address(request.topic, request.partition);
-
+        // 12 是空的 fetch res 返回的字节数
         if (request.max_bytes < 12 || request.max_bytes > rpc::max_payload_size)
             throw std::invalid_argument("invalid fetch byte budget");
 
-        auto partition = find_partition(request.topic);
-
+        auto partition = find_partition(request.topic, request.partition);
+        // 目前线程安全，如果以后删除 Topic 可能出问题
         std::lock_guard lock(partition->mutex);
 
         if (request.offset > partition->next_offset)
@@ -66,19 +98,18 @@ class BrokerService {
 
         protocol::FetchResult result{.next_offset = request.offset, .records = {}};
 
-        // 响应固定头：next_offset:u64 + record_count:u32
+        // next_offset:u64 + record_count:u32
         std::size_t used = 12;
 
         for (auto offset = request.offset; offset < partition->next_offset; ++offset) {
-            // 第一版不会删除消息，因此 Offset 就是 vector 下标。
+
+            // 尚未引入 Retention，Offset 恰好等于 vector 下标。
             const auto &message = partition->messages[static_cast<std::size_t>(offset)];
 
-            // 每条记录：offset:u64 + message_len:u32 + message:bytes
+            // offset:u64 + message_len:u32 + data
             const std::size_t bytes = 12 + message.size();
 
             if (bytes > request.max_bytes - used) {
-                // 第一条就放不下时直接报错，
-                // 否则 Consumer 可能永远卡在这个 Offset。
                 if (result.records.empty())
                     throw std::length_error("fetch budget cannot fit the next record");
 
@@ -90,30 +121,24 @@ class BrokerService {
             result.next_offset = offset + 1;
         }
 
-        // 返回值已经复制了消息。
-        // 离开函数时释放 Partition 锁。
         return result;
     }
 
-    // COMMIT_OFFSET：记录 Consumer 下一次读取的位置。
+    // COMMIT_OFFSET：消费进度按 (Consumer, Topic, Partition) 独立保存。
     void commit_offset(const protocol::CommitOffset &request) {
-        validate_address(request.topic, request.partition);
-
         if (!valid_name(request.consumer))
             throw std::invalid_argument("invalid consumer name");
 
-        auto partition = find_partition(request.topic);
+        auto partition = find_partition(request.topic, request.partition);
 
         std::lock_guard lock(partition->mutex);
 
-        // 不能提交尚不存在的消息之后的位置。
         if (request.next_offset > partition->next_offset)
             throw std::invalid_argument("cannot commit beyond log end");
 
         auto it = partition->committed_offsets.find(request.consumer);
 
         if (it != partition->committed_offsets.end()) {
-            // 暂不支持主动重置消费进度。
             if (request.next_offset < it->second)
                 throw std::invalid_argument("committed offset cannot move backward");
 
@@ -126,20 +151,14 @@ class BrokerService {
         }
     }
 
-    // 查询某个 Consumer 已提交的进度。
-    // 尚未提交过则返回 nullopt。
-    // 本阶段作为内部接口和测试接口，暂不新增 RPC Method。
     [[nodiscard]]
     std::optional<std::uint64_t> committed_offset(const std::string &consumer,
                                                   const std::string &topic,
-                                                  std::uint32_t partition_id = 0) const {
-        validate_address(topic, partition_id);
-
+                                                  std::uint32_t partition_id) const {
         if (!valid_name(consumer))
             throw std::invalid_argument("invalid consumer name");
 
-        auto partition = find_partition(topic);
-
+        auto partition = find_partition(topic, partition_id);
         std::lock_guard lock(partition->mutex);
 
         auto it = partition->committed_offsets.find(consumer);
@@ -152,19 +171,21 @@ class BrokerService {
 
   private:
     struct Partition {
-        // 保护消息、Offset 和 Consumer 进度。
         std::mutex mutex;
 
-        // 当前内存版的 Append-only Log。
         std::vector<std::string> messages;
-
-        // Consumer 名称 -> 下次读取的位置。
+        // 不同 consumer自己的 offset
         std::unordered_map<std::string, std::uint64_t> committed_offsets;
 
         std::uint64_t next_offset{0};
         std::size_t stored_bytes{0};
     };
 
+    struct Topic {
+        std::vector<std::shared_ptr<Partition>> partitions;
+    };
+
+    // static，不必传入 this
     static bool valid_name(std::string_view name) {
         if (name.empty() || name.size() > 128 || name == "." || name == "..")
             return false;
@@ -181,44 +202,28 @@ class BrokerService {
         return true;
     }
 
-    static void validate_address(std::string_view topic, std::uint32_t partition) {
-        if (!valid_name(topic) || partition != 0)
-            throw std::invalid_argument("invalid topic or partition (only partition 0 supported)");
-    }
+    [[nodiscard]]
+    std::shared_ptr<Partition> find_partition(const std::string &name,
+                                              std::uint32_t partition_id) const {
+        if (!valid_name(name))
+            throw std::invalid_argument("invalid topic name");
 
-    // PUBLISH 使用：Topic 不存在时自动创建。
-    std::shared_ptr<Partition> get_or_create_partition(const std::string &topic) {
+        // 锁只保护查找，不覆盖消息的读写。
         std::lock_guard lock(topics_mutex_);
 
-        if (auto it = topics_.find(topic); it != topics_.end())
-            return it->second;
-
-        if (topics_.size() >= max_topics)
-            throw std::length_error("too many broker topics");
-
-        auto partition = std::make_shared<Partition>();
-        topics_.emplace(topic, partition);
-
-        return partition;
-    }
-
-    // FETCH / COMMIT 使用：不存在的 Topic 不能自动创建。
-    std::shared_ptr<Partition> find_partition(const std::string &topic) const {
-        std::lock_guard lock(topics_mutex_);
-
-        auto it = topics_.find(topic);
-
+        auto it = topics_.find(name);
         if (it == topics_.end())
             throw std::out_of_range("topic not found");
 
-        return it->second;
+        if (partition_id >= it->second.partitions.size())
+            throw std::out_of_range("partition not found");
+
+        return it->second.partitions[partition_id];
     }
 
-    // 只保护 Topic 注册表，不保护每条消息。
     mutable std::mutex topics_mutex_;
 
-    // 初版每个 Topic 只有 Partition 0。
-    std::unordered_map<std::string, std::shared_ptr<Partition>> topics_;
+    std::unordered_map<std::string, Topic> topics_;
 };
 
 } // namespace broker
