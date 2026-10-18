@@ -98,22 +98,31 @@ constexpr std::size_t max_message_size = 256 * 1024;
 
 // 生产者发送一条消息
 struct Publish {
+    /*
+    消息的逻辑分类
+    Topic: orders
+    用户 A 下单
+    用户 C 下单
+    Topic: users
+    用户 B 登录
+    用户 D 注册
+    */
     std::string topic;
+    // 将 Topic 分为多个 Partition，本质上是一个有序的追加式消息日志
     std::uint32_t partition{0};
     std::string message;
 };
 
-// 从指定 Offset 开始拉取消息。
-// max_bytes 是整个成功响应 Payload 的字节预算。
+// 从指定 Offset 开始拉取消息
 struct Fetch {
     std::string topic;
     std::uint32_t partition{0};
+    // 消息在 Partition 中的位置，是消息的逻辑序号，不是文件中的字节偏移量
     std::uint64_t offset{0};
     std::uint32_t max_bytes{0};
 };
 
 // 消费者提交下一次准备读取的位置。
-// next_offset 不是最后一条已消费消息的 Offset。
 struct CommitOffset {
     std::string consumer;
     std::string topic;
@@ -140,7 +149,6 @@ struct FetchResult {
 };
 
 // PUBLISH
-//
 // [topic_len:u16]
 // [topic:bytes]
 // [partition:u32]
