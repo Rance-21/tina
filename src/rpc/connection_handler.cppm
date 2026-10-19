@@ -1,7 +1,7 @@
 module;
 #include <sys/epoll.h>
 
-export module rpc.connection_handler;
+export module rpc.handler;
 
 import std;
 

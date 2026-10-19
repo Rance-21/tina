@@ -21,7 +21,7 @@ class BrokerService {
     BrokerService &operator=(const BrokerService &) = delete;
 
     // 显式创建 Topic，Partition 编号 [0, partition_count)。
-    // 当前不支持删除 Topic，也不支持调整 Partition 数量。
+    // 当前不支持删除 Topic，也不支持调整 Partition 数量，目前没有调用
     void create_topic(std::string name, std::size_t partition_count) {
         if (!valid_name(name) || partition_count == 0 || partition_count > max_partitions_per_topic)
             throw std::invalid_argument("invalid topic name or partition count");
