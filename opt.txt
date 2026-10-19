@@ -3,3 +3,5 @@
 3，EINTR空等
 4,string过多堆区分配
 5,server两次同一个epoll以获取退出fd
+6,当前使用软件 CRC32C，之后可以尝试 CPU 的 CRC32 指令进行加速。不过这得通过 Benchmark 决定，而不是现在就加入 SIMD 或手写汇编
+7,src/broker/log.cppm的putbe可simd

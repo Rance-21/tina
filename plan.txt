@@ -6,7 +6,6 @@
 src/rpc/protocol.cppm
 src/broker/protocol.cppm   # 新增
 
-
 具体分成三步：
 1. 扩展现有 rpc::Method，加入 PUBLISH、FETCH、COMMIT_OFFSET。
 2. 定义这三种请求及响应的字段。
@@ -16,7 +15,6 @@ struct Message {
     std::uint64_t offset;
     std::string payload;
 };
-
 
 但不直接发送 C++ 结构体内存，而是采用明确的网络二进制格式。
 这里要提前确定几条约束：
@@ -28,12 +26,16 @@ struct Message {
 Offset	uint64_t，从 0 开始
 验收标准： 二进制消息可以正确编码/解码；空消息、超长数据、非法 Topic、截断请求都能正确处理。
 这一步只需理解二进制协议，没有磁盘和并发问题。
+
+
+
+
+
 阶段 2：内存 Partition 与 Broker
 不引入第三方库 · 主要新增 2 个文件
 文件：
 src/service/partition.cppm
 src/service/broker.cppm
-
 
 这是第一个真正值得认真研究的并发模块。
 Partition 负责消息的顺序，Broker 负责找到对应的 Partition 并执行业务操作。
@@ -49,6 +51,11 @@ Partition 负责消息的顺序，Broker 负责找到对应的 Partition 并执�
 不要现在尝试无锁队列或原子递增 Offset，因为 Offset 的分配、消息追加和对外可见必须协调。只保证计数器唯一还不够。
 验收标准： 8 个线程同时追加消息，例如总共 10 万条，所有 Offset 唯一且连续，每个 Offset 对应一条完整消息。
 测试文件建议：test/partition.cpp。
+
+
+
+
+
 阶段 3：真正接入现有 RPC Runtime
 复用现有代码 · 修改 2 个服务端文件、增加客户端模块
 文件：
@@ -56,7 +63,6 @@ src/rpc/connection_handler.cppm
 src/rpc/server.cppm
 src/broker/client.cppm
 src/main.cpp
-
 
 这里分两次完成，不要一次修改四个文件。
 第一部分：服务器
@@ -72,7 +78,6 @@ RPC Request
     └── Broker Method
            └── BrokerService
 
-
 KV 保留自己的锁，Broker 使用 Partition 自己的锁。
 这里尤其不能出现一个覆盖 KV 与 Broker 全部操作的全局 mutex。
 第二部分：客户端
@@ -82,12 +87,15 @@ broker.client 是对你现在 RpcClient::async_call() 的轻量封装，不再�
 ./tina publish events "hello"
 ./tina consume events
 
-
 consume 内部定期 FETCH，不是由服务器主动推送。
 初期没有消息就立即返回空结果，避免在 WorkerPool 里通过 sleep 阻塞等待新消息。
 验收标准： 两个独立进程通过 TCP 发布和读取消息；多个客户端能够并发发布；已有 KV 测试全部通过。
 第一个里程碑
 走到这里，tina 已经是一个能够工作的内存消息服务器，而不只是网络框架。不过服务器重启后消息会丢失，这个问题下一阶段解决。
+
+
+
+
 
 阶段 4：Append-only Log，开始接触数据库存储机制
 引入 CRC32C · 增加文件存储模块
@@ -95,14 +103,12 @@ consume 内部定期 FETCH，不是由服务器主动推送。
 src/service/log.cppm
 src/service/partition.cppm   # 修改
 
-
 现在开始把消息写入磁盘，而不是永久保存在 std::vector 中。
 建议目录结构：
 data/
 └── events/
     └── partition-0/
         └── 00000000.log
-
 
 每条消息存储成：
 Record
@@ -114,7 +120,6 @@ Record
 ├── offset      uint64
 └── payload     byte[]
 
-
 这里真正需要实现的机制：
 1. open() 打开日志文件，维护当前追加位置。
 2. write/pwrite() 处理部分写入和 EINTR。
@@ -122,6 +127,7 @@ Record
 4. fdatasync() 使必要数据持久化。
 5. 启动时扫描日志，建立 Offset → 文件位置 的内存索引。
 6. 遇到不完整的尾部记录时，截断到最后一条有效记录。
+
 注意，日志中间出现校验错误不能直接当作正常尾部截断。中间损坏应当报错，避免悄悄丢失后续消息。
 另外，需要明确两个概念：
 - Append-only Log：Broker 存储的就是实际业务消息。
@@ -139,12 +145,16 @@ fdatasync
    ↓
 返回成功 ACK
 
-
 这会比较慢，但是容易保证语义正确。
 后面第六阶段再利用 Batch / Group Commit 减少同步操作。
 验收标准： 已收到持久化 ACK 的消息在进程异常退出并重启后能够恢复；模拟写入半条记录后崩溃，也能识别有效日志边界。
 需要注意，SIGKILL 测试能验证进程故障恢复，但不能完全代替真实断电测试。
 这一阶段建议对应学习 CMU 15-445 的 Logging / Recovery 内容，同时查 write(2)、fdatasync(2) 和文件系统相关 man-pages。
+
+
+
+
+
 阶段 5：SQLite + 可靠消费
 正式引入 SQLite · 核心新增 1 个模块
 文件：
@@ -152,13 +162,10 @@ src/service/offset_store.cppm
 src/service/broker.cppm
 src/broker/client.cppm
 
-
 这是数据库真正接入 tina 的阶段。
 建议使用 SQLite 的 C API，而不是再引入一个复杂的 C++ ORM。它的核心接口包括 sqlite3_open_v2、sqlite3_prepare_v2、sqlite3_bind_*、sqlite3_step 等。
 
 sqlite.org
-
-
 
 数据库中先只需要一张表：
 CREATE TABLE consumer_offsets (
@@ -169,24 +176,30 @@ CREATE TABLE consumer_offsets (
     PRIMARY KEY (consumer_id, topic, partition_id)
 );
 
-
 这里分四步：
 1. 启动时打开 SQLite 数据库，并建立表。
 2. Consumer 查询自己上次提交的 next_offset。
 3. 业务处理成功后，调用 COMMIT_OFFSET。
 4. 使用 SQLite 事务原子更新消费进度，拒绝非法倒退或越界进度。
 初期让 Broker 的 SQLite 元数据操作串行执行即可，后面再决定是否需要专用元数据线程。不要假设增加多个 SQLite 写线程就能提升吞吐。
+
 同时要规定：
 消费进度只能推进到服务端确认已经持久化的消息范围之内。
 否则可能出现 Offset 已经保存在 SQLite，但对应日志数据在崩溃后丢失的问题。
+
 还有一点：这里的 consumer_id 只表示一个独立消费游标。现阶段不实现自动 Consumer Group 分配和 Rebalance。
 验收标准： 发布 100 条消息，某 Consumer 处理 60 条并提交进度后崩溃，重新启动能从下一条继续；如果处理成功但还没提交就崩溃，允许重新处理少量消息。
 第二个里程碑：实际应用版本
 可以增加两个简单程序：一个持续向 tina 发送真实应用日志，另一个消费日志并生成统计结果。这个版本就能作为有实际用途的单机服务来展示。
 
+
+
+
+
 阶段 6：Batch、并发、资源限制与背压
 暂不增加核心第三方库 · 重点修改已有代码
 这一阶段才开始让 Broker 真正承受高负载。
+
 建议按以下顺序做：
 顺序	功能	要解决的问题
 6.1	Batch PUBLISH	每条消息一个 RPC 的开销太大
@@ -195,18 +208,17 @@ CREATE TABLE consumer_offsets (
 6.4	多 Partition	降低单分区锁竞争
 6.5	有界队列、流量控制	慢消费者和突发流量
 6.6	Log Segment、清理策略	磁盘不能无限增长
+
 其中 Group Commit 很值得深入。
 原来：
 Message A → write → fdatasync → ACK
 Message B → write → fdatasync → ACK
 Message C → write → fdatasync → ACK
 
-
 优化为：
 Message A ─┐
 Message B ─┼→ 合并写入 → fdatasync → 批量 ACK
 Message C ─┘
-
 
 前提是对应消息确实已经满足所承诺的持久化条件。
 这里你可以比较吞吐量、P99 和每次同步的平均消息数。
@@ -214,6 +226,11 @@ Message C ─┘
 如果之后发现 WorkerPool 长时间被磁盘 I/O 占满、KV 的 P99 明显恶化，再考虑增加一个专门的日志 I/O 执行线程或日志写入线程池。
 还有一处现有 Runtime 要留意：目前 Connection 有最大在途请求限制，任务队列满时可能直接拒绝并关闭连接。这个阶段可以把它改进为明确的过载处理与背压，而不是简单提高队列容量。
 验收标准： 大量 Producer、Consumer 同时运行时，没有无限增长的内存或磁盘队列；能够观测到资源限制和合理的过载处理。
+
+
+
+
+
 阶段 7：Performance，整个项目最重要的部分
 Linux perf · 可选 Google Benchmark、Zstd
 建议增加：
@@ -225,7 +242,6 @@ benchmark/
 docs/
 └── performance.md
 
-
 这里不只是运行几个吞吐测试，而是建立一套可重复执行的性能实验。
 计划进行的性能实验
 RPC	小消息请求的 QPS、P99、CPU cycles/request
@@ -235,13 +251,13 @@ Worker	线程数变化与 KV 干扰
 持久化	不同 Group Commit 策略
 压缩	原始数据 vs Zstd 压缩数据
 
+
+
+
+
 最后一项压缩实验是可选的。
 例如 Producer 发送大量结构相似的日志消息，Zstd 可能显著降低存储体积；但它也会消耗 CPU，甚至可能让小消息处理变慢。因此不能假设压缩一定是优化。
 Google Benchmark 适合测 Partition append、记录编码、CRC32C 等微操作；端到端吞吐与 P99 仍然需要真实 Producer/Consumer 压测。
-
-GitHub
-
-
 
 性能测试建议在你现有 Fedora 机器上使用 Loopback，必要时再通过 Network Namespace 模拟真实链路延迟。
 最终报告应该体现：
@@ -257,7 +273,6 @@ perf stat / perf record
         ↓
 检查吞吐、P99、CPU、内存
 
-
 不要事先承诺一定提升多少。
 这一阶段完成以后，tina 的主要简历价值就已经形成。
 阶段 8：轻量分布式
@@ -266,11 +281,9 @@ perf stat / perf record
 src/broker/router.cppm
 src/runtime/cluster_config.cppm
 
-
 两个 Broker 实例：
 Broker A → Partition 0、2
 Broker B → Partition 1、3
-
 
 客户端根据静态配置，找到目标 Partition 对应的服务器。
 先只实现：
