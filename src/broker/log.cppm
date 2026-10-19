@@ -81,10 +81,10 @@ class MessageLog {
             header_size + message.size() > max_file_size - end_position_)
             throw std::length_error("message log is full");
 
-        // 提前确保索引容量足够，避免写盘成功后
-        // 更新内存索引时发生内存分配异常。
+        // 提前确保索引容量足够
         index_.reserve(index_.size() + 1);
 
+        // index_ 数组的 offset
         const auto offset = next_offset();
 
         std::string record(header_size, '\0');
@@ -97,15 +97,13 @@ class MessageLog {
 
         record.append(message);
 
-        // 校验和填写到 Header 的第 12~15 字节。
         put_be(record.data() + 12, checksum(record), 4);
 
         try {
             write_fully(fd_, record.data(), record.size(), end_position_);
             sync_file(fd_);
         } catch (...) {
-            // 可能已经写入部分记录，
-            // 也可能写完了但同步失败。
+            // 可能已经写入部分记录，也可能写完了但同步失败。
             // 当前进程不再继续追加，必须重新恢复。
             poisoned_ = true;
             throw;
@@ -260,6 +258,14 @@ class MessageLog {
     }
 
     static void sync_file(int fd) {
+        /*
+        fsync(fd)： 会把文件数据（Data）和所有文件元数据（Metadata，如最后修改时间
+        mtime、文件大小、权限等 inode 信息） 全部刷入磁盘。这通常意味着磁盘磁头/SSD
+        控制器需要写两个不同的地方（数据区 + inode 区），至少触发 2 次磁盘 IO。 fdatasync(fd)：
+        只刷文件数据本身（以及为了能正确读出数据所必需的元数据，比如文件刚变长时的文件大小
+        st_size）， 而完全忽略像“文件最后修改时间
+        mtime”这种无关紧要的元数据更新！在许多场景下能直接减少一半的磁盘同步开销。
+        */
         while (::fdatasync(fd) < 0) {
             if (errno == EINTR)
                 continue;
@@ -279,7 +285,6 @@ class MessageLog {
             throw std::runtime_error("invalid message log size");
 
         const auto file_size = static_cast<std::uint64_t>(st.st_size);
-
         std::uint64_t pos = 0;
 
         while (pos < file_size) {
@@ -309,7 +314,6 @@ class MessageLog {
             read_fully(fd_, record.data() + header_size, static_cast<std::size_t>(length),
                        pos + header_size);
 
-            // CRC 错误不能直接当作正常尾部截断。
             if (get_be(record.data() + 12, 4) != checksum(record))
                 throw std::runtime_error("CRC32C mismatch at byte " + std::to_string(pos));
 
@@ -320,6 +324,7 @@ class MessageLog {
 
         // 只修复确认不完整的尾部记录。
         if (pos != file_size) {
+            // 直接舍弃余数
             if (::ftruncate(fd_, static_cast<off_t>(pos)) < 0)
                 fail_system("ftruncate incomplete log tail");
 
