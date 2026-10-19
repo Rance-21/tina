@@ -67,6 +67,15 @@ class MessageLog {
         return end_position_;
     }
 
+    // FETCH 可先判断单条消息是否放得进响应，再决定是否 pread。
+    [[nodiscard]]
+    std::optional<std::uint32_t> payload_size(std::uint64_t offset) const {
+        if (offset >= index_.size())
+            return std::nullopt;
+
+        return index_[static_cast<std::size_t>(offset)].length;
+    }
+
     // 成功返回本次分配并持久化的 Offset。
     // 调用方必须在返回成功后才发送 PUBLISH ACK。
     [[nodiscard]]
