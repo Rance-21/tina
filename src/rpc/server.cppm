@@ -20,7 +20,6 @@ import runtime.log;
 
 import rpc.connection;
 import rpc.connection_handler;
-import broker.service;
 
 namespace {
 
