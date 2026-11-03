@@ -1,307 +1,219 @@
 # Tina 远程开发工作台：总体架构
 
 **阶段：** Phase 0（架构设计）  
-**版本：** 0.1  
-**状态：** 设计基线，尚未进入业务实现
+**版本：** 0.2  
+**目标：** 个人使用的轻量级 Android 远程 IDE
 
 ## 1. 项目定位
 
-Tina 是一个运行在 Fedora Linux 主机上的远程开发工作台，由 Android 设备提供操作界面。
+Tina 是一个运行在 Fedora Linux 主机上的远程开发工作台，Android 平板/手机提供操作界面。
 
-它不是完整复刻 VS Code，而是让用户在 Android 上远程完成常见开发操作：
+第一版只需要做好几件事：
 
-- 浏览 Fedora 上的 Git 项目和目录树。
-- 查看、编辑并保存远端文件。
-- 使用 Fedora Shell 终端。
+- 浏览 Fedora 上的项目和目录树。
+- 查看、编辑、保存 UTF-8 文本文件。
+- 在 IDE 内使用一个长期存在的命令行。
 - 查看 Git 状态和代码差异。
-- 启动、管理并使用远端 AI CLI Agent，例如 Codex 和 Antigravity。
-- 网络断开后重新连接，并尽可能恢复已有会话。
+- 在 Fedora 上启动和管理 AI CLI Agent，并在 Android 上查看输出、发送输入。
+
+不追求完整复刻 VS Code，不做插件市场、复杂多工作区管理或多机分布式系统。
 
 **核心原则：Fedora 负责执行，Android 负责交互。**
 
-源代码、编译器、Git、终端进程和 Agent 都运行在 Fedora 上。Android 通过协议向 Server 发送请求，并接收文件内容、终端输出和 Agent 事件。
+源代码、编译器、Git、Shell 和 Agent 都运行在 Fedora 上。Android 通过 TCP 连接 Server，发送请求并接收结果和事件。
 
-## 2. 设计原则与明确边界
+## 2. 技术结构
 
-### 2.1 技术方向
+| 部分 | 技术 | 职责 |
+|---|---|---|
+| Server | Fedora + C++23 | 文件、终端、Git、Agent 的实际执行 |
+| 网络运行时 | 现有 TCP / epoll / EventLoop / RPC | 连接、帧解析、请求分发和事件推送 |
+| Client 原生层 | Tauri 2 + Rust | 管理 TCP 连接、协议编解码和前端桥接 |
+| Client 界面 | WebView | 展示目录树、编辑器、终端、Git 和 Agent |
+| 文件编辑器 | CodeMirror 6 | 编辑文本文件 |
+| 终端显示 | xterm.js | 展示终端输出和处理终端输入 |
+| 元数据 | 配置文件；必要时使用 SQLite | 保存项目和 Agent 配置 |
+| 项目文件 | Fedora 原生文件系统 | 文件内容的唯一事实来源 |
 
-- Server：Fedora Linux + C++23。
-- Client：Android + Tauri 2。
-- Client 原生层：Rust，负责连接、协议和与 WebView 的桥接。
-- Client 界面：WebView，负责工作区、编辑器、终端、Git 和 Agent 的展示。
-- 通信：基于现有 TCP/RPC 能力扩展，支持请求、响应和服务端事件。
-- 元数据：SQLite。
-- 项目文件：Linux 原生文件系统。
-- 缓存：有容量上限的内存缓存。
-
-### 2.2 不做什么
-
-- 不做多机分布式系统，不引入 Raft、分布式事务或服务发现。
-- 不自研数据库，SQLite 只承担适合它的元数据持久化工作。
-- 不自研文本编辑器和终端模拟器，接入成熟组件。
-- 不在 Tina 中实现 AI 模型推理；Agent 作为 Fedora 上的外部 CLI 进程运行。
-- 不为了“看起来高级”提前引入复杂线程模型、无锁结构或自定义内存分配器。
-
-### 2.3 性能优先级
-
-1. **Performance：** 网络运行时、事件循环、并发、内存分配、数据复制、背压和端到端延迟。
-2. **Storage：** 文件访问、元数据持久化、缓存命中率、恢复能力。
-3. **产品功能与界面：** 在不破坏前两项的前提下逐步完善。
-
-性能优化必须由基准测试和 Profiling 结果驱动。KV 服务继续保留，主要作为可控的 RPC/并发 workload 和性能测试对象，不再作为产品的核心功能。
+不自研数据库、编辑器和终端模拟器。Rust Backend 负责网络，不让 WebView 直接管理 TCP。
 
 ## 3. 总体结构
 
     Android
-    ┌─────────────────────────────────────────┐
-    │ WebView                                 │
-    │ 工作区 │ 文件编辑 │ 终端 │ Git │ Agent  │
-    ├─────────────────────────────────────────┤
-    │ Tauri Rust Backend                      │
-    │ Connection Manager / Protocol Codec    │
-    │ Pending Requests / Event Forwarding    │
-    └───────────────────┬─────────────────────┘
-                        │ TCP
-                        │ Tina Protocol
-    ┌───────────────────▼─────────────────────┐
-    │ Fedora：C++23 Tina Server               │
-    │                                         │
-    │ Socket / Epoll / EventLoop              │
-    │              │                          │
-    │         Frame Decoder                    │
-    │              │                          │
-    │          RPC Router                      │
-    │     ┌────────┼────────┬────────┐         │
-    │     ▼        ▼        ▼        ▼         │
-    │ Workspace Terminal   Git     Agent      │
-    │     │        │        │        │         │
-    │     └────────┴────────┴────────┘         │
-    │              │                          │
-    │       WorkerPool / Process Manager      │
-    │              │                          │
-    │ Filesystem / PTY / Git CLI / Agent CLI  │
-    │              │                          │
-    │         SQLite / Memory Cache            │
-    └─────────────────────────────────────────┘
+    ┌───────────────────────────────────────┐
+    │ WebView                               │
+    │ 项目树 │ 编辑器 │ 终端 │ Git │ Agent  │
+    ├───────────────────────────────────────┤
+    │ Tauri Rust Backend                    │
+    │ TCP Connection / Frame Codec          │
+    │ Request Tracking / Event Forwarding   │
+    └──────────────────┬────────────────────┘
+                       │ TCP
+                       │ Tina Protocol
+    ┌──────────────────▼────────────────────┐
+    │ Fedora：C++23 Tina Server             │
+    │                                       │
+    │ TCP / Epoll / EventLoop               │
+    │             │                         │
+    │         Frame Decoder                 │
+    │             │                         │
+    │          RPC Router                   │
+    │    ┌────────┼──────────┐              │
+    │    ▼        ▼          ▼              │
+    │ Workspace  Terminal   Git / Agent     │
+    │    │        │          │              │
+    │    └────────┴──────────┘              │
+    │             │                         │
+    │       WorkerPool / PTY                │
+    │             │                         │
+    │ Filesystem / Git CLI / Agent CLI      │
+    └───────────────────────────────────────┘
 
-Android 的 WebView 不直接建立 TCP 连接。所有网络请求都经过 Rust Backend，由 Rust 层统一管理连接和请求状态。
+Server 不关心 Android 界面如何绘制，只提供稳定的 Method 和数据。前端根据返回的数据构建目录树、编辑器内容、Git 差异和 Agent 页面。
 
-Server 不知道界面如何绘制。它只提供稳定的 Workspace、Terminal、Git、Agent 等服务接口，并通过 Event 向客户端推送异步数据。
+## 4. 复用现有 Tina 代码
 
-## 4. 现有 Tina 基础设施的复用
+新版 Tina 是现有 C++ Linux Server 的扩展，不另起炉灶，也不要求先重构整个仓库。
 
-新版 Tina 是现有 C++ Linux Server 项目的功能扩展，不是另起炉灶，也不需要先把整个仓库重构一遍。
-
-| 现有模块 | 在新版 Tina 中的职责 |
+| 现有模块 | 复用职责 |
 |---|---|
-| net.socket | TCP Socket 创建、连接和收发 |
+| net.socket | TCP Socket |
 | net.epoll | Linux I/O 多路复用 |
-| net.event_loop | I/O 事件循环、跨线程任务投递 |
+| net.event_loop | I/O 事件循环和跨线程任务投递 |
 | net.event_loop_thread_pool | I/O EventLoop 线程组 |
-| net.buffer | 网络输入/输出缓冲区 |
-| runtime.worker_pool | 执行可能阻塞的业务任务 |
+| net.buffer | 网络收发缓冲区 |
+| runtime.worker_pool | 执行可能阻塞的任务 |
 | runtime.log | 统一日志 |
 | runtime.config | Server 配置 |
-| rpc.protocol | 现有 RPC 帧和消息定义的演进基础 |
-| rpc.connection | 连接状态和收发管理 |
-| rpc.server / rpc.client | 现有 Server/Client 通信基础 |
-| src/file/protocol.cppm | 已有分块文件传输协议，可评估后复用 |
+| rpc.protocol | 现有帧协议的演进基础 |
+| rpc.connection | 连接状态和收发 |
+| rpc.server / rpc.client | 现有 RPC 基础 |
+| src/file/protocol.cppm | 现有分块文件协议，后续按需复用 |
 
-具体文件名以仓库当前分支为准。Phase 0 只确定职责边界，不要求立即移动或重命名已有模块。
+实际文件名以仓库为准。Phase 0 只确定职责，不移动旧文件、不重命名模块。
 
-KV 服务继续保留，作为测试负载；已有文件服务协议作为文件传输能力的基础。不要为了新版工作台删除已有实验成果。
+KV 服务继续保留，作为 RPC 和并发性能测试负载。它不是新版 IDE 的核心功能。
 
-## 5. Server 模块边界
+## 5. 功能模块
 
-### 5.1 RPC Runtime
+### 5.1 Workspace
 
-只负责通用通信机制：
+负责：
 
-- TCP 连接的建立和关闭。
-- Epoll 事件分发。
-- 输入缓冲区和输出缓冲区。
-- 帧解析与编码。
-- Request / Response / Event 的分发。
-- 请求超时、连接状态和输出背压。
-- 将业务任务投递到 WorkerPool，并把结果送回所属 EventLoop。
+- 列出已登记项目。
+- 打开项目。
+- 按目录枚举文件和子目录。
+- 读取 UTF-8 文本文件。
+- 保存 UTF-8 文本文件。
 
-Runtime 不直接操作 Workspace、Git 或 Agent 的业务数据。
+目录树由 workspace.listDir 提供数据，客户端递归或按需展开目录。第一版不支持图片、压缩包等二进制文件的查看和编辑。
 
-### 5.2 RPC Router
+所有文件操作必须限制在已登记的 Workspace 根目录内，防止路径穿越和符号链接逃逸。
 
-Router 根据 Method 将请求分发到对应 Service。
+### 5.2 Terminal：一个长期存在的命令行
 
-它负责：
-- Method 注册和查找。
-- 参数格式检查。
-- 统一错误状态。
-- 将响应交回 RPC Runtime。
+第一版只保留**一个默认 Terminal**，不做多终端标签页和复杂会话管理。
 
-新增业务服务时，不应该把越来越多的业务 switch 塞进 Server 主循环。
+- Server 启动时创建一个 PTY（伪终端）和默认 Shell。
+- IDE 始终显示这个终端面板，不提供关闭终端的按钮。
+- 切换页面、Android 进入后台或 TCP 断开，都不关闭 Shell。
+- Android 重连后，Server 提供最近一段终端输出，恢复显示。
+- 终端尺寸变化通过 terminal.resize 通知 Server。
+- 用户在终端中执行 exit 导致 Shell 退出时，Server 可以自动重启默认 Shell。
+- Server 自身退出时，Shell 随之结束。
 
-### 5.3 Workspace Service
+不提供 terminal.create、terminal.close 等多会话管理接口。终端输出缓冲区有固定上限，不能无限占用内存。
 
-负责远端项目和文件访问：
+PTY 文件描述符接入现有 EventLoop，不为终端创建阻塞线程。
 
-- 列出已登记的 Workspace。
-- 打开 Workspace。
-- 枚举目录。
-- 读取文件或指定范围。
-- 写入文件。
-- 处理较大文件的分块传输。
+### 5.3 Git
 
-项目文件仍然存储在 Linux 文件系统中，SQLite 不保存整份源代码。
+第一版调用 Fedora 上的系统 Git CLI，不重新实现 Git。
 
-路径必须相对于已登记的 Workspace 根目录解析。必须检查路径穿越和符号链接逃逸，不能仅靠字符串拼接判断路径是否合法。
+- git.status 返回分支信息和文件状态。
+- 客户端将 Git 状态叠加到 Workspace 目录树：修改、新增、删除、未跟踪等文件可以显示不同标记。
+- git.diff 返回指定文件的统一差异文本（Unified Diff）。
+- 客户端使用差异视图展示新增行、删除行和上下文行。
 
-### 5.4 Terminal Service
+**目录树不是由 git.status 生成的：** 目录树来自 workspace.listDir，Git 状态负责给树节点添加状态标记。
 
-负责交互式 Shell：
+**代码差异视图不是 Git 提交历史图：** 第一版支持文件级代码 Diff，不做分支/提交关系图。如果以后确实需要提交历史图，再增加 git.log。
 
-- 创建 PTY（伪终端）会话。
-- 启动用户指定的 Shell。
-- 转发客户端输入。
-- 转发终端输出。
-- 调整终端窗口大小。
-- 关闭会话并回收进程。
+对于未跟踪文件，Git 默认 diff 不会显示其内容；Server 应将其作为新文件差异返回，或由客户端明确显示为未跟踪文件。
 
-必须使用 PTY，而不是简单地把子进程的 stdin/stdout 管道当作完整终端。交互式 Shell 依赖终端设备语义。
+耗时 Git 命令交给 WorkerPool，不能阻塞网络 EventLoop。
 
-PTY 文件描述符应纳入现有 I/O 事件循环管理，避免每个终端都创建一个阻塞线程。
+### 5.4 Agent
 
-### 5.5 Git Service
-
-第一版优先调用系统 Git CLI，不重新实现 Git 对象模型。
-
-提供常用能力：
-- 查询分支和工作区状态。
-- 列出变更文件。
-- 获取 diff。
-
-耗时的 Git 操作不能阻塞网络 EventLoop，应通过 WorkerPool 执行，并限制输出大小。
-
-### 5.6 Agent Service
-
-Agent 是由 Server 管理的外部 CLI 进程。
+Agent 是 Fedora 上运行的外部 CLI 进程，例如 Codex CLI、Antigravity CLI。
 
 职责：
-- 管理 Agent Profile。
-- 启动和停止 Agent 进程。
-- 为交互式 Agent 分配 PTY。
-- 转发输入和输出。
-- 维护 Agent 会话状态。
-- 支持断线后重新连接到仍然存活的会话。
 
-Agent Profile 至少需要描述名称、可执行文件、启动参数、工作目录和环境变量。不要把某一家 Agent 的命令行参数写死在 RPC Runtime 中。
+- 列出已有 Agent 会话。
+- 按 Profile 启动 Agent。
+- 向 Agent 发送文本输入。
+- 中断当前正在执行的任务。
+- 结束 Agent 会话并回收进程。
+- 将输出和状态变化推送给 Android。
 
-Agent 进程与普通 Terminal 进程共用底层 Process/PTY 管理能力，但业务生命周期分开管理。
+Agent 使用独立 PTY。它与默认 Terminal 共用底层 Process/PTY 管理能力，但会话彼此独立。
 
-### 5.7 Storage Service
+agent.cancel 和 agent.close 语义不同：
+- cancel：中断当前任务，尽可能保留 Agent 进程和会话。
+- close：终止 Agent 进程，结束该会话并释放资源。
 
-数据归属明确分为三类：
+Agent 不需要在 Server 启动时自动全部运行，由用户在 IDE 中启动即可。
 
-| 数据 | 存储位置 |
-|---|---|
-| 项目源代码和普通文件 | Linux 文件系统 |
-| Workspace、设备、Agent Profile 等元数据 | SQLite |
-| 热点目录信息和可复用元数据 | 有界内存缓存 |
+## 6. 并发模型
 
-SQLite 不替代文件系统。缓存必须有容量上限，并明确失效策略；不能让打开过的文件和目录无限留在内存中。
+第一版继续使用现有的 Acceptor + I/O EventLoop 线程组 + WorkerPool。
 
-## 6. 并发与线程模型
+- 一个 Connection 由一个 EventLoop 负责。
+- 网络 I/O 和 PTY I/O 尽量由 EventLoop 驱动。
+- 文件系统和 Git 等可能阻塞的操作交给有界 WorkerPool。
+- Agent/Terminal 输出通过任务队列送回对应 EventLoop。
+- 每条连接的待发送队列和终端输出缓存都有上限。
+- 慢客户端不能让 Server 无限积累数据。
 
-第一版沿用现有的 Acceptor + I/O EventLoop 线程组 + WorkerPool 思路。
+不提前引入复杂调度器、work-stealing 或自定义无锁结构。线程数和队列大小由后续压测决定。
 
-- Acceptor 负责接受新连接，并将连接分配给 I/O EventLoop。
-- 一个 Connection 由一个 EventLoop 负责，避免多个线程同时读写同一连接状态。
-- 网络 I/O、PTY I/O 尽量由 EventLoop 驱动。
-- 文件系统、Git 等可能阻塞的操作交给有界 WorkerPool。
-- Worker 完成后通过任务队列和 EventLoop 唤醒机制返回结果。
-- 每条连接的待发送数据必须有上限；超过上限时执行背压，而不是无限积累。
+## 7. 通信协议边界
 
-不在 Phase 0 引入新的复杂调度器。后续是否调整线程数量、是否拆分更多 EventLoop，必须通过压测决定。
+- TCP 长连接。
+- 固定帧头：Length、Kind、Request ID、Method、Status。
+- 不包含 Version 和 Payload Type。
+- Payload 统一为 UTF-8 文本，结构化内容使用 JSON。
+- 由 Method 决定 JSON 字段结构。
+- Request / Response / Event 三种消息类型。
+- 终端和 Agent 的输出使用 Event 推送，不等待一个长时间 RPC 完成。
 
-## 7. 连接与会话生命周期
+完整帧格式和 Method 编号见 protocol.md。
 
-一次正常连接大致经历：
+## 8. Storage 与性能
 
-1. Android Rust Backend 建立 TCP 连接。
-2. 双方交换协议版本和能力信息。
-3. 完成设备认证（认证能力在产品化阶段完善）。
-4. 客户端获取 Workspace 和已有会话信息。
-5. 客户端发送请求，Server 返回响应。
-6. Server 可以主动推送终端输出、Agent 输出和会话状态等 Event。
-7. 断线后，客户端重新建立连接并重新同步状态。
+Storage 保持简单：
 
-连接断开不应默认杀掉所有 Terminal 和 Agent 进程。会话是否保留由 Server 的会话生命周期策略决定。
+- 项目源代码和普通文件保留在 Linux 文件系统。
+- Workspace 路径、Agent Profile 等少量配置优先使用配置文件。
+- 确实需要持久化查询时再引入 SQLite。
+- 不把项目文件内容存进数据库。
+- 缓存必须有容量上限和失效规则。
 
-不能在连接状态不确定时盲目重放非幂等请求。例如文件写入、启动 Agent、执行 Shell 命令都不能简单地因为超时就自动执行第二次。
+性能是首要工程目标，重点观察 RPC 延迟、文件读取、终端输出、Agent 输出、CPU、内存、队列长度和锁竞争。所有优化由 Benchmark 和 Profiling 结果驱动。
 
-## 8. 安全边界
+## 9. 安全边界
 
 - Server 以普通 Linux 用户身份运行，不使用 root。
-- 开发阶段只监听明确配置的局域网地址，不开放公网端口。
-- Workspace API 只能访问配置允许的目录。
-- 必须防止路径穿越和符号链接逃逸。
-- 终端和 Agent 运行在 Server 用户权限下；Workspace API 的路径限制不等于 Shell 沙箱。
-- 设备认证、凭据保护和传输加密在产品化阶段形成完整方案。
+- 开发阶段只监听明确配置的局域网地址，不做公网端口转发。
+- Workspace API 必须限制在登记目录内。
+- Terminal 和 Agent 拥有 Server 用户的权限；Workspace 路径限制不是 Shell 沙箱。
+- 如果以后需要在不可信网络使用，必须先补齐身份认证和传输加密。
 
-尤其要明确：远程 Terminal 和 Agent 相当于获得了 Server 当前 Linux 用户的执行权限。不能把它描述成一个天然受限的文件浏览器。
+## 10. Phase 0 验收条件
 
-## 9. 启动与关闭顺序
-
-建议的启动顺序：
-
-1. 读取配置并初始化日志。
-2. 初始化 SQLite 和必要的缓存。
-3. 初始化 WorkerPool、EventLoop 线程组和 RPC Router。
-4. 初始化 Workspace、Process、PTY 等 Service。
-5. 启动 TCP 监听。
-6. 接受 Android 客户端连接。
-
-关闭时：
-
-1. 停止接受新连接和新请求。
-2. 停止创建新的 Terminal/Agent 会话。
-3. 根据策略等待在途任务结束。
-4. 刷新需要持久化的元数据。
-5. 清理临时资源并关闭连接。
-6. 回收 WorkerPool 和 EventLoop 线程。
-
-具体的超时、会话保留和强制终止策略在对应实现阶段确定。
-
-## 10. 仓库组织原则
-
-保留现有根目录 CMake 项目和 src/ 模块布局，不在 Phase 0 为了目录整齐而整体搬迁代码。
-
-后续增量扩展可以采用：
-
-    tina/
-    ├── src/
-    │   ├── net/          # 已有网络基础设施
-    │   ├── rpc/          # 已有 RPC Runtime，逐步扩展
-    │   ├── runtime/      # 日志、配置、WorkerPool 等
-    │   ├── file/         # 文件传输协议
-    │   └── service/
-    │       ├── workspace/
-    │       ├── terminal/
-    │       ├── git/
-    │       ├── agent/
-    │       └── storage/
-    ├── client/           # Tauri Android 客户端
-    ├── test/
-    ├── benchmark/
-    └── docs/
-        └── workbench/
-
-这是目标逻辑结构，不要求 Phase 0 一次性创建所有目录。
-
-## 11. Phase 0 完成条件
-
-- 总体架构和模块职责已经明确。
-- Android、Rust Backend、C++ Server 的边界已经明确。
-- 通信协议的帧格式、消息类型和错误语义已经明确。
-- 文件、终端、Git、Agent、Storage 的责任边界已经明确。
-- 线程模型、背压、断线和会话生命周期有基本约定。
-- 0–8 阶段路线已经明确。
-- 本阶段只提交设计文档，不修改现有业务代码。
+- Server、Rust Backend、WebView 的职责明确。
+- 帧结构和 Method 编号明确。
+- 文件、单一持久终端、Git 和 Agent 的边界明确。
+- 现有 C++ RPC Runtime 的复用方式明确。
+- 后续开发顺序明确。
+- 本阶段只提交设计文档，不修改业务代码。
