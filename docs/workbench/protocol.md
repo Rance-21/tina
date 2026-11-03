@@ -1,192 +1,59 @@
 # Tina 远程开发工作台：通信协议
 
 **阶段：** Phase 0（协议设计）  
-**协议版本：** 1  
-**状态：** 设计基线，尚未进入业务实现
+**版本：** 第一版个人使用协议
 
-## 1. 协议目标
+## 1. 设计原则
 
-Tina Protocol 用于 Android 客户端与 Fedora C++ Server 之间的双向通信。
+这是 Tina 自己的 Android 客户端与 Fedora Server 之间使用的协议，不是面向第三方开发者的通用 RPC 标准。
 
-协议必须同时支持三种通信模式：
+因此第一版遵循：
 
-1. **请求（Request）：** 客户端要求 Server 执行操作。
-2. **响应（Response）：** Server 返回某个请求的结果。
-3. **事件（Event）：** Server 主动向客户端推送异步数据。
+- 不设计多版本兼容机制。
+- 不设置 Payload Type。
+- 不支持二进制 Payload。
+- 所有 Payload 都是 UTF-8 文本。
+- 结构化内容统一使用 JSON。
+- 由 Method 决定具体 JSON 结构和解析方式。
+- 只保留当前 IDE 真正需要的 Method。
 
-例如：
-- Android 请求列出目录，Server 返回目录项。
-- Android 请求创建 Terminal，Server 返回 Session ID。
-- Terminal 运行过程中，Server 持续推送终端输出事件。
-- Agent 运行过程中，Server 持续推送 Agent 输出和状态事件。
+客户端和 Server 由同一个人维护，协议升级时两端一起更新。
 
-协议不依赖 Tauri、Rust 或 C++ 的内部类型，双方只依赖线上字节格式。
+## 2. 帧格式
 
-## 2. 传输层
+所有整数均使用大端序（Big-endian）。不能直接发送 C++ 结构体的内存布局，必须显式编码每个字段。
 
-- 使用一条长期保持的 TCP 全双工连接。
-- 一条连接可以承载多个并发请求。
-- 响应通过 Request ID 与原请求关联，不要求按请求提交顺序返回。
-- Event 不依赖某个尚未完成的 Request。
-- TCP 是字节流，必须正确处理半包、粘包和部分写入。
-- 开发阶段只允许在受控的局域网环境测试；公网部署前必须完成认证和传输加密。
-
-TLS 和设备认证属于后续安全实现工作，本协议预留握手与认证方法，不把安全机制混入普通业务 Method。
-
-## 3. 帧格式
-
-所有整数均使用网络字节序，即大端序（Big-endian）。不能直接发送 C++ 结构体的内存布局。
-
-一帧由固定帧头和 Payload 组成：
-
-| 字段 | 字节数 | 含义 |
+| 字段 | 大小 | 说明 |
 |---|---:|---|
-| Length | 4 | 后续整帧的字节数，不包含自身这 4 字节 |
-| Version | 1 | 协议版本，当前为 1 |
-| Kind | 1 | 消息类型：Request / Response / Event |
-| Request ID | 8 | 请求关联编号 |
-| Method | 2 | 操作编号 |
-| Status | 2 | 响应状态码 |
-| Payload Type | 1 | Payload 编码类型 |
-| Reserved | 1 | 保留字段，当前必须为 0 |
-| Payload | 可变 | 消息正文 |
+| Length | 4 字节 | 后续帧的总字节数，不包含自身 |
+| Kind | 1 字节 | REQUEST / RESPONSE / EVENT |
+| Request ID | 8 字节 | 请求关联编号 |
+| Method | 2 字节 | 操作编号 |
+| Status | 2 字节 | 响应状态码 |
+| Payload | 可变 | UTF-8 文本，通常为 JSON |
 
-固定帧头总长度为 20 字节，其中 Length 占 4 字节，Length 字段的值包含后续 16 字节固定字段和 Payload。
+固定帧头总计 **17 字节**。其中 Length 自身占 4 字节，因此 Length 的值为 13 + Payload 字节数。
 
-### 3.1 Kind
+### 2.1 Kind
 
-| 值 | 类型 | 说明 |
+| 值 | 类型 | 含义 |
 |---:|---|---|
-| 0x01 | REQUEST | 客户端请求 |
-| 0x02 | RESPONSE | 服务端响应 |
-| 0x03 | EVENT | 服务端主动事件 |
+| 0x01 | REQUEST | Android 请求 Server 执行操作 |
+| 0x02 | RESPONSE | Server 返回请求结果 |
+| 0x03 | EVENT | Server 主动向 Android 推送事件 |
 
-REQUEST 和 EVENT 的 Status 必须为 0。只有 RESPONSE 使用 Status 表示操作结果。
+规则：
 
-### 3.2 Request ID
+- REQUEST 的 Request ID 必须非零，Status 必须为 0。
+- RESPONSE 的 Request ID 必须与原请求相同。
+- EVENT 的 Request ID 固定为 0，Status 必须为 0。
+- 一个 Request 只能对应一个 Response。
+- Response 可以乱序返回，客户端按 Request ID 匹配。
+- Terminal 和 Agent 的持续输出使用 EVENT。
 
-- 普通 REQUEST 使用非零 64 位 Request ID。
-- RESPONSE 必须复用对应 REQUEST 的 Request ID。
-- EVENT 的 Request ID 固定为 0。
-- 客户端不能在某个请求仍处于 pending 状态时复用其 ID。
-- 响应可以乱序到达，客户端必须按 Request ID 找到对应请求。
-- Request ID 不代表执行顺序，也不代表事务顺序。
+### 2.2 Status
 
-### 3.3 Payload Type
-
-| 值 | 类型 | 用途 |
-|---:|---|---|
-| 0 | EMPTY | 无正文 |
-| 1 | JSON | UTF-8 编码的 JSON |
-| 2 | BINARY | 原始二进制数据 |
-
-控制类消息优先使用 JSON。文件内容、文件块、Terminal 输出和 Agent 输出使用 BINARY，避免对大块数据做 Base64 编码。
-
-## 4. Payload 约定
-
-### 4.1 JSON
-
-JSON 用于传递参数、状态和元数据。
-
-字段名称统一使用 lowerCamelCase。
-
-示例：
-
-    {
-      "workspaceId": "workspace-001",
-      "path": "src/main.cpp"
-    }
-
-### 4.2 二进制 Payload
-
-为了让二进制数据也能携带元信息，统一采用：
-
-    metadataLength : u32，大端序
-    metadata       : UTF-8 JSON
-    data           : 原始字节
-
-metadataLength 表示后续 JSON 元数据的字节数，剩余字节全部属于 data。
-
-例如文件读取响应的 metadata 可以描述文件总大小、当前偏移量和是否到达文件末尾；data 则直接保存文件字节。
-
-Terminal 和 Agent 输出也可以在 metadata 中携带 Session ID、流类型等信息，data 保存原始输出字节。
-
-## 5. Method 编号
-
-Method 使用 16 位编号。编号一经分配，不得再用于其他含义。
-
-### 5.1 系统与握手
-
-| 编号 | Method | 方向 | 用途 |
-|---:|---|---|---|
-| 0x0001 | system.hello | Request | 交换协议版本和能力 |
-| 0x0002 | system.ping | Request | 连通性检查 |
-
-认证相关 Method 在安全实现阶段补充；未完成认证前，开发环境不得暴露到公网。
-
-### 5.2 Workspace
-
-| 编号 | Method | 用途 |
-|---:|---|---|
-| 0x0101 | workspace.listProjects | 列出已登记项目 |
-| 0x0102 | workspace.open | 打开项目 |
-| 0x0103 | workspace.listDir | 枚举目录 |
-| 0x0104 | workspace.readFile | 读取文件或文件范围 |
-| 0x0105 | workspace.writeFile | 写入文件 |
-
-大文件读取和写入使用范围请求或分块传输，不能要求一次把整个大文件装入一个 RPC 帧。
-
-### 5.3 Terminal
-
-| 编号 | Method | 用途 |
-|---:|---|---|
-| 0x0201 | terminal.create | 创建 PTY 会话 |
-| 0x0202 | terminal.input | 发送键盘输入 |
-| 0x0203 | terminal.resize | 更新终端行列数 |
-| 0x0204 | terminal.close | 关闭会话 |
-| 0x0281 | terminal.output | 终端输出事件 |
-| 0x0282 | terminal.exit | 进程退出事件 |
-
-Terminal 输出事件携带 Session ID，客户端据此找到对应终端实例。
-
-### 5.4 Git
-
-| 编号 | Method | 用途 |
-|---:|---|---|
-| 0x0301 | git.status | 查询仓库状态 |
-| 0x0302 | git.diff | 获取文件差异 |
-
-第一版只覆盖最常用的状态和 diff 查询。其他 Git 操作可以通过 Terminal 执行，不需要在 RPC 层重复实现全部 Git 命令。
-
-### 5.5 Agent
-
-| 编号 | Method | 用途 |
-|---:|---|---|
-| 0x0401 | agent.list | 列出 Agent 会话 |
-| 0x0402 | agent.start | 启动 Agent |
-| 0x0403 | agent.input | 向 Agent 发送输入 |
-| 0x0404 | agent.cancel | 请求取消 Agent |
-| 0x0481 | agent.output | Agent 输出事件 |
-| 0x0482 | agent.state | Agent 状态变化事件 |
-
-Agent 输出可以是流式的。普通 RPC 响应只负责确认启动、输入提交或取消请求，不应等待整个 Agent 任务结束。
-
-### 5.6 文件传输
-
-已有 src/file/protocol.cppm 定义了分块文件传输相关结构。新版协议应优先评估并复用已有实现，不要重新设计一套互不兼容的文件分块协议。
-
-文件传输至少需要表达：
-- 上传会话 ID。
-- 文件大小和文件名等元数据。
-- Chunk 序号和校验值。
-- 文件读取偏移量和长度。
-- 上传提交结果。
-
-文件传输 Method 的最终编号在接入现有 File Service 时统一登记。
-
-## 6. 状态码
-
-Status 使用 16 位整数。
+Status 只在 RESPONSE 中有意义。第一版保留统一状态码：
 
 | 值 | 名称 | 含义 |
 |---:|---|---|
@@ -197,75 +64,447 @@ Status 使用 16 位整数。
 | 4 | NOT_FOUND | 目标不存在 |
 | 5 | ALREADY_EXISTS | 目标已存在 |
 | 6 | CONFLICT | 状态冲突 |
-| 7 | RESOURCE_EXHAUSTED | 队列或资源达到上限 |
+| 7 | RESOURCE_EXHAUSTED | 资源或队列达到上限 |
 | 8 | UNSUPPORTED | 不支持的操作 |
 | 9 | CANCELED | 操作已取消 |
 | 10 | INTERNAL | 内部错误 |
 | 11 | UNAVAILABLE | 服务不可用 |
 | 12 | TIMEOUT | 操作超时 |
 
-失败响应的 JSON Payload 示例：
+失败响应可以在 JSON 中附带具体错误：
 
     {
-      "code": "NOT_FOUND",
-      "message": "Workspace does not exist"
+      "message": "文件不存在"
     }
 
-错误消息用于诊断，客户端逻辑应主要依据 Status 和稳定的错误 code，不应解析自然语言 message。
+客户端主要根据 Status 判断结果，不解析自然语言错误描述。
 
-## 7. 数据大小与背压
+## 3. Payload 编码
 
-初始限制：
+Payload 没有类型字段，统一按 UTF-8 文本处理。
 
-| 项目 | 初始上限 |
+除 system.ping 可以使用空 Payload 外，其余 Method 使用 JSON。每个 Method 定义自己的 JSON 字段，不需要额外的 Payload Type。
+
+例如：
+
+- workspace.listProjects：JSON 项目列表。
+- workspace.readFile：JSON 元数据和文本内容。
+- terminal.output：JSON 中包含终端输出文本。
+- git.diff：JSON 中包含 Unified Diff 文本。
+- agent.output：JSON 中包含会话 ID 和 Agent 输出文本。
+
+这样帧解析只做两件事：
+1. 根据 Length 从 TCP 字节流中切出完整帧。
+2. 根据 Method 和 Kind 选择对应的 JSON 结构进行解析。
+
+不再区分 JSON/Binary，也不做 Base64 编码。
+
+**范围限制：** 第一版只支持 UTF-8 文本文件和文本输出，不支持图片、压缩包等二进制文件。文件内容过大时通过 workspace.readFile 的范围参数分段读取。
+
+## 4. Method 编号
+
+Method 是 16 位无符号整数。下面统一写成 4 位十六进制；例如 0x0011 与 0x011 是同一个数值。
+
+### 4.1 系统
+
+| 编号 | Method | 类型 | 用途 |
+|---:|---|---|---|
+| 0x0001 | system.ping | Request | 连通性检查 |
+
+### 4.2 Workspace
+
+| 编号 | Method | 类型 | 用途 |
+|---:|---|---|---|
+| 0x0011 | workspace.listProjects | Request | 列出已登记项目 |
+| 0x0012 | workspace.open | Request | 打开项目 |
+| 0x0013 | workspace.listDir | Request | 枚举指定目录 |
+| 0x0014 | workspace.readFile | Request | 读取 UTF-8 文本文件或指定范围 |
+| 0x0015 | workspace.writeFile | Request | 保存 UTF-8 文本文件 |
+
+### 4.3 Terminal
+
+第一版只有一个默认 Terminal，由 Server 管理，不提供创建和关闭接口。
+
+| 编号 | Method | 类型 | 用途 |
+|---:|---|---|---|
+| 0x0021 | terminal.input | Request | 向默认 Shell 发送输入 |
+| 0x0022 | terminal.resize | Request | 设置终端行数和列数 |
+| 0x0281 | terminal.output | Event | 推送终端输出 |
+| 0x0282 | terminal.state | Event | 推送 Shell 启动、退出和重启状态 |
+
+不提供 terminal.create、terminal.close。Android 断开连接、切换界面或进入后台都不会关闭 Shell。Shell 退出后由 Server 按默认策略重新启动。
+
+### 4.4 Git
+
+| 编号 | Method | 类型 | 用途 |
+|---:|---|---|---|
+| 0x0031 | git.status | Request | 查询仓库状态 |
+| 0x0032 | git.diff | Request | 获取指定文件的代码差异 |
+
+workspace.listDir 负责提供目录树数据；git.status 返回文件状态，客户端将状态标记叠加到目录树上。
+
+git.diff 返回 Unified Diff，客户端将其绘制为逐行增加/删除的代码差异视图。第一版不实现提交历史关系图。
+
+### 4.5 Agent
+
+| 编号 | Method | 类型 | 用途 |
+|---:|---|---|---|
+| 0x0401 | agent.list | Request | 列出 Agent 会话 |
+| 0x0402 | agent.start | Request | 启动 Agent 会话 |
+| 0x0403 | agent.input | Request | 向 Agent 发送输入 |
+| 0x0404 | agent.cancel | Request | 中断当前 Agent 任务 |
+| 0x0405 | agent.close | Request | 终止 Agent 会话并释放进程 |
+| 0x0481 | agent.output | Event | 推送 Agent 输出 |
+| 0x0482 | agent.state | Event | 推送 Agent 状态变化 |
+
+agent.cancel 和 agent.close 不能混为一谈：
+
+- cancel：发送中断信号，停止当前任务，但尽可能保留 Agent 进程，让用户继续对话。
+- close：结束 Agent 进程，释放 PTY 和会话资源。之后不能继续向该会话发送输入。
+
+## 5. 主要 Payload 约定
+
+以下示例中的字段名统一使用 lowerCamelCase。
+
+### 5.1 system.ping
+
+Request：空 Payload。
+
+Response：
+
+    {
+      "ok": true
+    }
+
+### 5.2 workspace.listProjects
+
+Request：
+
+    {}
+
+Response：
+
+    {
+      "projects": [
+        {
+          "workspaceId": "tina",
+          "name": "Tina",
+          "path": "/home/user/projects/tina"
+        }
+      ]
+    }
+
+### 5.3 workspace.open
+
+Request：
+
+    {
+      "workspaceId": "tina"
+    }
+
+Response：
+
+    {
+      "workspaceId": "tina",
+      "name": "Tina"
+    }
+
+### 5.4 workspace.listDir
+
+Request：
+
+    {
+      "workspaceId": "tina",
+      "path": "src"
+    }
+
+Response：
+
+    {
+      "entries": [
+        {
+          "name": "rpc",
+          "path": "src/rpc",
+          "type": "directory"
+        },
+        {
+          "name": "main.cpp",
+          "path": "src/main.cpp",
+          "type": "file",
+          "size": 2048
+        }
+      ]
+    }
+
+客户端按需递归调用 listDir，展开目录树。不要一次性递归读取整个仓库。
+
+### 5.5 workspace.readFile
+
+Request：
+
+    {
+      "workspaceId": "tina",
+      "path": "src/main.cpp",
+      "offset": 0,
+      "maxBytes": 262144
+    }
+
+Response：
+
+    {
+      "offset": 0,
+      "nextOffset": 2048,
+      "totalBytes": 2048,
+      "eof": true,
+      "content": "#include <iostream>\\nint main() {}"
+    }
+
+offset 和 nextOffset 按文件 UTF-8 字节偏移计算。Server 必须保证返回的 content 是完整 UTF-8 字符序列，不能从一个多字节字符中间截断。
+
+### 5.6 workspace.writeFile
+
+Request：
+
+    {
+      "workspaceId": "tina",
+      "path": "src/main.cpp",
+      "content": "#include <iostream>\\nint main() {}"
+    }
+
+Response：
+
+    {
+      "saved": true
+    }
+
+第一版以完整文本文件保存为主。单帧有大小上限，超大文件写入暂不作为目标。
+
+### 5.7 terminal.input
+
+Request：
+
+    {
+      "text": "cmake --build build\\n"
+    }
+
+Response：
+
+    {
+      "accepted": true
+    }
+
+### 5.8 terminal.resize
+
+Request：
+
+    {
+      "cols": 120,
+      "rows": 36
+    }
+
+Response：
+
+    {
+      "accepted": true
+    }
+
+### 5.9 terminal.output
+
+Event：
+
+    {
+      "sequence": 1024,
+      "text": "Build finished\\n"
+    }
+
+sequence 用于识别输出顺序。重连时 Server 可以发送最近输出的快照，并标记 snapshot: true。输出缓存采用固定容量，避免无限增长。
+
+### 5.10 terminal.state
+
+Event：
+
+    {
+      "state": "running"
+    }
+
+Shell 退出或重启时推送相应状态。
+
+### 5.11 git.status
+
+Request：
+
+    {
+      "workspaceId": "tina"
+    }
+
+Response：
+
+    {
+      "branch": "main",
+      "files": [
+        {
+          "path": "src/main.cpp",
+          "indexStatus": " ",
+          "worktreeStatus": "M",
+          "untracked": false
+        }
+      ]
+    }
+
+状态至少区分已修改、已新增、已删除、未跟踪，以及暂存区和工作区的变化。客户端将这些状态装饰到 Workspace 目录树上。
+
+### 5.12 git.diff
+
+Request：
+
+    {
+      "workspaceId": "tina",
+      "path": "src/main.cpp",
+      "scope": "worktree"
+    }
+
+scope 取值：
+- worktree：工作区相对于暂存区的差异。
+- staged：暂存区相对于 HEAD 的差异。
+
+Response：
+
+    {
+      "path": "src/main.cpp",
+      "scope": "worktree",
+      "diff": "@@ -1,2 +1,3 @@\\n..."
+    }
+
+diff 使用标准 Unified Diff 文本。未跟踪文件由 Server 按新文件差异处理。
+
+### 5.13 agent.list
+
+Request：
+
+    {}
+
+Response：
+
+    {
+      "sessions": [
+        {
+          "sessionId": "agent-001",
+          "name": "Codex",
+          "state": "running"
+        }
+      ]
+    }
+
+### 5.14 agent.start
+
+Request：
+
+    {
+      "profileId": "codex",
+      "workspaceId": "tina"
+    }
+
+Response：
+
+    {
+      "sessionId": "agent-001",
+      "state": "running"
+    }
+
+### 5.15 agent.input
+
+Request：
+
+    {
+      "sessionId": "agent-001",
+      "text": "帮我检查当前修改"
+    }
+
+Response：
+
+    {
+      "accepted": true
+    }
+
+### 5.16 agent.cancel
+
+Request：
+
+    {
+      "sessionId": "agent-001"
+    }
+
+Response：
+
+    {
+      "accepted": true
+    }
+
+### 5.17 agent.close
+
+Request：
+
+    {
+      "sessionId": "agent-001"
+    }
+
+Response：
+
+    {
+      "closed": true
+    }
+
+### 5.18 agent.output
+
+Event：
+
+    {
+      "sessionId": "agent-001",
+      "sequence": 128,
+      "text": "检查完成，发现两个问题。"
+    }
+
+### 5.19 agent.state
+
+Event：
+
+    {
+      "sessionId": "agent-001",
+      "state": "busy"
+    }
+
+状态至少包含 starting、running、busy、idle、exited、failed 和 closed。
+
+## 6. 长度限制与 TCP 解析
+
+第一版初始限制：
+
+| 项目 | 上限 |
 |---|---:|
 | 单帧 Length | 1 MiB |
-| 默认文件块 | 256 KiB |
-| Terminal 输出事件块 | 64 KiB |
+| 文件读取请求 maxBytes | 256 KiB |
+| Terminal 单次输出事件 | 64 KiB |
 | Request ID | u64 |
 
-这些是初始设计值，后续可通过基准测试调整。
+Length 是整个帧的后续字节数。Server 必须先验证 Length，再决定是否分配对应缓冲区。
 
-必须满足：
+TCP 是字节流，因此必须处理：
 
-- 收到不完整帧时继续等待，不提前分发。
-- 一次读取包含多帧时，必须逐帧解析。
-- Length 超限时，在按 Length 分配大块内存前拒绝该帧。
-- 非法 Version、Kind、Reserved 或 Payload Type 必须被拒绝。
-- 非法 JSON 或不符合 Method 要求的 Payload 必须返回错误。
-- Socket 只写出部分数据时，保留剩余数据并等待后续可写事件。
-- 每条连接的发送队列和各类事件队列必须有界。
-- 慢客户端不能导致 Server 内存无限增长。
+- 半包：数据不完整时继续等待。
+- 粘包：一次读取多个帧时逐帧解析。
+- 部分写入：未写完的数据保留在输出缓冲区。
+- 非法长度：小于固定头部长度或超过上限时拒绝。
+- 非法 UTF-8 / JSON：返回参数错误或关闭非法连接。
+- 慢客户端：输出队列达到上限时执行背压，不能无限积累。
 
-队列达到上限时应有明确的背压策略。对于 Terminal/Agent 输出，不能无上限地把子进程输出积压在内存里。
+## 7. 第一版明确不支持的内容
 
-## 8. 连接断开与请求语义
+- 二进制文件传输。
+- 多个独立 Terminal 会话。
+- Terminal 创建和关闭接口。
+- Git 提交历史关系图。
+- 多版本协议协商。
+- Payload Type 和 Binary Payload。
+- Agent 厂商专有的复杂 RPC 协议。
 
-- 普通请求超时后，客户端将其标记为失败，并清理对应 pending 状态。
-- 连接断开时，所有无法确认结果的 pending 请求都必须明确失败。
-- 不确定 Server 是否已经执行的非幂等请求不能自动重放。
-- 重连后客户端重新查询 Workspace 和会话状态。
-- Terminal/Agent 会话是否保留由 Server 的会话管理策略决定，不由 TCP 连接的存活状态直接决定。
-
-## 9. 版本兼容
-
-协议当前版本为 1。
-
-- system.hello 用于交换版本和能力。
-- 新增 Method 可以使用尚未分配的编号，不改变现有帧结构。
-- 未知 Method 返回 UNSUPPORTED。
-- 破坏帧结构的修改必须提升协议版本。
-- Reserved 字段在版本 1 中必须为 0。
-
-## 10. 实现边界
-
-Phase 0 只确定协议，不实现新业务接口。
-
-进入 Phase 1 后，先实现最小闭环：
-1. TCP 建立连接。
-2. 交换版本信息。
-3. 发送 ping 请求。
-4. 返回对应 Request ID 的响应。
-5. 验证断线和重连。
-
-随后再按 Workspace、Terminal、Git、Agent 的阶段逐步增加 Method。
+确实需要时再增加，不提前为这些功能增加通用抽象。
