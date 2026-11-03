@@ -15,3 +15,4 @@ src/net/socket.cppm，try——ac，while一直打转
 connection.read拷贝过多
 connection使用数据库分块锁
 线程的CPU核心分配
+log频繁IO
