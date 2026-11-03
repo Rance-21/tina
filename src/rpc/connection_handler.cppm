@@ -136,7 +136,7 @@ void complete_response(const std::weak_ptr<Connection> &weak, net::EventLoop &lo
         return;
 
     try {
-        if (!conn->complete_response(response)) {
+        if (!conn->has_complete_response(response)) {
             close_connection(loop, connections, counter, conn->fd());
             return;
         }

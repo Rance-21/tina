@@ -15,32 +15,33 @@ class Connection {
     }
 
     [[nodiscard]]
-    int fd() const noexcept {
+    inline int fd() const noexcept {
         return socket_.native_handle();
     }
 
     [[nodiscard]]
-    bool wants_write() const noexcept {
+    inline bool wants_write() const noexcept {
         return !output_.empty();
     }
 
     [[nodiscard]]
-    bool peer_eof() const noexcept {
+    inline bool peer_eof() const noexcept {
         return peer_eof_;
     }
 
     [[nodiscard]]
-    bool draining() const noexcept {
+    inline bool draining() const noexcept {
         return draining_;
     }
 
     // 停止读取新的 RPC 请求，已提交的 Worker 任务和响应仍然有效。
-    void begin_shutdown() noexcept {
+    inline void begin_shutdown() noexcept {
         draining_ = true;
     }
 
     [[nodiscard]]
     bool finished() const noexcept {
+        // 完成连接半关闭尾巴或者手动 shutdown
         return (peer_eof_ || draining_) && pending_ == 0 && output_.empty();
     }
 
@@ -76,7 +77,7 @@ class Connection {
     }
 
     // Worker 返回 Response 后，由所属 I/O 线程调用。
-    bool complete_response(const Response &response) {
+    bool has_complete_response(const Response &response) {
         if (pending_ == 0)
             return false;
 

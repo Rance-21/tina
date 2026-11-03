@@ -8,14 +8,13 @@ import net.socket;
 
 export namespace rpc {
 
-/*
-// 一条消息就是一串二进制字节
+/* 一条消息就是一串二进制字节
 using Message = std::vector<uint8_t>;
 
-// 一个 Topic 对应一个不断往后追加（push_back）的消息数组
+一个 Topic 对应一个不断往后追加（push_back）的消息数组
 using TopicLog = std::vector<Message>;
 
-// 整个 Broker 的核心存储：用 Topic 名字（字符串）映射到对应的消息数组
+整个 Broker 的核心存储：用 Topic 名字（字符串）映射到对应的消息数组
 std::unordered_map<std::string, TopicLog> broker_storage;
 */
 
@@ -28,10 +27,10 @@ enum class Method : std::uint8_t {
     // Message Broker，16 开始以位运算
     // 客户端往指定的 topic 发送一条或多条数据
     publish = 16,
-    // 客户端（Consumer）带着参数去问服务器拿数据。请求包里通常会包含 Topic 名称 + 起始 Offset +
+    // 客户端（Consumer）带着参数去问服务器拿数据。请求包里包含 Topic 名称 + 起始 Offset +
     // 最大拉取条数/字节数
     fetch = 17,
-    // 告诉服务端某 Topic 属于该客户端的已经处理到 offset = 109
+    // 告诉服务端某 Topic 属于该客户端的已经处理到 offset =
     commit_offset = 18
 };
 

@@ -140,7 +140,7 @@ class Socket {
         }
     }
 
-    // 把 socket 设置为 non-blocking。
+    // 把 socket 设置为 non-blocking，只有 listener 调用
     void set_non_blocking() {
         int flags = ::fcntl(fd_, F_GETFL, 0);
 

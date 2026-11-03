@@ -167,10 +167,11 @@ void run_server(std::string_view port) {
 
     // 阶段 1：立即停止监听，客户端的新连接不再进入 tina。
     accept_epoll.remove(listener->native_handle());
-    listener.reset();
+    listener.reset(); // 关闭 listen_fd，此后新客户端 connect 直接被内核拒绝
     runtime::log::info("shutdown: stop accepting connections");
 
     // 阶段 2：在各 I/O 线程冻结读取；屏障保证之前已投递的 accept 任务完成。
+    // frozen 是一个只减不增的原子变量
     auto frozen = std::make_shared<std::latch>(static_cast<std::ptrdiff_t>(slots.size()));
     for (auto &slot : slots) {
         auto *loop = slot.loop;
@@ -186,16 +187,14 @@ void run_server(std::string_view port) {
                 }
             } catch (...) {
                 // 不允许异常跳过屏障通知，否则管理线程会永久等待。
-                try {
-                    runtime::log::error("shutdown: failed to freeze an I/O loop");
-                } catch (...) {
-                }
+                runtime::log::error("shutdown: failed to freeze an I/O loop");
             }
             frozen->count_down();
         });
         if (!posted)
             throw std::runtime_error("cannot initiate I/O shutdown");
     }
+    // 阻塞，直到全部 shutdown
     frozen->wait();
 
     // 阶段 3：不再接受 Worker 任务，等待此前接受的任务执行完毕并投递响应。

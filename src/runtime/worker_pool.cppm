@@ -120,7 +120,7 @@ class WorkerPool {
         threads_.clear();
     }
 
-    [[nodiscard]] std::size_t pending() const {
+    [[nodiscard]] std::size_t pending_cnt() const {
         Lock lock(mutex_);
         return tasks_.size();
     }

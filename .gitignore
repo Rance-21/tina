@@ -10,3 +10,4 @@ local_host.txt
 1.cpp
 .clangd
 compile_commands.json
+notes.md

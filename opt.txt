@@ -1,4 +1,3 @@
-1，读时区域的二次拷贝
 2，大量系统调用
 3，EINTR空等
 4,string过多堆区分配
@@ -6,3 +5,13 @@
 6,当前使用软件 CRC32C，之后可以尝试 CPU 的 CRC32 指令进行加速。不过这得通过 Benchmark 决定，而不是现在就加入 SIMD 或手写汇编
 7,src/broker/log.cppm的putbe可simd
 8,异步log机制
+
+------------------------------
+
+UDP分支单应用帧小于等于1460
+用sendfile，send(fd, buf, len, MSG_ZEROCOPY)等实现0拷贝？
+SA_RESTART，异步信号安全,不使用EINTR，signalfd
+src/net/socket.cppm，try——ac，while一直打转
+connection.read拷贝过多
+connection使用数据库分块锁
+线程的CPU核心分配
