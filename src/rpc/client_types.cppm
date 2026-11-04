@@ -26,14 +26,19 @@ class RpcClient {
     RpcClient &operator=(const RpcClient &) = delete;
 
     [[nodiscard]]
-    std::future<Response>
+    std::future<Frame>
     async_call(Method method, std::string payload,
                std::chrono::milliseconds timeout = std::chrono::milliseconds{3000});
 
+    // 使用同一条 RPC 连接发送空负载的 system.ping。
+    [[nodiscard]] std::future<Frame> ping() {
+        return async_call(Method::system_ping, {});
+    }
+
   private:
     using Clock = std::chrono::steady_clock;
-    using DeadlineEntry = std::pair<Clock::time_point, std::uint32_t>;
-    using Promise = std::shared_ptr<std::promise<Response>>;
+    using DeadlineEntry = std::pair<Clock::time_point, std::uint64_t>;
+    using Promise = std::shared_ptr<std::promise<Frame>>;
 
     // 服务器持续不响应时，不允许无限积累过期请求记录。
     static constexpr std::size_t max_expired_ids = 1024;
@@ -55,6 +60,7 @@ class RpcClient {
 
         // 一个尚未完成的请求，以及它的截止时间。
         struct Pending {
+            Method method;
             Promise promise;
             Clock::time_point deadline;
         };
@@ -67,20 +73,17 @@ class RpcClient {
         net::Buffer output;
 
         // request_id -> Pending，目前单线程执行，没必要加锁
-        std::unordered_map<std::uint32_t, Pending> pendings;
+        std::unordered_map<std::uint64_t, Pending> pendings;
 
         // 按截止时间排序，begin() 永远是最近要超时的请求。
         std::set<DeadlineEntry> deadlines;
 
         // 已超时但可能还会收到响应的 request_id。
-        std::unordered_set<std::uint32_t> expired_ids;
+        std::unordered_set<std::uint64_t> expired_ids;
 
-        std::uint32_t next_id{1};
+        std::uint64_t next_id{1};
         bool connected{false};
         bool closed{false};
-
-        static std::uint32_t get_u32(const char *p) noexcept;
-        static void put_u32(net::Buffer &buffer, std::uint32_t value);
 
         void refresh();
         void send_pending();

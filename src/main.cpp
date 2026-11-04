@@ -17,29 +17,30 @@ void print_usage() {
               << "  ./tina async-test\n";
 }
 
-int run_kv_command(int argc, char *argv[], const std::string &command) {
-    rpc::Method method;
+int run_client_command(int argc, char *argv[], const std::string &command) {
+    Method method;
     std::string payload;
-
     if (command == "ping" && argc == 2) {
-        method = rpc::Method::ping;
+        method = Method::system_ping;
     } else if (command == "set" && argc == 4) {
-        method = rpc::Method::set;
+        method = Method::kv_set;
         payload = std::string(argv[2]) + "\n" + argv[3];
     } else if (command == "get" && argc == 3) {
-        method = rpc::Method::get;
+        method = Method::kv_get;
         payload = argv[2];
     } else if (command == "del" && argc == 3) {
-        method = rpc::Method::del;
+        method = Method::kv_del;
         payload = argv[2];
     } else {
-        throw std::invalid_argument("invalid KV command arguments");
+        throw std::invalid_argument("invalid client command arguments");
     }
 
     rpc::RpcClient client;
-    auto response = client.async_call(method, std::move(payload)).get();
+    auto pending = method == Method::system_ping ? client.ping()
+                                                 : client.async_call(method, std::move(payload));
+    auto response = pending.get();
 
-    if (response.status != rpc::Status::ok) {
+    if (response.status != Status::ok) {
         std::cerr << "RPC status=" << static_cast<unsigned>(response.status) << ": "
                   << response.payload << '\n';
         return 1;
@@ -69,7 +70,7 @@ int main(int argc, char *argv[]) {
         }
 
         if (command == "ping" || command == "set" || command == "get" || command == "del") {
-            return run_kv_command(argc, argv, command);
+            return run_client_command(argc, argv, command);
         }
 
         // 原有的异步 RPC 测试。
@@ -80,21 +81,21 @@ int main(int argc, char *argv[]) {
             rpc::RpcClient client;
 
             // 每个 Future 对应一个尚未完成的 RPC。
-            std::vector<std::future<rpc::Response>> futures;
+            std::vector<std::future<Frame>> futures;
             futures.reserve(count);
 
             // 第一轮：连续提交 32 个 SET，不立即等待结果。
             for (int i = 0; i < count; ++i) {
                 std::string payload = "async-" + std::to_string(i) + "\nvalue-" + std::to_string(i);
 
-                futures.push_back(client.async_call(rpc::Method::set, std::move(payload)));
+                futures.push_back(client.async_call(Method::kv_set, std::move(payload)));
             }
 
             // 所有请求提交完毕，再依次检查响应。
             for (auto &future : futures) {
                 auto response = future.get();
 
-                if (response.status != rpc::Status::ok || response.payload != "OK")
+                if (response.status != Status::ok || response.payload != "OK")
                     throw std::runtime_error("async SET failed");
             }
 
@@ -103,7 +104,7 @@ int main(int argc, char *argv[]) {
             // 第二轮：同时提交 32 个 GET。
             for (int i = 0; i < count; ++i) {
                 futures.push_back(
-                    client.async_call(rpc::Method::get, "async-" + std::to_string(i)));
+                    client.async_call(Method::kv_get, "async-" + std::to_string(i)));
             }
 
             // 每个 Future 必须返回对应 key 的 value。
@@ -112,7 +113,7 @@ int main(int argc, char *argv[]) {
 
                 std::string expected = "value-" + std::to_string(i);
 
-                if (response.status != rpc::Status::ok || response.payload != expected)
+                if (response.status != Status::ok || response.payload != expected)
                     throw std::runtime_error("async GET mismatch at index " + std::to_string(i));
             }
 

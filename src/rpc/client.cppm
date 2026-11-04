@@ -55,9 +55,9 @@ RpcClient::~RpcClient() {
     io_pool_.shutdown();
 }
 
-std::future<Response> RpcClient::async_call(Method method, std::string payload,
+std::future<Frame> RpcClient::async_call(Method method, std::string payload,
                                             std::chrono::milliseconds timeout) {
-    auto promise = std::make_shared<std::promise<Response>>();
+    auto promise = std::make_shared<std::promise<Frame>>();
     auto future = promise->get_future();
 
     if (timeout <= std::chrono::milliseconds::zero()) {
@@ -158,7 +158,7 @@ void RpcClient::State::on_timer(net::EpollEvent event) {
         const auto now = Clock::now();
 
         while (!deadlines.empty() && deadlines.begin()->first <= now) {
-            const std::uint32_t id = deadlines.begin()->second;
+            const std::uint64_t id = deadlines.begin()->second;
 
             // 服务器长时间不回应时，关闭连接，
             // 避免保存无限多的迟到响应 ID。

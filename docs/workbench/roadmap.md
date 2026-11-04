@@ -8,7 +8,7 @@
 - Fedora 负责真正执行，Android 负责交互。
 - 保留现有 C++23/Linux RPC Runtime。
 - 只实现实际需要的功能，不追求完整复刻 VS Code。
-- 协议使用简单的 UTF-8 文本和 Method-specific JSON。
+- 协议使用按 Method 解释的 UTF-8 文本。
 - Performance 是首要工程目标，Storage 次之。
 - 每个阶段都必须有可运行的验收结果。
 
@@ -17,7 +17,7 @@
 工作内容：
 - 明确 Android、Rust Backend、C++ Server 的职责。
 - 确定固定帧结构和 Request / Response / Event。
-- 确定 Method 编号及 Payload JSON 结构。
+- 确定 Method 编号及 Payload 文本格式。
 - 确定 Workspace、单一 Terminal、Git、Agent 的功能边界。
 - 确定现有代码的复用方式。
 

@@ -118,12 +118,3 @@ set_tests_properties(rpc_integration PROPERTIES
     TIMEOUT 20
     RUN_SERIAL TRUE
 )
-
-add_executable(test_workbench_protocol test/workbench_protocol.cpp)
-set_target_properties(test_workbench_protocol PROPERTIES CXX_MODULE_STD ON)
-target_sources(test_workbench_protocol
-    PRIVATE
-    FILE_SET CXX_MODULES
-    FILES src/rpc/protocol.cppm
-)
-add_test(NAME workbench_protocol COMMAND test_workbench_protocol)

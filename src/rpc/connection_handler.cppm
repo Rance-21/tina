@@ -10,7 +10,7 @@ import net.epoll;
 import net.event_loop;
 import runtime.worker_pool;
 import rpc.connection;
-import rpc.protocol;
+import ide.protocol;
 import service.kv;
 
 namespace rpc::detail {
@@ -58,7 +58,7 @@ namespace {
 // Worker 只回传结果，连接状态仍由所属 I/O 线程更新。
 void complete_response(const std::weak_ptr<Connection> &weak, net::EventLoop &loop,
                        ConnectionMap &connections, ConnectionCounter &counter,
-                       const Response &response) {
+                       const Frame &response) {
     auto conn = weak.lock();
     if (!conn)
         return;
@@ -76,25 +76,30 @@ void complete_response(const std::weak_ptr<Connection> &weak, net::EventLoop &lo
     }
 }
 
-bool submit_request(Request request, const std::weak_ptr<Connection> &weak, net::EventLoop &loop,
+bool submit_request(Frame request, const std::weak_ptr<Connection> &weak, net::EventLoop &loop,
                     ConnectionMap &connections, runtime::WorkerPool &workers,
                     ConnectionCounter &counter, const std::shared_ptr<KvState> &kv) {
 
     return workers.try_submit([request = std::move(request), weak, &loop, &connections, &counter,
                                kv]() mutable {
-        Response response{request.id, Status::io_error, "internal server error"};
-
+        // 回显原方法和 64 位请求编号；只有访问共享 KV 数据时才持锁。
+        request.kind = Kind::response;
         try {
-            std::lock_guard lock(kv->mutex);
-            response = kv->service.handle(request);
+            if (request.method == Method::system_ping) {
+                handle_ping(request);
+            } else {
+                std::lock_guard lock(kv->mutex);
+                kv->service.handle(request);
+            }
         } catch (const std::bad_alloc &) {
-            response = {request.id, Status::resource_exhausted, "out of memory"};
+            request.status = Status::resource_exhausted;
+            request.payload = "out of memory";
         } catch (...) {
-            // 不允许一个业务异常逃出 Worker，影响线程池。
-            // 以后可以增加服务端错误日志与指标。
+            request.status = Status::internal;
+            request.payload = "internal server error";
         }
 
-        (void)loop.post_task([weak, &loop, &connections, &counter, response = std::move(response)] {
+        (void)loop.post_task([weak, &loop, &connections, &counter, response = std::move(request)] {
             complete_response(weak, loop, connections, counter, response);
         });
     });
@@ -103,8 +108,8 @@ bool submit_request(Request request, const std::weak_ptr<Connection> &weak, net:
 void handle_connection_event(const std::shared_ptr<Connection> &conn,
                              const std::weak_ptr<Connection> &weak, net::EventLoop &loop,
                              ConnectionMap &connections, runtime::WorkerPool &workers,
-                             ConnectionCounter &counter,
-                             const std::shared_ptr<KvState> &kv, net::EpollEvent event) {
+                             ConnectionCounter &counter, const std::shared_ptr<KvState> &kv,
+                             net::EpollEvent event) {
     if (event.error()) {
         close_connection(loop, connections, counter, conn->fd());
         return;
@@ -113,9 +118,8 @@ void handle_connection_event(const std::shared_ptr<Connection> &conn,
     try {
         if (!conn->peer_eof() && !conn->draining() &&
             (event.readable() || event.peer_closed() || event.hangup())) {
-            bool ok = conn->read([&](Request request) {
-                return submit_request(std::move(request), weak, loop, connections, workers, counter,
-                                      kv);
+            bool ok = conn->read([&](Frame request) {
+                return submit_request(std::move(request), weak, loop, connections, workers, counter, kv);
             });
 
             if (!ok) {
@@ -144,8 +148,7 @@ void register_connection(net::Socket socket, net::EventLoop &loop, ConnectionMap
         loop.add_event(
             fd, interests(*conn),
             [conn, weak, &loop, &connections, &workers, &counter, kv](net::EpollEvent event) {
-                handle_connection_event(conn, weak, loop, connections, workers, counter, kv,
-                                        event);
+                handle_connection_event(conn, weak, loop, connections, workers, counter, kv, event);
             });
     } catch (...) {
         connections.erase(fd);

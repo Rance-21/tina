@@ -12,10 +12,9 @@ def connect(port):
     return socket.create_connection((HOST, port), timeout=TIMEOUT)
 
 
-# RPC Frame: length(4) + request_id(4) + method(1) + payload
-def frame(request_id, method, payload=b""):
-    return struct.pack("!IIB", len(payload) + 5,
-                       request_id, method) + payload
+# 大端序的统一帧头：Length、Kind、Request ID、Method、Status。
+def frame(request_id, method, payload=b"", *, kind=1, status=0):
+    return struct.pack("!IBQHH", 13 + len(payload), kind, request_id, method, status) + payload
 
 
 def recv_exact(sock, count):
@@ -29,14 +28,12 @@ def recv_exact(sock, count):
 
     return bytes(data)
 
-def recv_response(sock):
+def recv_response(sock, expected_method):
     length, = struct.unpack("!I", recv_exact(sock, 4))
-    assert 5 <= length <= 1024 * 1024 + 5
-
-    body = recv_exact(sock, length)
-    request_id, status = struct.unpack("!IB", body[:5])
-
-    return request_id, status, body[5:]
+    assert 13 <= length <= 1024 * 1024
+    kind, request_id, method, status = struct.unpack("!BQHH", recv_exact(sock, 13))
+    assert kind == 2 and method == expected_method
+    return request_id, status, recv_exact(sock, length - 13)
 
 
 def expect_no_response(sock):
@@ -72,16 +69,16 @@ def test_fragmentation(port):
         expect_no_response(sock)
 
         sock.sendall(request[11:])
-        assert recv_response(sock) == (101, 0, b"OK")
+        assert recv_response(sock, 2) == (101, 0, b"OK")
 
         # 验证刚才的 SET 确实生效。
         sock.sendall(frame(102, 3, b"frag-key"))
-        assert recv_response(sock) == (102, 0, b"hello")
+        assert recv_response(sock, 3) == (102, 0, b"hello")
 
 
 def test_pipelining(port):
     with connect(port) as sock:
-        ids = range(201, 217)
+        ids = range(2**48, 2**48 + 16)
 
         # 不等待响应，一次性连续发送 16 个请求。
         requests = b"".join(frame(i, 1) for i in ids)
@@ -90,7 +87,7 @@ def test_pipelining(port):
         received = {}
 
         for _ in ids:
-            request_id, status, payload = recv_response(sock)
+            request_id, status, payload = recv_response(sock, 1)
             assert request_id not in received
             received[request_id] = (status, payload)
 
@@ -102,33 +99,37 @@ def test_pipelining(port):
 
 def test_kv_dispatch(port):
     with connect(port) as sock:
-        # KV 旧帧只接受四个方法；非法方法和格式错误的 SET 均不能影响后续请求。
+        # 同一条连接先发 ping，再发 KV 请求。业务错误只影响对应请求。
+        sock.sendall(frame(600, 1))
+        assert recv_response(sock, 1) == (600, 0, b"PONG")
+        sock.sendall(frame(607, 1, b"x"))
+        assert recv_response(sock, 1) == (607, 1, b"ping requires an empty payload")
         sock.sendall(frame(601, 0x11))
-        assert recv_response(sock) == (601, 2, b"unknown method")
+        assert recv_response(sock, 0x11) == (601, 8, b"unsupported method")
         sock.sendall(frame(602, 2, b"no-separator"))
-        assert recv_response(sock) == (602, 2, b"SET requires key and value")
+        assert recv_response(sock, 2) == (602, 1, b"SET requires key and value")
 
         sock.sendall(frame(603, 2, b"del-key\nvalue"))
-        assert recv_response(sock) == (603, 0, b"OK")
+        assert recv_response(sock, 2) == (603, 0, b"OK")
         sock.sendall(frame(604, 4, b"del-key"))
-        assert recv_response(sock) == (604, 0, b"OK")
+        assert recv_response(sock, 4) == (604, 0, b"OK")
         sock.sendall(frame(605, 3, b"del-key"))
-        assert recv_response(sock) == (605, 1, b"NOT_FOUND")
+        assert recv_response(sock, 3) == (605, 4, b"NOT_FOUND")
         sock.sendall(frame(606, 4, b"del-key"))
-        assert recv_response(sock) == (606, 1, b"NOT_FOUND")
+        assert recv_response(sock, 4) == (606, 4, b"NOT_FOUND")
 
 
 def test_invalid_frames(port):
-    for invalid_length in (4, 1024 * 1024 + 6):
+    for packet in (struct.pack("!I", 12), struct.pack("!I", 1024 * 1024 + 1),
+                   frame(0, 1), frame(1, 1, status=1), frame(1, 1, kind=2)):
         with connect(port) as sock:
-            # 只发送非法长度字段。
-            sock.sendall(struct.pack("!I", invalid_length))
+            sock.sendall(packet)
             expect_closed(sock)
 
     # 错误连接不能导致整个 Server 崩溃。
     with connect(port) as sock:
         sock.sendall(frame(301, 1))
-        assert recv_response(sock) == (301, 0, b"PONG")
+        assert recv_response(sock, 1) == (301, 0, b"PONG")
 
 
 def test_half_close(port):
@@ -138,7 +139,7 @@ def test_half_close(port):
         # 客户端不再发送，但仍保留接收方向。
         sock.shutdown(socket.SHUT_WR)
 
-        assert recv_response(sock) == (401, 0, b"PONG")
+        assert recv_response(sock, 1) == (401, 0, b"PONG")
         expect_closed(sock)
 
 
@@ -149,10 +150,10 @@ def test_concurrent_clients(port):
 
         with connect(port) as sock:
             sock.sendall(frame(501, 2, key + b"\n" + value))
-            assert recv_response(sock) == (501, 0, b"OK")
+            assert recv_response(sock, 2) == (501, 0, b"OK")
 
             sock.sendall(frame(502, 3, key))
-            assert recv_response(sock) == (502, 0, value)
+            assert recv_response(sock, 3) == (502, 0, value)
 
     with ThreadPoolExecutor(max_workers=16) as pool:
         list(pool.map(client, range(16)))
@@ -199,7 +200,6 @@ def main():
             ("half close", test_half_close),
             ("concurrent clients", test_concurrent_clients),
         ]
-
         for name, test in tests:
             test(port)
             print(f"PASS: {name}", flush=True)

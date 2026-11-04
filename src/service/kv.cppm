@@ -7,65 +7,45 @@ export namespace service {
 
 class KvService {
   public:
-    rpc::Response handle(const rpc::Request &request) {
-        switch (request.method) {
-        case rpc::Method::ping:
-            return {request.id, rpc::Status::ok, "PONG"};
-
-        case rpc::Method::set:
-            return handle_set(request);
-
-        case rpc::Method::get:
-            return handle_get(request);
-
-        case rpc::Method::del:
-            return handle_del(request);
+    // 原帧保留请求编号和方法，直接填写响应状态和文本负载。
+    void handle(Frame &frame) {
+        switch (frame.method) {
+        case Method::kv_set: {
+            // 只用第一个换行分隔键和值，值中可以包含后续换行。
+            const auto separator = frame.payload.find('\n');
+            if (separator == std::string::npos) {
+                frame.status = Status::invalid_argument;
+                frame.payload = "SET requires key and value";
+                return;
+            }
+            data_[frame.payload.substr(0, separator)] = frame.payload.substr(separator + 1);
+            frame.payload = "OK";
+            return;
         }
-
-        return {request.id, rpc::Status::bad_request, "unknown method"};
+        case Method::kv_get: {
+            auto it = data_.find(frame.payload);
+            if (it != data_.end()) {
+                frame.payload = it->second;
+                return;
+            }
+            break;
+        }
+        case Method::kv_del:
+            if (data_.erase(frame.payload)) {
+                frame.payload = "OK";
+                return;
+            }
+            break;
+        default:
+            frame.status = Status::unsupported;
+            frame.payload = "unsupported method";
+            return;
+        }
+        frame.status = Status::not_found;
+        frame.payload = "NOT_FOUND";
     }
 
   private:
-    rpc::Response handle_set(const rpc::Request &request) {
-        // SET 的 payload 暂时定义为：
-        //
-        // key\nvalue
-
-        std::size_t separator = request.payload.find('\n');
-
-        if (separator == std::string::npos) {
-            return {request.id, rpc::Status::bad_request, "SET requires key and value"};
-        }
-
-        std::string key = request.payload.substr(0, separator);
-
-        std::string value = request.payload.substr(separator + 1);
-
-        data_[std::move(key)] = std::move(value);
-
-        return {request.id, rpc::Status::ok, "OK"};
-    }
-
-    rpc::Response handle_get(const rpc::Request &request) {
-        auto it = data_.find(request.payload);
-
-        if (it == data_.end()) {
-            return {request.id, rpc::Status::not_found, "NOT_FOUND"};
-        }
-
-        return {request.id, rpc::Status::ok, it->second};
-    }
-
-    rpc::Response handle_del(const rpc::Request &request) {
-        std::size_t count = data_.erase(request.payload);
-
-        if (count == 0) {
-            return {request.id, rpc::Status::not_found, "NOT_FOUND"};
-        }
-
-        return {request.id, rpc::Status::ok, "OK"};
-    }
-
     std::unordered_map<std::string, std::string> data_;
 };
 

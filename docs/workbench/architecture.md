@@ -182,8 +182,8 @@ Agent 不需要在 Server 启动时自动全部运行，由用户在 IDE 中启�
 - TCP 长连接。
 - 固定帧头：Length、Kind、Request ID、Method、Status。
 - 不包含 Version 和 Payload Type。
-- Payload 统一为 UTF-8 文本，结构化内容使用 JSON。
-- 由 Method 决定 JSON 字段结构。
+- Payload 统一为 UTF-8 文本。
+- 由 Method 决定文本格式。
 - Request / Response / Event 三种消息类型。
 - 终端和 Agent 的输出使用 Event 推送，不等待一个长时间 RPC 完成。
 

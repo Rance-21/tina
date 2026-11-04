@@ -4,7 +4,7 @@ import std;
 import net.buffer;
 import net.socket;
 import net.event_loop;
-import rpc.protocol;
+import ide.protocol;
 
 export namespace rpc {
 
@@ -46,7 +46,6 @@ class Connection {
     }
 
     // 读取 Socket，解析请求并提交给线程池。
-    // submit(Request) 返回 false 表示拒绝任务，此时关闭连接。
     template <typename Submit> bool read(Submit &&submit) {
         if (draining_)
             return true;
@@ -69,20 +68,26 @@ class Connection {
 
             input_.append(chunk.data(), *n);
 
-            if (!decode(submit))
-                return false;
+            while (auto request = decode_frame(input_)) {
+                if (request->kind != Kind::request || pending_ >= max_inflight ||
+                    !submit(std::move(*request)))
+                    return false;
+                ++pending_;
+            }
         }
 
         return true;
     }
 
-    // Worker 返回 Response 后，由所属 I/O 线程调用。
-    bool has_complete_response(const Response &response) {
-        if (pending_ == 0)
+    // Worker 返回响应帧后，由所属 I/O 线程调用。
+    bool has_complete_response(const Frame &response) {
+        const auto frame_size = frame_header_size + response.payload.size();
+        if (pending_ == 0 || output_.readable_bytes() + frame_size > max_output)
             return false;
 
         --pending_;
-        return encode_response(response);
+        encode_frame(response, output_);
+        return true;
     }
 
     // 非阻塞发送输出缓冲区中的数据。
@@ -99,77 +104,6 @@ class Connection {
     }
 
   private:
-    static std::uint32_t get_u32(const char *p) noexcept {
-        return (static_cast<std::uint32_t>(static_cast<unsigned char>(p[0])) << 24) |
-               (static_cast<std::uint32_t>(static_cast<unsigned char>(p[1])) << 16) |
-               (static_cast<std::uint32_t>(static_cast<unsigned char>(p[2])) << 8) |
-               static_cast<std::uint32_t>(static_cast<unsigned char>(p[3]));
-    }
-
-    static void put_u32(net::Buffer &out, std::uint32_t value) {
-        std::array<char, 4> bytes{static_cast<char>(value >> 24), static_cast<char>(value >> 16),
-                                  static_cast<char>(value >> 8), static_cast<char>(value)};
-
-        out.append(bytes.data(), bytes.size());
-    }
-
-    // 解析完整帧，不完整的数据留到下一次读取。
-    template <typename Submit> bool decode(Submit &submit) {
-        std::size_t consumed = 0;
-
-        while (input_.readable_bytes() - consumed >= 4) {
-            const char *frame = input_.data() + consumed;
-            const std::uint32_t length = get_u32(frame);
-
-            if (length < 5 || length > max_payload_size + 5)
-                return false;
-
-            const std::size_t frame_size = static_cast<std::size_t>(length) + 4;
-
-            if (input_.readable_bytes() - consumed < frame_size)
-                break;
-
-            // 限制单连接同时运行的 RPC 数量。
-            if (pending_ >= max_inflight)
-                return false;
-
-            Request request{.id = get_u32(frame + 4),
-                            .method = static_cast<Method>(static_cast<unsigned char>(frame[8])),
-                            .payload = std::string(frame + 9, length - 5)};
-
-            if (!submit(std::move(request)))
-                return false;
-
-            ++pending_;
-            consumed += frame_size;
-        }
-
-        if (consumed != 0)
-            input_.retrieve(consumed);
-
-        return true;
-    }
-
-    // 将 Response 编码到输出缓冲区。
-    bool encode_response(const Response &response) {
-        if (response.payload.size() > max_payload_size)
-            return false;
-
-        const std::size_t frame_size = response.payload.size() + 9;
-
-        if (output_.readable_bytes() + frame_size > max_output)
-            return false;
-
-        put_u32(output_, static_cast<std::uint32_t>(response.payload.size() + 5));
-        put_u32(output_, response.request_id);
-
-        char status = static_cast<char>(response.status);
-        output_.append(&status, 1);
-        output_.append(response.payload.data(), response.payload.size());
-
-        return true;
-    }
-
     static constexpr std::size_t max_inflight = 64;
     static constexpr std::size_t max_output = 4 * 1024 * 1024;
 

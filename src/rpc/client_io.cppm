@@ -10,7 +10,7 @@ import net.socket;
 import net.buffer;
 import net.epoll;
 import net.event_loop;
-import rpc.protocol;
+import ide.protocol;
 
 namespace rpc {
 
@@ -110,8 +110,8 @@ void RpcClient::State::fail(std::exception_ptr error) noexcept {
 // Deadline 在调用线程计算，不在这里重新开始计时。
 void RpcClient::State::send(Method method, std::string payload, Clock::time_point deadline,
                             Promise promise) {
-    if (closed || payload.size() > max_payload_size || pendings.size() >= max_inflight ||
-        output.readable_bytes() + payload.size() + 9 > max_output) {
+    if (closed || payload.size() > max_frame_length - min_frame_length || pendings.size() >= max_inflight ||
+        output.readable_bytes() + payload.size() + frame_header_size > max_output) {
         promise->set_exception(std::make_exception_ptr(
             std::runtime_error("RPC client closed or request limit exceeded")));
         return;
@@ -122,7 +122,7 @@ void RpcClient::State::send(Method method, std::string payload, Clock::time_poin
         return;
     }
 
-    std::uint32_t id;
+    std::uint64_t id;
 
     do {
         id = next_id++;
@@ -133,18 +133,13 @@ void RpcClient::State::send(Method method, std::string payload, Clock::time_poin
 
     const bool earliest = deadlines.empty() || DeadlineEntry{deadline, id} < *deadlines.begin();
 
-    pendings.emplace(id, Pending{promise, deadline});
+    pendings.emplace(id, Pending{method, promise, deadline});
     deadlines.emplace(deadline, id);
 
-    // 请求帧：[length][request_id][method][payload]
-    put_u32(output, static_cast<std::uint32_t>(payload.size() + 5));
-    put_u32(output, id);
+    encode_frame({.kind = Kind::request, .request_id = id, .method = method,
+                  .status = Status::ok, .payload = std::move(payload)}, output);
 
-    char code = static_cast<char>(method);
-    output.append(&code, 1);
-    output.append(payload.data(), payload.size());
-
-    // 避免每次提交请求都调用 timerfd_settime。EventLoop::post(
+    // 仅在最早的截止时间改变时更新定时器。
     if (earliest)
         update_timer();
 
@@ -184,19 +179,10 @@ void RpcClient::State::receive() {
 
 // 解析响应，并判断对应请求是否已经超时。
 void RpcClient::State::decode() {
-    while (input.readable_bytes() >= 4) {
-        const char *frame = input.data();
-        const std::uint32_t length = get_u32(frame);
-
-        if (length < 5 || length > max_payload_size + 5)
-            throw std::runtime_error("invalid response frame length");
-
-        const std::size_t frame_size = static_cast<std::size_t>(length) + 4;
-
-        if (input.readable_bytes() < frame_size)
-            break;
-
-        const std::uint32_t id = get_u32(frame + 4);
+    while (auto response = decode_frame(input)) {
+        if (response->kind != Kind::response)
+            throw std::runtime_error("expected RPC response");
+        const auto id = response->request_id;
         auto it = pendings.find(id);
 
         if (it == pendings.end()) {
@@ -205,10 +191,11 @@ void RpcClient::State::decode() {
             if (expired_ids.erase(id) == 0)
                 throw std::runtime_error("unknown response id");
 
-            input.retrieve(frame_size);
             continue;
         }
 
+        if (response->method != it->second.method)
+            throw std::runtime_error("RPC response method mismatch");
         auto promise = it->second.promise;
         const auto deadline = it->second.deadline;
 
@@ -220,36 +207,16 @@ void RpcClient::State::decode() {
         if (Clock::now() >= deadline) {
             // 即使 timerfd 事件还没有执行，
             // 已经过期的响应仍然算超时。
-            input.retrieve(frame_size);
 
             promise->set_exception(std::make_exception_ptr(TimeoutError{}));
         } else {
-            Response response{.request_id = id,
-                              .status = static_cast<Status>(static_cast<unsigned char>(frame[8])),
-                              .payload = std::string(frame + 9, length - 5)};
-
-            input.retrieve(frame_size);
-            promise->set_value(std::move(response));
+            promise->set_value(std::move(*response));
         }
 
         // 仅当最近的 Deadline 改变时才修改 timerfd。
         if (earliest)
             update_timer();
     }
-}
-
-std::uint32_t RpcClient::State::get_u32(const char *p) noexcept {
-    return (static_cast<std::uint32_t>(static_cast<unsigned char>(p[0])) << 24) |
-           (static_cast<std::uint32_t>(static_cast<unsigned char>(p[1])) << 16) |
-           (static_cast<std::uint32_t>(static_cast<unsigned char>(p[2])) << 8) |
-           static_cast<std::uint32_t>(static_cast<unsigned char>(p[3]));
-}
-
-void RpcClient::State::put_u32(net::Buffer &buffer, std::uint32_t value) {
-    std::array<char, 4> bytes{static_cast<char>(value >> 24), static_cast<char>(value >> 16),
-                              static_cast<char>(value >> 8), static_cast<char>(value)};
-
-    buffer.append(bytes.data(), bytes.size());
 }
 
 } // namespace rpc

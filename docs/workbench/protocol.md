@@ -13,9 +13,8 @@
 - 不设置 Payload Type。
 - 不支持二进制 Payload。
 - 所有 Payload 都是 UTF-8 文本。
-- 结构化内容统一使用 JSON。
-- 由 Method 决定具体 JSON 结构和解析方式。
-- 只保留当前 IDE 真正需要的 Method。
+- 客户端与服务端共用一套帧格式，由 Method 决定文本负载的含义。
+- 只保留工作台与 KV 使用的 Method。
 
 客户端和 Server 由同一个人维护，协议升级时两端一起更新。
 
@@ -30,7 +29,7 @@
 | Request ID | 8 字节 | 请求关联编号 |
 | Method | 2 字节 | 操作编号 |
 | Status | 2 字节 | 响应状态码 |
-| Payload | 可变 | UTF-8 文本，通常为 JSON |
+| Payload | 可变 | 按 Method 解释的 UTF-8 文本 |
 
 固定帧头总计 **17 字节**。其中 Length 自身占 4 字节，因此 Length 的值为 13 + Payload 字节数。
 
@@ -71,33 +70,18 @@ Status 只在 RESPONSE 中有意义。第一版保留统一状态码：
 | 11 | UNAVAILABLE | 服务不可用 |
 | 12 | TIMEOUT | 操作超时 |
 
-失败响应可以在 JSON 中附带具体错误：
-
-    {
-      "message": "文件不存在"
-    }
-
-客户端主要根据 Status 判断结果，不解析自然语言错误描述。
+失败响应直接携带错误文本，客户端按 Status 判断结果。
 
 ## 3. Payload 编码
 
-Payload 没有类型字段，统一按 UTF-8 文本处理。
+帧头后紧跟原始文本，长度按字节计算。收包时先按 Length 切出完整帧，再按 Kind 和 Method 处理。当前已实现的方法使用下表的文本格式。
 
-除 system.ping 可以使用空 Payload 外，其余 Method 使用 JSON。每个 Method 定义自己的 JSON 字段，不需要额外的 Payload Type。
-
-例如：
-
-- workspace.listProjects：JSON 项目列表。
-- workspace.readFile：JSON 元数据和文本内容。
-- terminal.output：JSON 中包含终端输出文本。
-- git.diff：JSON 中包含 Unified Diff 文本。
-- agent.output：JSON 中包含会话 ID 和 Agent 输出文本。
-
-这样帧解析只做两件事：
-1. 根据 Length 从 TCP 字节流中切出完整帧。
-2. 根据 Method 和 Kind 选择对应的 JSON 结构进行解析。
-
-不再区分 JSON/Binary，也不做 Base64 编码。
+| Method | 请求 Payload | 成功响应 Payload |
+|---|---|---|
+| system.ping | 零字节 | `PONG` |
+| kv.set | 键、一个换行符、值（只按第一个换行切分） | `OK` |
+| kv.get | 键 | 原始值 |
+| kv.del | 键 | `OK` |
 
 **范围限制：** 第一版只支持 UTF-8 文本文件和文本输出，不支持图片、压缩包等二进制文件。文件内容过大时通过 workspace.readFile 的范围参数分段读取。
 
@@ -105,11 +89,14 @@ Payload 没有类型字段，统一按 UTF-8 文本处理。
 
 Method 是 16 位无符号整数。下面统一写成 4 位十六进制；例如 0x0011 与 0x011 是同一个数值。
 
-### 4.1 系统
+### 4.1 系统与 KV
 
 | 编号 | Method | 类型 | 用途 |
 |---:|---|---|---|
 | 0x0001 | system.ping | Request | 连通性检查 |
+| 0x0002 | kv.set | Request | 写入键值 |
+| 0x0003 | kv.get | Request | 读取值 |
+| 0x0004 | kv.del | Request | 删除键 |
 
 ### 4.2 Workspace
 
@@ -164,316 +151,18 @@ agent.cancel 和 agent.close 不能混为一谈：
 
 ## 5. 主要 Payload 约定
 
-以下示例中的字段名统一使用 lowerCamelCase。
-
 ### 5.1 system.ping
 
-Request：空 Payload。
+运行 `./tina server`，再在另一个终端运行 `./tina ping`。客户端连接默认端口 3490，发送空负载请求，服务端回显相同的 Request ID 和 Method，返回状态 OK 和文本 `PONG`。
 
-Response：
+### 5.2 预留方法
 
-    {
-      "ok": true
-    }
+Workspace、Terminal、Git、Agent 的编号见第 4 节。它们目前返回 UNSUPPORTED，具体文本格式留到实现相应方法时确定。后续设计应保留以下语义。
 
-### 5.2 workspace.listProjects
-
-Request：
-
-    {}
-
-Response：
-
-    {
-      "projects": [
-        {
-          "workspaceId": "tina",
-          "name": "Tina",
-          "path": "/home/user/projects/tina"
-        }
-      ]
-    }
-
-### 5.3 workspace.open
-
-Request：
-
-    {
-      "workspaceId": "tina"
-    }
-
-Response：
-
-    {
-      "workspaceId": "tina",
-      "name": "Tina"
-    }
-
-### 5.4 workspace.listDir
-
-Request：
-
-    {
-      "workspaceId": "tina",
-      "path": "src"
-    }
-
-Response：
-
-    {
-      "entries": [
-        {
-          "name": "rpc",
-          "path": "src/rpc",
-          "type": "directory"
-        },
-        {
-          "name": "main.cpp",
-          "path": "src/main.cpp",
-          "type": "file",
-          "size": 2048
-        }
-      ]
-    }
-
-客户端按需递归调用 listDir，展开目录树。不要一次性递归读取整个仓库。
-
-### 5.5 workspace.readFile
-
-Request：
-
-    {
-      "workspaceId": "tina",
-      "path": "src/main.cpp",
-      "offset": 0,
-      "maxBytes": 262144
-    }
-
-Response：
-
-    {
-      "offset": 0,
-      "nextOffset": 2048,
-      "totalBytes": 2048,
-      "eof": true,
-      "content": "#include <iostream>\\nint main() {}"
-    }
-
-offset 和 nextOffset 按文件 UTF-8 字节偏移计算。Server 必须保证返回的 content 是完整 UTF-8 字符序列，不能从一个多字节字符中间截断。
-
-### 5.6 workspace.writeFile
-
-Request：
-
-    {
-      "workspaceId": "tina",
-      "path": "src/main.cpp",
-      "content": "#include <iostream>\\nint main() {}"
-    }
-
-Response：
-
-    {
-      "saved": true
-    }
-
-第一版以完整文本文件保存为主。单帧有大小上限，超大文件写入暂不作为目标。
-
-### 5.7 terminal.input
-
-Request：
-
-    {
-      "text": "cmake --build build\\n"
-    }
-
-Response：
-
-    {
-      "accepted": true
-    }
-
-### 5.8 terminal.resize
-
-Request：
-
-    {
-      "cols": 120,
-      "rows": 36
-    }
-
-Response：
-
-    {
-      "accepted": true
-    }
-
-### 5.9 terminal.output
-
-Event：
-
-    {
-      "sequence": 1024,
-      "text": "Build finished\\n"
-    }
-
-sequence 用于识别输出顺序。重连时 Server 可以发送最近输出的快照，并标记 snapshot: true。输出缓存采用固定容量，避免无限增长。
-
-### 5.10 terminal.state
-
-Event：
-
-    {
-      "state": "running"
-    }
-
-Shell 退出或重启时推送相应状态。
-
-### 5.11 git.status
-
-Request：
-
-    {
-      "workspaceId": "tina"
-    }
-
-Response：
-
-    {
-      "branch": "main",
-      "files": [
-        {
-          "path": "src/main.cpp",
-          "indexStatus": " ",
-          "worktreeStatus": "M",
-          "untracked": false
-        }
-      ]
-    }
-
-状态至少区分已修改、已新增、已删除、未跟踪，以及暂存区和工作区的变化。客户端将这些状态装饰到 Workspace 目录树上。
-
-### 5.12 git.diff
-
-Request：
-
-    {
-      "workspaceId": "tina",
-      "path": "src/main.cpp",
-      "scope": "worktree"
-    }
-
-scope 取值：
-- worktree：工作区相对于暂存区的差异。
-- staged：暂存区相对于 HEAD 的差异。
-
-Response：
-
-    {
-      "path": "src/main.cpp",
-      "scope": "worktree",
-      "diff": "@@ -1,2 +1,3 @@\\n..."
-    }
-
-diff 使用标准 Unified Diff 文本。未跟踪文件由 Server 按新文件差异处理。
-
-### 5.13 agent.list
-
-Request：
-
-    {}
-
-Response：
-
-    {
-      "sessions": [
-        {
-          "sessionId": "agent-001",
-          "name": "Codex",
-          "state": "running"
-        }
-      ]
-    }
-
-### 5.14 agent.start
-
-Request：
-
-    {
-      "profileId": "codex",
-      "workspaceId": "tina"
-    }
-
-Response：
-
-    {
-      "sessionId": "agent-001",
-      "state": "running"
-    }
-
-### 5.15 agent.input
-
-Request：
-
-    {
-      "sessionId": "agent-001",
-      "text": "帮我检查当前修改"
-    }
-
-Response：
-
-    {
-      "accepted": true
-    }
-
-### 5.16 agent.cancel
-
-Request：
-
-    {
-      "sessionId": "agent-001"
-    }
-
-Response：
-
-    {
-      "accepted": true
-    }
-
-### 5.17 agent.close
-
-Request：
-
-    {
-      "sessionId": "agent-001"
-    }
-
-Response：
-
-    {
-      "closed": true
-    }
-
-### 5.18 agent.output
-
-Event：
-
-    {
-      "sessionId": "agent-001",
-      "sequence": 128,
-      "text": "检查完成，发现两个问题。"
-    }
-
-### 5.19 agent.state
-
-Event：
-
-    {
-      "sessionId": "agent-001",
-      "state": "busy"
-    }
-
-状态至少包含 starting、running、busy、idle、exited、failed 和 closed。
+- Workspace 以项目 ID 和相对路径定位文件，目录按需逐层展开。读取范围按 UTF-8 字节偏移表示，返回的文本在完整字符边界结束。保存时提交完整文件。
+- Terminal 输入文本，调整大小时指定行列数。输出带序号，重连可返回近期输出快照。终端状态事件表示 Shell 启动、退出或重启。
+- Git 状态包含分支和每个文件的暂存区、工作区及未跟踪状态。差异使用 Unified Diff，`worktree` 比较工作区与暂存区，`staged` 比较暂存区与 HEAD，未跟踪文件按新增处理。
+- Agent 按配置和项目启动，以会话 ID 关联输入、输出和状态。输出带序号。状态包括 starting、running、busy、idle、exited、failed 和 closed。中断任务可保留会话，关闭会话会释放进程。
 
 ## 6. 长度限制与 TCP 解析
 
@@ -494,7 +183,7 @@ TCP 是字节流，因此必须处理：
 - 粘包：一次读取多个帧时逐帧解析。
 - 部分写入：未写完的数据保留在输出缓冲区。
 - 非法长度：小于固定头部长度或超过上限时拒绝。
-- 非法 UTF-8 / JSON：返回参数错误或关闭非法连接。
+- 非法文本负载：返回参数错误或关闭非法连接。
 - 慢客户端：输出队列达到上限时执行背压，不能无限积累。
 
 ## 7. 第一版明确不支持的内容
