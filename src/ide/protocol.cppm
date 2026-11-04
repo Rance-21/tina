@@ -38,10 +38,13 @@ export void encode_frame(const Frame &frame, net::Buffer &out) {
 
     std::array<char, frame_header_size> header;
     write_be(header.data(), min_frame_length + static_cast<std::uint32_t>(frame.payload.size()));
+
     header[4] = static_cast<char>(frame.kind);
+
     write_be(header.data() + 5, frame.request_id);
     write_be(header.data() + 13, std::to_underlying(frame.method));
     write_be(header.data() + 15, std::to_underlying(frame.status));
+
     out.append(header.data(), header.size());
     out.append(frame.payload.data(), frame.payload.size());
 }
@@ -50,10 +53,13 @@ export void encode_frame(const Frame &frame, net::Buffer &out) {
 export std::optional<Frame> decode_frame(net::Buffer &in) {
     if (in.readable_bytes() < 4)
         return std::nullopt;
+
     const char *bytes = in.data();
     const auto length = read_be<std::uint32_t>(bytes);
+
     if (length < min_frame_length || length > max_frame_length)
         throw std::invalid_argument("invalid RPC frame length");
+
     if (in.readable_bytes() < 4 + length)
         return std::nullopt;
 
@@ -63,8 +69,10 @@ export std::optional<Frame> decode_frame(net::Buffer &in) {
                 .method = static_cast<Method>(read_be<std::uint16_t>(bytes + 13)),
                 .status = static_cast<Status>(read_be<std::uint16_t>(bytes + 15)),
                 .payload = {}};
+
     if (!valid_header(frame))
         throw std::invalid_argument("invalid RPC frame header");
+
     frame.payload.assign(bytes + frame_header_size, length - min_frame_length);
     in.retrieve(4 + length);
     return frame;

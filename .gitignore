@@ -11,3 +11,21 @@ local_host.txt
 .clangd
 compile_commands.json
 notes.md
+
+# Android App / Qt Quick Client 构建产物与缓存
+/android_app/build/
+/android_app/build-*/
+/android_app/cmake-build-*/
+/android_app/.qt/
+/android_app/.qtc_clangd/
+/android_app/CMakeLists.txt.user*
+/android_app/android-build/
+/android_app/.gradle/
+*.qmlc
+*.jsc
+*.aotstats
+
+# 编辑器与通用缓存
+.cache/
+logs/
+
