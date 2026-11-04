@@ -4,32 +4,11 @@ import rpc.client;
 import rpc.protocol;
 import rpc.server;
 
-import broker.client;
-import broker.protocol;
-
 namespace {
-
-// 解析命令行无符号整数。
-template <typename T> T parse_number(std::string_view text, std::string_view name) {
-    T value{};
-
-    auto [ptr, ec] = std::from_chars(text.data(), text.data() + text.size(), value);
-
-    if (text.empty() || ec != std::errc{} || ptr != text.data() + text.size()) {
-        throw std::invalid_argument("invalid " + std::string(name) + ": " + std::string(text));
-    }
-
-    return value;
-}
 
 void print_usage() {
     std::cout << "usage:\n"
               << "  ./tina server [port]\n"
-              << "\n"
-              << "  ./tina publish <topic> <partition> <message>\n"
-              << "  ./tina fetch <topic> <partition> [offset]\n"
-              << "  ./tina consume <topic> <partition> [offset]\n"
-              << "  ./tina commit <consumer> <topic> <partition> <next_offset>\n"
               << "\n"
               << "  ./tina ping\n"
               << "  ./tina set <key> <value>\n"
@@ -38,24 +17,6 @@ void print_usage() {
               << "  ./tina async-test\n";
 }
 
-// 按实际长度输出消息。
-// 与直接使用 C 字符串不同，消息中允许包含 NUL。
-void print_records(const broker::protocol::FetchResult &result) {
-    for (const auto &record : result.records) {
-        std::cout << "[offset=" << record.offset << ", bytes=" << record.message.size() << "] ";
-
-        std::cout.write(record.message.data(), static_cast<std::streamsize>(record.message.size()));
-
-        std::cout << '\n';
-    }
-
-    std::cout.flush();
-
-    if (!std::cout)
-        throw std::runtime_error("failed to write consumed messages");
-}
-
-// 原有 KV 命令行测试。
 int run_kv_command(int argc, char *argv[], const std::string &command) {
     rpc::Method method;
     std::string payload;
@@ -107,91 +68,6 @@ int main(int argc, char *argv[]) {
             return 0;
         }
 
-        // 通过 BrokerClient 发布消息。
-        if (command == "publish") {
-            if (argc != 5)
-                throw std::invalid_argument("usage: ./tina publish <topic> <partition> <message>");
-
-            const std::string topic = argv[2];
-            const auto partition = parse_number<std::uint32_t>(argv[3], "partition");
-
-            broker::BrokerClient client;
-
-            auto result =
-                client.publish({.topic = topic, .partition = partition, .message = argv[4]});
-
-            std::cout << "PUBLISH OK: " << topic << "/" << partition << " offset=" << result.offset
-                      << '\n';
-            return 0;
-        }
-
-        // fetch：拉取一次后退出。
-        // consume：持续轮询，直到用户中断。
-        if (command == "fetch" || command == "consume") {
-            if (argc != 4 && argc != 5)
-                throw std::invalid_argument(
-                    "usage: ./tina fetch|consume <topic> <partition> [offset]");
-
-            const std::string topic = argv[2];
-            const auto partition = parse_number<std::uint32_t>(argv[3], "partition");
-
-            std::uint64_t offset = argc == 5 ? parse_number<std::uint64_t>(argv[4], "offset") : 0;
-
-            const bool continuous = (command == "consume");
-
-            broker::BrokerClient client;
-
-            while (true) {
-                auto result = client.fetch({.topic = topic,
-                                            .partition = partition,
-                                            .offset = offset,
-                                            .max_bytes = rpc::max_payload_size});
-
-                print_records(result);
-
-                // 下次从这次成功获取的消息之后继续读取。
-                offset = result.next_offset;
-
-                if (!continuous)
-                    break;
-
-                // 没有新消息时，降低空轮询频率。
-                // 这里只暂停 CLI 线程，不阻塞服务端 Worker。
-                if (result.records.empty()) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds{200});
-                }
-            }
-
-            return 0;
-        }
-
-        // 手动提交 Consumer 进度。
-        if (command == "commit") {
-            if (argc != 6)
-                throw std::invalid_argument("usage: ./tina commit <consumer> <topic> "
-                                            "<partition> <next_offset>");
-
-            const std::string consumer = argv[2];
-            const std::string topic = argv[3];
-
-            const auto partition = parse_number<std::uint32_t>(argv[4], "partition");
-
-            const auto next_offset = parse_number<std::uint64_t>(argv[5], "next_offset");
-
-            broker::BrokerClient client;
-
-            client.commit_offset({.consumer = consumer,
-                                  .topic = topic,
-                                  .partition = partition,
-                                  .next_offset = next_offset});
-
-            std::cout << "COMMIT OK: " << consumer << " " << topic << "/" << partition
-                      << " next_offset=" << next_offset << '\n';
-
-            return 0;
-        }
-
-        // 保留 KV。
         if (command == "ping" || command == "set" || command == "get" || command == "del") {
             return run_kv_command(argc, argv, command);
         }

@@ -19,7 +19,7 @@ import runtime.worker_pool;
 import runtime.log;
 
 import rpc.connection;
-import rpc.connection_handler;
+import rpc.handler;
 
 namespace {
 
@@ -94,13 +94,8 @@ void run_server(std::string_view port) {
     accept_epoll.add(listener->native_handle(), net::EpollInterest::read);
     accept_epoll.add(signals.fd(), net::EpollInterest::read);
 
-    // 所有连接、所有 Worker 共享同一个业务状态。
-    auto services = std::make_shared<detail::ServiceState>();
-
-    // 暂时通过启动代码显式注册 Topic。
-    // Partition 编号均从 0 开始。
-    services->broker.create_topic("events", 4);
-    services->broker.create_topic("logs", 2);
+    // 所有连接、所有 Worker 共享同一个 KV 服务。
+    auto kv = std::make_shared<detail::KvState>();
 
     ConnectionCounter connection_counter;
 
@@ -156,7 +151,7 @@ void run_server(std::string_view port) {
 
                 bool accepted =
                     detail::post_connection(std::move(*client), *slot.loop, slot.connections,
-                                            workers, connection_counter, services);
+                                            workers, connection_counter, kv);
 
                 if (!accepted)
                     runtime::log::warn("I/O EventLoop rejected connection");

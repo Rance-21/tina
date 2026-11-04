@@ -13,23 +13,12 @@ import rpc.connection;
 import rpc.protocol;
 import service.kv;
 
-import broker.protocol;
-import broker.service;
-
 namespace rpc::detail {
 
 // 所有 Worker 共享一个 KV Service。
 export struct KvState {
     std::mutex mutex;
     service::KvService service;
-};
-
-// 服务端共享的业务状态。
-// KV 有自己的锁，Broker 的锁由各 Partition 管理。
-// 不允许在这里增加覆盖全部业务操作的全局锁。
-export struct ServiceState {
-    KvState kv;
-    broker::BrokerService broker;
 };
 
 namespace {
@@ -66,67 +55,6 @@ export void refresh_connection(net::EventLoop &loop, ConnectionMap &connections,
 
 namespace {
 
-// Broker 业务分发，输入已经是一条完整的 RPC Request，payload 仍是二进制内容。
-Response handle_broker_request(const Request &request, broker::BrokerService &service) {
-    switch (request.method) {
-    case Method::publish: {
-        auto decoded = broker::protocol::decode_publish(request.payload);
-
-        if (!decoded)
-            return {request.id, Status::bad_request, "invalid PUBLISH payload"};
-
-        auto result = service.publish(*decoded);
-
-        return {request.id, Status::ok, broker::protocol::encode_publish_result(result)};
-    }
-
-    case Method::fetch: {
-        auto decoded = broker::protocol::decode_fetch(request.payload);
-
-        if (!decoded)
-            return {request.id, Status::bad_request, "invalid FETCH payload"};
-
-        auto result = service.fetch(*decoded);
-
-        return {request.id, Status::ok, broker::protocol::encode_fetch_result(result)};
-    }
-
-    case Method::commit_offset: {
-        auto decoded = broker::protocol::decode_commit_offset(request.payload);
-
-        if (!decoded)
-            return {request.id, Status::bad_request, "invalid COMMIT_OFFSET payload"};
-
-        service.commit_offset(*decoded);
-
-        // COMMIT_OFFSET 成功响应不需要 Payload。
-        return {request.id, Status::ok, ""};
-    }
-
-    default:
-        return {request.id, Status::bad_request, "unknown broker method"};
-    }
-}
-
-// 这里只负责选择业务模块。
-constexpr std::uint8_t service_mask = 0xF0;
-Response dispatch_request(const Request &request, ServiceState &services) {
-    const auto group = static_cast<std::uint8_t>(request.method) & service_mask;
-
-    switch (group) {
-    case 0x00: {
-        std::lock_guard lock(services.kv.mutex);
-        return services.kv.service.handle(request);
-    }
-
-    case 0x10:
-        return handle_broker_request(request, services.broker);
-
-    default:
-        return {request.id, Status::bad_request, "unknown service"};
-    }
-}
-
 // Worker 只回传结果，连接状态仍由所属 I/O 线程更新。
 void complete_response(const std::weak_ptr<Connection> &weak, net::EventLoop &loop,
                        ConnectionMap &connections, ConnectionCounter &counter,
@@ -150,23 +78,15 @@ void complete_response(const std::weak_ptr<Connection> &weak, net::EventLoop &lo
 
 bool submit_request(Request request, const std::weak_ptr<Connection> &weak, net::EventLoop &loop,
                     ConnectionMap &connections, runtime::WorkerPool &workers,
-                    ConnectionCounter &counter, const std::shared_ptr<ServiceState> &services) {
+                    ConnectionCounter &counter, const std::shared_ptr<KvState> &kv) {
 
     return workers.try_submit([request = std::move(request), weak, &loop, &connections, &counter,
-                               services]() mutable {
+                               kv]() mutable {
         Response response{request.id, Status::io_error, "internal server error"};
 
         try {
-            response = dispatch_request(request, *services);
-        } catch (const std::out_of_range &) {
-            // Topic 或 Partition 不存在。
-            response = {request.id, Status::not_found, "topic or partition not found"};
-        } catch (const std::invalid_argument &) {
-            // Offset 越界、非法参数、消费进度倒退等。
-            response = {request.id, Status::bad_request, "invalid request"};
-        } catch (const std::length_error &) {
-            // Partition 满、Consumer 数量超限、FETCH 预算不足等。
-            response = {request.id, Status::resource_exhausted, "broker resource limit exceeded"};
+            std::lock_guard lock(kv->mutex);
+            response = kv->service.handle(request);
         } catch (const std::bad_alloc &) {
             response = {request.id, Status::resource_exhausted, "out of memory"};
         } catch (...) {
@@ -184,7 +104,7 @@ void handle_connection_event(const std::shared_ptr<Connection> &conn,
                              const std::weak_ptr<Connection> &weak, net::EventLoop &loop,
                              ConnectionMap &connections, runtime::WorkerPool &workers,
                              ConnectionCounter &counter,
-                             const std::shared_ptr<ServiceState> &services, net::EpollEvent event) {
+                             const std::shared_ptr<KvState> &kv, net::EpollEvent event) {
     if (event.error()) {
         close_connection(loop, connections, counter, conn->fd());
         return;
@@ -195,7 +115,7 @@ void handle_connection_event(const std::shared_ptr<Connection> &conn,
             (event.readable() || event.peer_closed() || event.hangup())) {
             bool ok = conn->read([&](Request request) {
                 return submit_request(std::move(request), weak, loop, connections, workers, counter,
-                                      services);
+                                      kv);
             });
 
             if (!ok) {
@@ -214,7 +134,7 @@ void handle_connection_event(const std::shared_ptr<Connection> &conn,
 
 void register_connection(net::Socket socket, net::EventLoop &loop, ConnectionMap &connections,
                          runtime::WorkerPool &workers, ConnectionCounter &counter,
-                         const std::shared_ptr<ServiceState> &services) {
+                         const std::shared_ptr<KvState> &kv) {
     auto conn = std::make_shared<Connection>(std::move(socket));
     int fd = conn->fd();
     std::weak_ptr<Connection> weak = conn;
@@ -223,8 +143,8 @@ void register_connection(net::Socket socket, net::EventLoop &loop, ConnectionMap
     try {
         loop.add_event(
             fd, interests(*conn),
-            [conn, weak, &loop, &connections, &workers, &counter, services](net::EpollEvent event) {
-                handle_connection_event(conn, weak, loop, connections, workers, counter, services,
+            [conn, weak, &loop, &connections, &workers, &counter, kv](net::EpollEvent event) {
+                handle_connection_event(conn, weak, loop, connections, workers, counter, kv,
                                         event);
             });
     } catch (...) {
@@ -239,10 +159,10 @@ void register_connection(net::Socket socket, net::EventLoop &loop, ConnectionMap
 // 管理线程投递连接；引用的资源必须存活到 Worker 和 I/O 线程回收完成。
 export bool post_connection(net::Socket socket, net::EventLoop &loop, ConnectionMap &connections,
                             runtime::WorkerPool &workers, ConnectionCounter &counter,
-                            std::shared_ptr<ServiceState> services) {
+                            std::shared_ptr<KvState> kv) {
     return loop.post_task([socket = std::move(socket), &loop, &connections, &workers, &counter,
-                           services = std::move(services)]() mutable {
-        register_connection(std::move(socket), loop, connections, workers, counter, services);
+                           kv = std::move(kv)]() mutable {
+        register_connection(std::move(socket), loop, connections, workers, counter, kv);
     });
 }
 

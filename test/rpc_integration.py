@@ -100,6 +100,24 @@ def test_pipelining(port):
         }
 
 
+def test_kv_dispatch(port):
+    with connect(port) as sock:
+        # KV 旧帧只接受四个方法；非法方法和格式错误的 SET 均不能影响后续请求。
+        sock.sendall(frame(601, 0x11))
+        assert recv_response(sock) == (601, 2, b"unknown method")
+        sock.sendall(frame(602, 2, b"no-separator"))
+        assert recv_response(sock) == (602, 2, b"SET requires key and value")
+
+        sock.sendall(frame(603, 2, b"del-key\nvalue"))
+        assert recv_response(sock) == (603, 0, b"OK")
+        sock.sendall(frame(604, 4, b"del-key"))
+        assert recv_response(sock) == (604, 0, b"OK")
+        sock.sendall(frame(605, 3, b"del-key"))
+        assert recv_response(sock) == (605, 1, b"NOT_FOUND")
+        sock.sendall(frame(606, 4, b"del-key"))
+        assert recv_response(sock) == (606, 1, b"NOT_FOUND")
+
+
 def test_invalid_frames(port):
     for invalid_length in (4, 1024 * 1024 + 6):
         with connect(port) as sock:
@@ -176,6 +194,7 @@ def main():
         tests = [
             ("fragmentation", test_fragmentation),
             ("pipelining", test_pipelining),
+            ("KV dispatch", test_kv_dispatch),
             ("invalid frames", test_invalid_frames),
             ("half close", test_half_close),
             ("concurrent clients", test_concurrent_clients),
