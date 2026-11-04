@@ -1,23 +1,11 @@
+
 #pragma once
 
 #include <QObject>
+#include <QTcpSocket>
+#include <QByteArray>
 #include <QString>
-#include <QVariantList>
 #include <QtQmlIntegration/qqmlintegration.h>
-#include <cstdint>
-
-// ============================================================================
-// Rust / C++ FFI Client C-ABI 预留接口声明（供后续阶段链接 Rust / C++ RPC Client 使用）
-// ============================================================================
-extern "C" {
-struct TinaFfiClientHandle;
-
-// 预留 FFI 函数签名：后续阶段由 Rust staticlib/cdylib 或 C++ rpc::RpcClient 实现
-TinaFfiClientHandle* tina_ffi_client_create(const char* host, std::uint16_t port);
-void tina_ffi_client_destroy(TinaFfiClientHandle* handle);
-std::uint64_t tina_ffi_client_send_command(TinaFfiClientHandle* handle, const char* cmd_utf8);
-std::uint64_t tina_ffi_client_send_agent_prompt(TinaFfiClientHandle* handle, const char* prompt_utf8);
-}
 
 namespace tina::ui {
 
@@ -25,17 +13,30 @@ class FfiClientBridge : public QObject {
     Q_OBJECT
     QML_ELEMENT
 
-public:
-    explicit FfiClientBridge(QObject* parent = nullptr);
-    ~FfiClientBridge() override = default;
+  public:
+    explicit FfiClientBridge(QObject *parent = nullptr);
 
-    // 供 QML 前端调用的占位接口（第一阶段仅做 UI 壳与状态模拟，不依赖后端完成）
-    Q_INVOKABLE void submitCommand(const QString& command);
-    Q_INVOKABLE void submitAgentInput(const QString& input);
+    Q_INVOKABLE void connectToServer(const QString &host, int port = 3490);
+    Q_INVOKABLE void ping();
 
-signals:
-    void commandSubmitted(const QString& command);
+    // 保留现有 QML 需要的接口
+    Q_INVOKABLE void submitCommand(const QString &command);
+    Q_INVOKABLE void submitAgentInput(const QString &input);
+
+  signals:
+    void connectionStateChanged(bool connected);
+    void pingResult(bool ok, const QString &message);
+
+    void commandSubmitted(const QString &command);
     void openAgentWindowRequested();
+
+  private:
+    void onReadyRead();
+
+    QTcpSocket socket_;
+    QByteArray input_;
+    quint64 nextId_{1};
+    quint64 pendingPingId_{0};
 };
 
 } // namespace tina::ui

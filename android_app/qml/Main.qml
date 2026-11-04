@@ -15,8 +15,18 @@ Window {
     color: "#090d16"
 
     FfiClientBridge {
-        id: ffiBridge
+    id: ffiBridge
+
+    onPingResult: function(ok, message) {
+        mainWindow.title = ok
+            ? "Tina — Fedora Connected: " + message
+            : "Tina — Connection Error: " + message
     }
+}
+
+Component.onCompleted: {
+    ffiBridge.connectToServer("100.65.173.4", 3490)
+}
 
     Item {
         id: rootCanvas
