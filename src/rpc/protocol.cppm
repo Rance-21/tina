@@ -16,7 +16,6 @@ export enum class Method : std::uint16_t {
     kv_del = 0x0004, // 请求：删除指定键。
 
     workspace_list_projects = 0x0011, // 请求：列出已登记的项目。
-    workspace_open = 0x0012,          // 请求：打开项目。
     workspace_list_dir = 0x0013,      // 请求：枚举一级目录。
     workspace_read_file = 0x0014,     // 请求：读取 UTF-8 文本，可按字节范围分段。
     workspace_write_file = 0x0015,    // 请求：保存完整的 UTF-8 文本文件。

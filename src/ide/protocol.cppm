@@ -87,3 +87,26 @@ export void handle_ping(Frame &frame) {
         frame.payload = "ping requires an empty payload";
     }
 }
+
+// ============================================================================
+// Workspace 模块请求 Payload 解码函数（服务端视角）
+// 职责：将 Frame::payload 中的原始 UTF-8 文本解析为各业务接口所需的参数。
+// 目前暂留空实现，后续确定具体文本/JSON 格式后再补齐解析逻辑。
+// ============================================================================
+
+// 解码 0x0011 (workspace_list_projects) 请求负载：列出已登记的项目。
+export void decode_workspace_list_projects(std::string_view /* payload */) {
+}
+
+// 解码 0x0013 (workspace_list_dir) 请求负载：枚举一级目录。
+export void decode_workspace_list_dir(std::string_view /* payload */) {
+}
+
+// 解码 0x0014 (workspace_read_file) 请求负载：读取 UTF-8 文本，可按字节范围分段。
+export void decode_workspace_read_file(std::string_view /* payload */) {
+}
+
+// 解码 0x0015 (workspace_write_file) 请求负载：保存完整的 UTF-8 文本文件。
+export void decode_workspace_write_file(std::string_view /* payload */) {
+}
+
