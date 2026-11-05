@@ -137,7 +137,8 @@ void dispatch_request(Frame &request, KvState &kv) {
 // Worker 线程实际执行的单次请求处理函数。
 // 分支逻辑：
 //   1. 复用原 Frame 作为响应帧（保留原 method 和 64 位 request_id），将 kind 改为 response。
-//   2. 调用 dispatch_request() 按掩码分发业务；捕获所有异常并转化为错误状态码，绝不让异常逃出 Worker 线程。
+//   2. 调用 dispatch_request() 按掩码分发业务；捕获所有异常并转化为错误状态码，绝不让异常逃出
+//   Worker 线程。
 //   3. 业务执行完毕后，通过 loop.post_task 将响应帧投递回所属 I/O 线程执行 complete_response()。
 void handle_request(Frame request, const std::weak_ptr<Connection> &weak, net::EventLoop &loop,
                     ConnectionMap &connections, ConnectionCounter &counter,
@@ -153,6 +154,7 @@ void handle_request(Frame request, const std::weak_ptr<Connection> &weak, net::E
         request.payload = "internal server error";
     }
 
+    // 目前还没有编码 response
     (void)loop.post_task([weak, &loop, &connections, &counter, response = std::move(request)] {
         complete_response(weak, loop, connections, counter, response);
     });
@@ -162,10 +164,10 @@ void handle_request(Frame request, const std::weak_ptr<Connection> &weak, net::E
 bool submit_request(Frame request, const std::weak_ptr<Connection> &weak, net::EventLoop &loop,
                     ConnectionMap &connections, runtime::WorkerPool &workers,
                     ConnectionCounter &counter, const std::shared_ptr<KvState> &kv) {
-    return workers.try_submit([request = std::move(request), weak, &loop, &connections, &counter,
-                               kv]() mutable {
-        handle_request(std::move(request), weak, loop, connections, counter, kv);
-    });
+    return workers.try_submit(
+        [request = std::move(request), weak, &loop, &connections, &counter, kv]() mutable {
+            handle_request(std::move(request), weak, loop, connections, counter, kv);
+        });
 }
 
 // 客户端连接在所属 I/O 线程上的 epoll 事件主回调。
