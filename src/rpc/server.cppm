@@ -53,7 +53,7 @@ class StopSignals {
     StopSignals(const StopSignals &) = delete;
     StopSignals &operator=(const StopSignals &) = delete;
 
-    [[nodiscard]] int fd() const noexcept {
+    [[nodiscard]] inline int fd() const noexcept {
         return fd_;
     }
 
@@ -84,7 +84,6 @@ void run_server(std::string_view port) {
     config.validate();
     runtime::log::init();
 
-    // 必须先于 I/O / Worker 线程创建，保证所有子线程继承信号屏蔽。
     StopSignals signals;
 
     std::optional<net::Socket> listener{net::Socket::listen_tcp(port)};

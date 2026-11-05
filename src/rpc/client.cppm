@@ -55,6 +55,11 @@ RpcClient::~RpcClient() {
     io_pool_.shutdown();
 }
 
+// 发起异步 RPC 请求，立即返回 std::future<Frame>，实际编码与发送由客户端 I/O 线程异步完成。
+// 分支逻辑：
+//   1. timeout <= 0：不进队列直接令 Promise 以 TimeoutError 失败。
+//   2. 在调用方线程提前算好绝对截止时间 deadline，通过 post_task 投递给 I/O 线程执行 State::send()。
+//   3. 若 I/O 线程已停止导致投递失败，或执行中抛出异常，均捕获并注入到 Promise 中防止调用方 future.get() 永久挂起。
 std::future<Frame> RpcClient::async_call(Method method, std::string payload,
                                             std::chrono::milliseconds timeout) {
     auto promise = std::make_shared<std::promise<Frame>>();
@@ -105,8 +110,10 @@ RpcClient::State::~State() {
         ::close(timer_fd);
 }
 
-// 所有 RPC 共用一个 timerfd。
-// 每次只为最早的 Deadline 设置定时器。
+// 所有在途 RPC 共享同一个 timerfd，每次只按最早到期的请求（deadlines.begin()）设置单次内核定时器。
+// 分支逻辑：
+//   1. deadlines 非空：计算距最早 deadline 的剩余纳秒数（若已过期则设为 1ns 立即触发可读）。
+//   2. deadlines 为空：spec 保持全 0，调用 timerfd_settime 停用定时器。
 void RpcClient::State::update_timer() {
     itimerspec spec{};
 
@@ -129,7 +136,13 @@ void RpcClient::State::update_timer() {
         throw std::system_error(errno, std::generic_category(), "timerfd_settime");
 }
 
-// timerfd 到期后，处理所有已经超过截止时间的请求。
+// timerfd 到期回调：批量清理所有已到达截止时间的在途请求。
+// 分支逻辑：
+//   1. 先非阻塞 read(timer_fd) 读出超时计数，清除内核可读状态。
+//   2. 循环检查 deadlines 头部所有 <= now 的过期请求：
+//      - 将其 ID 记入 expired_ids（以便未来收到迟到响应时能识别并丢弃）；若累计超时未回包数超上限则直接断开连接。
+//      - 从 pendings 与 deadlines 中移除，并向对应 Promise 注入 TimeoutError。
+//   3. 最后调用 update_timer() 为剩余未超时请求中最近的一个重新武装 timerfd。
 void RpcClient::State::on_timer(net::EpollEvent event) {
     if (closed)
         return;

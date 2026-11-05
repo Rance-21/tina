@@ -39,20 +39,29 @@ class Connection {
         draining_ = true;
     }
 
+    // 判断连接是否已满足关闭条件：
+    // 对端已半关闭（peer_eof_）或服务端主动停止读新请求（draining_），
+    // 且所有已提交给 Worker 的在途请求均已处理完（pending_ == 0），且输出缓冲区已全部发空。
     [[nodiscard]]
     bool finished() const noexcept {
-        // 完成连接半关闭尾巴或者手动 shutdown
         return (peer_eof_ || draining_) && pending_ == 0 && output_.empty();
     }
 
-    // 读取 Socket，解析请求并提交给线程池。
+    // 非阻塞读取 Socket 数据，切出完整 RPC 请求帧并提交给 WorkerPool。
+    // 返回 false 表示协议非法、并发超限或任务队列已满，调用方应立即关闭连接。
+    // 分支逻辑：
+    //   1. draining_ 为 true：处于停机排空阶段，不再读取新数据，直接返回 true。
+    //   2. 循环最多读 8 次（上限 64 KiB）：防止单条活跃连接饥饿同一 I/O 线程上的其他连接。
+    //      - !n (EAGAIN)：内核接收缓冲区已读空，正常返回 true 等待下次 EPOLLIN。
+    //      - *n == 0 (EOF)：对端发送 FIN 关闭写端；若 input_ 还有未凑齐的半包则视为协议错误返回 false。
+    //      - *n > 0：追加到 input_ 并循环 decode_frame() 拆包；若非 request 帧、在途请求达到
+    //        max_inflight (64) 或 WorkerPool 拒绝接收任务，则返回 false 关闭连接。
     template <typename Submit> bool read(Submit &&submit) {
         if (draining_)
             return true;
 
         std::array<char, 8192> chunk{};
 
-        // 每次事件最多读 64 KiB，避免一个连接长期占用 I/O 线程。
         for (int i = 0; i < 8; ++i) {
             auto n = socket_.try_recv(chunk.data(), chunk.size());
 
@@ -79,8 +88,9 @@ class Connection {
         return true;
     }
 
-    // Worker 返回响应帧后，由所属 I/O 线程调用。
-    bool has_complete_response(const Frame &response) {
+    // Worker 算完响应后由所属 I/O 线程调用：核销一个在途请求（--pending_），并将响应帧编码进 output_。
+    // 分支逻辑：若在途计数异常为 0，或追加后输出缓冲区超过 max_output (4 MiB) 上限，则返回 false 关闭连接。
+    bool enqueue_response(const Frame &response) {
         const auto frame_size = frame_header_size + response.payload.size();
         if (pending_ == 0 || output_.readable_bytes() + frame_size > max_output)
             return false;
@@ -90,7 +100,9 @@ class Connection {
         return true;
     }
 
-    // 非阻塞发送输出缓冲区中的数据。
+    // 非阻塞将 output_ 中的待发数据刷入内核 Socket 发送缓冲区。
+    // 分支逻辑：若 try_send 返回 nullopt（EAGAIN，内核发送缓冲区已满）则立即中断循环，
+    // 剩余未发完的数据留在 output_ 中，由随后的 refresh_connection() 按需挂载 EPOLLOUT。
     void write() {
         for (int i = 0; i < 8 && wants_write(); ++i) {
             auto n = socket_.try_send(output_.data(), output_.readable_bytes());

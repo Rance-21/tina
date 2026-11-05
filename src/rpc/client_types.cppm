@@ -88,7 +88,7 @@ class RpcClient {
         void refresh();
         void send_pending();
         void receive();
-        void decode();
+        void handle_responses();
         void update_timer();
     };
 

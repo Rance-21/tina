@@ -1,16 +1,77 @@
-2，大量系统调用
-3，EINTR空等
-4,string过多堆区分配
-5,server两次同一个epoll以获取退出fd
-6,异步log机制
+# Tina 性能优化与架构改进清单 (Optimization Notes)
 
-------------------------------
+## 一、 系统调用与 Epoll 事件驱动优化
 
-UDP分支单应用帧小于等于1460
-用sendfile，send(fd, buf, len, MSG_ZEROCOPY)等实现0拷贝？
-SA_RESTART，异步信号安全,不使用EINTR，signalfd
-src/net/socket.cppm，try——ac，while一直打转
-connection.read拷贝过多
-connection使用数据库分块锁
-线程的CPU核心分配
-log频繁IO
+### 1. 消除 `refresh` 中冗余的 `epoll_ctl(EPOLL_CTL_MOD)` 系统调用（新增）
+- **现状**：
+  - **客户端 (`RpcClient::State::refresh`)**：未使用 `EPOLLONESHOT`，连接建立后常态掩码恒为 `read | peer_closed`。但每次 `send()` 当场发完数据或 `on_event()` 读完响应后，都会无条件调用 `modify_event()` 触发一次掩码未变的 `EPOLL_CTL_MOD`。
+  - **服务端 (`complete_response`)**：`handle_connection_event()` 末尾已重装过 `EPOLLONESHOT`；当 Worker 通过 `post_task` 回传结果并在 `complete_response()` 中当场 `write()` 发完时，连接掩码未发生任何变化，却又执行了一次 `modify_event()`。
+- **优化方案**：在 `RpcClient::State` 和服务端 `Connection` 中缓存上一次注册的 `last_interest_`（服务端额外区分是否由 `epoll_wait` 触发导致 `EPOLLONESHOT` 失效），若掩码未变且无需重装 `ONESHOT`，直接跳过 `epoll_ctl`。
+
+### 2. 减少高频路径上的系统调用次数（合并读写与唤醒）
+- **现状**：每次 `post_task()` 都会立即调用一次 `::write(wake_fd_, ...)` 系统调用；高并发下多个 Worker 同时完成任务会频繁触发 `write(eventfd)`。
+- **优化方案**：在 `EventLoop` 中引入 `std::atomic<bool> wakeup_pending_{false}` 标志，仅当标志从 `false` 变为 `true` 时才真正调用 `::write(wake_fd_)`，在 `drain_wakeup()` 时重置为 `false`，可将多生产者的并发唤醒合并为 1 次系统调用。
+
+### 3. `Connection::write()` 与 `send_pending()` 的循环语义及 `writev` 聚集写（新增）
+- **现状**：`write()` 外层写了 `for (int i = 0; i < 8 && wants_write(); ++i)`，但内部直接传入了整个连续缓冲区 `output_.readable_bytes()`。若内核缓冲区够大，第 1 次就全发完；若不够大（部分写），第 2 次必然立即触发 `EAGAIN` 退出，8 次循环形同虚设。
+- **优化方案**：去掉无意义的外层循环（只调一次 `try_send`）；更进一步，在编码响应帧时无需把固定 17B 帧头和大 Payload 拼进同一个 `output_` 连续内存，可用 `::writev(fd, iov, iovcnt)` 直接将帧头与 Payload 聚集发送。
+
+### 4. `run_server` 对同一次 `accept_epoll.wait()` 结果的双重遍历
+- **现状**：`src/rpc/server.cppm` 主循环每次 `accept_epoll.wait()` 返回后，先 `for` 遍历一遍找 `signals.fd()`，再 `for` 遍历第二遍找 `listener->native_handle()`。
+- **优化方案**：合并为单次 `for` 循环，在循环内若遇到 `event.fd == signals.fd()` 直接 `signals.consume(); stopping = true; break;`，否则处理 `listener` 接受连接（事实上 `accept_epoll` 里总共就这 2 个 fd）。
+
+---
+
+## 二、 内存分配、拷贝与零拷贝（Zero-Copy）优化
+
+### 5. `Connection::read()` 接收路径拷贝过多
+- **现状**：当前数据流为：`内核 Socket 缓冲 -> 栈上 8KB chunk -> input_ (Buffer) -> decode_frame 构造 Frame::payload (std::string)`，仅收包阶段就经历了 **1 次内核态到用户态拷贝 + 2 次用户态内存拷贝**。
+- **优化方案**：
+  - 给 `net::Buffer` 提供 `writable_bytes()` / `ensure_writable()` 接口，直接将 `Buffer` 尾部空闲空间传给 `recv()`，省去栈上 `chunk` 中转拷贝；
+  - 或使用 `::readv()` 配合栈上 `extrabuf`（Muduo 经典双缓冲技巧）：平时只用 `Buffer` 现有容量接收，装不下时溢出到栈数组再 `append`。
+
+### 6. `std::string` 过多堆区分配（Heap Allocation）
+- **现状**：每个请求/响应的 `Frame::payload`、`KvService` 分割键值時的 `substr()`、日志拼接等都在频繁触发堆内存 `malloc/free`。
+- **优化方案**：
+  - 协议解析与 `KvService::handle()` 入参改用 `std::string_view` 切片零拷贝传递，只在真正落入哈希表存储时分配一次内存；
+  - 对小负载请求利用 SSO（Small String Optimization），或引入针对固定尺寸帧的 Arena / 对象池复用 `Frame` 缓冲。
+
+### 7. 大文件/大负载传输的零拷贝（`sendfile` / `MSG_ZEROCOPY`）
+- **现状**：Remote IDE 后续涉及 `workspace_read_file` 等大文件读取，走传统 `read(file) + send(socket)` 会经历 4 次上下文切换与多次内核/用户态拷贝。
+- **优化方案**：
+  - **文件直传**：先用普通 `send` 发送 17B 帧头，再用 `::sendfile()`（或 `splice`）在内核态直接将文件页缓存（Page Cache）送入网卡缓冲区；
+  - **用户态大块内存发送**：对大于 10KB~64KB 的动态生成缓冲，可开启 `SO_ZEROCOPY` 并使用 `send(..., MSG_ZEROCOPY)` 避免内核拷贝（需配合处理 `MSG_ERRQUEUE` 异步完成通知后再释放用户态缓冲，小包切勿开启以免通知开销反超拷贝开销）。
+
+---
+
+## 三、 信号、错误处理与 Socket 细节优化
+
+### 8. `EINTR` 重试、异步信号安全与 `signalfd` 的配合
+- **现状**：多处 I/O 函数（`try_recv`、`try_send`、`try_accept`、`epoll_wait`）手写了 `if (errno == EINTR) continue;` 循环。
+- **说明与优化**：
+  - 进程启动时 `StopSignals` 已经通过 `pthread_sigmask(SIG_BLOCK)` 在所有线程屏蔽了 `SIGINT` 和 `SIGTERM`，并交由 `signalfd` 同步读取，规避了传统异步信号处理函数（Signal Handler）的非异步信号安全问题；
+  - 若未来注册其他信号处理函数，应在 `sigaction` 中开启 `SA_RESTART` 让内核自动重启被中断的系统调用；保留 `EINTR` 分支仅作为防御性兜底（例如 `gdb` 调试挂起恢复时内核仍可能使 `epoll_wait` 返回 `EINTR`）。
+
+### 9. `Socket::try_accept()` 的非阻塞循环与瞬态错误容错
+- **现状**：`src/net/socket.cppm` 中 `try_accept()` 使用 `while (true)` 包裹 `accept4`，除 `EINTR` 和 `EAGAIN` 外遇到任何 `errno` 直接 `throw std::runtime_error` 导致整个 Acceptor 线程崩溃退出。
+- **优化方案**：TCP 服务端 `accept4` 遇到客户端在三次握手刚完成就发 RST 断开时，Linux 可能返回 `ECONNABORTED`、`EPROTO` 或 `EPERM`（防火墙拦截），甚至暂时达到文件描述符上限 `EMFILE`/`ENFILE`。这些属于**单条客户端连接的瞬态错误**，不应 `throw` 搞垮整个 Server，而应记录日志后忽略（或返回 `nullopt`）继续服务后续连接。
+
+### 10. UDP 分支单应用帧限制在 `<= 1460`（或 `1472`）字节以内
+- **原理与说明**：以太网标准 MTU 为 `1500` 字节（扣除 20B IP 头 + 8B UDP 头 = `1472` 字节；若考虑 PPPoE 或隧道开销，安全载荷常取 `1400~1460` 字节）。UDP 本身不负责分段，一旦单帧超过 MTU 触发 **IP 层分片（IP Fragmentation）**，任何一个分片在公网丢失都会导致整个 UDP 报文被内核丢弃，丢包率呈指数级恶化。因此 UDP 分支的应用层协议必须严格将单包控制在 MTU 以内。
+
+---
+
+## 四、 并发、锁粒度与运行时调度优化
+
+### 11. `KvState` / 连接共享状态使用分片锁（Sharded Lock / 分块锁）
+- **现状**：`src/rpc/connection_handler.cppm` 中所有 Worker 线程访问 `KvState` 时共用同一把全局 `std::mutex`，高并发读写下锁竞争严重，多核 Worker 退化为串行执行。
+- **优化方案**：
+  - 将 `KvService` 内部哈希表按 `hash(key) & (N - 1)` 拆分为 $N$ 个分片（如 16 或 64 个 Bucket/Shard），每个分片独立持有一把 `std::shared_mutex`（读多写少时 `kv_get` 用共享读锁 `shared_lock`，`kv_set`/`kv_del` 用独占写锁 `unique_lock`），大幅降低锁冲突。
+
+### 12. 线程的 CPU 核心亲和性分配（CPU Affinity / Thread Pinning）
+- **现状**：I/O 线程池（`EventLoopThreadPool`）与业务线程池（`WorkerPool`）由操作系统自由调度，频繁跨核迁移会导致 L1/L2 Cache 失效和上下文切换开销。
+- **优化方案**：使用 `pthread_setaffinity_np()` 将每个 I/O 线程绑定到固定的物理核心（例如 Core $0 \dots M-1$），将 Worker 线程绑定到其余核心（Core $M \dots K$），实现 I/O 与计算核隔离，最大化缓存局部性。
+
+### 13. 异步日志机制（避免同步日志阻塞 I/O 与 Worker 线程）
+- **现状**：`src/runtime/log.cppm` 当前使用 `spdlog::stdout_color_mt` 或同步文件 sink，在 I/O 线程或 Worker 线程打日志时会竞争全局锁并触发阻塞式磁盘/终端 `write` 系统调用。
+- **优化方案**：切换为 `spdlog::async_logger`（或双缓冲 RingBuffer 后台刷盘线程），前台业务与 I/O 线程只做无锁/微秒级内存入队，由独立的单个后台日志线程批量落盘，彻底隔离磁盘 I/O 抖动。

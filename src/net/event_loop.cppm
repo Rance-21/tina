@@ -16,7 +16,8 @@ class EventLoop {
     using Handler = std::move_only_function<void(EpollEvent)>;
 
     EventLoop() {
-        // 这里是 worker 线程 write 这个 fd，唤醒 eventloop 执行 writable 事件
+        // 其他线程（如 Worker 或主线程）向 wake_fd_ 写入计数后，
+        // wake_fd_ 变为可读（EPOLLIN），从而唤醒阻塞在 epoll_.wait() 的 I/O 线程执行跨线程任务。
         wake_fd_ = ::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC);
 
         if (wake_fd_ < 0)
@@ -38,7 +39,7 @@ class EventLoop {
     EventLoop(const EventLoop &) = delete;
     EventLoop &operator=(const EventLoop &) = delete;
 
-    // 在所属 I/O 线程调用，注册一个 Socket 的事件处理函数。
+    // 在所属 I/O 线程调用，首次注册 fd 及其关注的事件掩码与回调。
     void add_event(int fd, EpollInterest interest, Handler handler) {
         if (fd < 0 || fd == wake_fd_ || !handler)
             throw std::invalid_argument("invalid event handler");
@@ -46,7 +47,7 @@ class EventLoop {
         if (event_handlers_.contains(fd))
             throw std::logic_error("fd already registered");
 
-        // shared_ptr 保证回调执行期间可以安全注销自身。
+        // shared_ptr 保证回调执行期间即使内部调用 del_event() 注销自身也不会悬空。
         auto callback = std::make_shared<Handler>(std::move(handler));
         event_handlers_.emplace(fd, std::move(callback));
 
@@ -58,15 +59,15 @@ class EventLoop {
         }
     }
 
-    // 更新文件 inst
-    void modify_inst(int fd, EpollInterest interest) {
+    // 修改已注册 fd 的关注事件掩码（如按需开启/关闭 EPOLLOUT 或重装 EPOLLONESHOT）。
+    void modify_event(int fd, EpollInterest interest) {
         if (!event_handlers_.contains(fd))
             throw std::logic_error("fd not registered");
 
         epoll_.modify(fd, interest);
     }
 
-    // 必须先注销事件，再关闭 Socket。
+    // 注销 fd 的事件监听并移除回调（必须在 close(fd) 之前调用）。
     void del_event(int fd) {
         if (!event_handlers_.contains(fd))
             return;
@@ -75,7 +76,8 @@ class EventLoop {
         event_handlers_.erase(fd);
     }
 
-    // 提交一个任务
+    // 跨线程投递任务到本 I/O 线程执行。
+    // 分支逻辑：若 Loop 正在停止则拒绝入队返回 false；否则入队并通过 wake_fd_ 唤醒 I/O 线程。
     [[nodiscard]] bool post_task(Task task) {
         if (!task)
             return false;
@@ -93,7 +95,10 @@ class EventLoop {
         return true;
     }
 
-    // 由所属 I/O 线程调用。
+    // I/O 线程主事件循环。
+    // 分支逻辑：
+    //   1. 若就绪 fd 是 wake_fd_：读空 eventfd 计数器，批量执行跨线程队列 tasks_ 中的任务。
+    //   2. 若就绪 fd 是普通 Socket/timerfd：查找对应回调并执行；若回调抛异常则注销该 fd 防止反复触发。
     void run() {
         if (started_.exchange(true))
             throw std::logic_error("EventLoop already started");
@@ -110,7 +115,7 @@ class EventLoop {
                 if (it == event_handlers_.end())
                     continue;
 
-                // 保持回调存活，即使它调用 unwatch()。
+                // 拷贝一份 shared_ptr，保证回调执行期间调用 del_event() 销毁 map 条目时闭包仍存活。
                 auto callback = it->second;
 
                 try {
@@ -130,7 +135,7 @@ class EventLoop {
             }
         }
 
-        // 停止时执行剩下的的跨线程任务。
+        // 退出循环前排空最后一批已入队的跨线程任务。
         run_pending_tasks();
     }
 
