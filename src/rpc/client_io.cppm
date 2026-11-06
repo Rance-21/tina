@@ -206,6 +206,16 @@ void RpcClient::State::receive() {
 //   4. 若刚完成的请求原本是最早到期的（earliest），调用 update_timer() 为下一个最近到期请求重设 timerfd。
 void RpcClient::State::handle_responses() {
     while (auto response = decode_frame(input)) {
+        if (response->kind == Kind::event) {
+            if (event_handler) {
+                try {
+                    event_handler(std::move(*response));
+                } catch (...) {
+                }
+            }
+            continue;
+        }
+
         if (response->kind != Kind::response)
             throw std::runtime_error("expected RPC response");
         const auto id = response->request_id;

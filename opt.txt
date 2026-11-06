@@ -77,3 +77,5 @@
 - **优化方案**：切换为 `spdlog::async_logger`（或双缓冲 RingBuffer 后台刷盘线程），前台业务与 I/O 线程只做无锁/微秒级内存入队，由独立的单个后台日志线程批量落盘，彻底隔离磁盘 I/O 抖动。
 
 handle_workspace_read_file while 可能空转
+
+最后把server一部分拆进file里面。

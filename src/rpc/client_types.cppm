@@ -19,11 +19,16 @@ class TimeoutError : public std::runtime_error {
 
 class RpcClient {
   public:
+    using EventHandler = std::function<void(Frame)>;
+
     explicit RpcClient(std::string_view host = "127.0.0.1", std::string_view port = "3490");
     ~RpcClient();
 
     RpcClient(const RpcClient &) = delete;
     RpcClient &operator=(const RpcClient &) = delete;
+
+    // 注册服务端主动推送的 Kind::event 事件回调（在客户端 I/O 线程上触发）。
+    void set_event_handler(EventHandler handler);
 
     [[nodiscard]]
     std::future<Frame>
@@ -80,6 +85,8 @@ class RpcClient {
 
         // 已超时但可能还会收到响应的 request_id。
         std::unordered_set<std::uint64_t> expired_ids;
+
+        EventHandler event_handler;
 
         std::uint64_t next_id{1};
         bool connected{false};

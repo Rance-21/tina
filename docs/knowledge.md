@@ -178,3 +178,68 @@ while ((nready = epoll_wait(epfd, events, MAX, -1)) < 0 && errno == EINTR);
 调用 signalfd() 创建对应的 sfd，sfd会捕获这些信号
 把 sfd 挂载到主事件循环的 epoll 中监听 EPOLLIN。
 当操作系统产生信号时，内核直接将信号转化为字节流写入 sfd，直接唤醒 epoll_wait。
+
+1. BSD 文件锁：flock(2)
+源于 BSD Unix，属于最古老、最直观的锁。
+
+C
+#include <sys/file.h>
+int flock(int fd, int operation);
+操作模式：
+
+LOCK_SH：共享锁（读锁）
+
+LOCK_EX：互斥/排他锁（写锁）
+
+LOCK_UN：解锁
+
+LOCK_NB：非阻塞标志（与上述按位或，若冲突不休眠，直接返回 -1 置 errno = EWOULDBLOCK）
+
+锁定粒度：全文件锁。无法指定对文件中的某一段字节范围加锁。
+
+内核绑定关系：绑定在 struct file 上：
+
+fork() 继承：父进程加了 flock，fork() 出子进程，子进程共享同一个 struct file，因此子进程也持有该锁。
+
+dup() 共享：通过 dup()、dup2() 复制出来的 fd，调用 flock(fd2, LOCK_UN) 会直接把 fd1 上的锁解掉。
+
+多进程/多 open() 隔离：如果同一个进程对同一路径 open() 两次得到 fd1 和 fd2，在 fd1 上加独占锁后，尝试在 fd2 上加锁会被自身阻塞（因为它们是两个独立的 struct file）。
+
+2. POSIX 记录锁：fcntl(2)（F_SETLK）
+为满足数据库、并发更新等需要锁定“文件某一条记录/某段偏移量”的需求，POSIX 制定了字节范围锁规范。
+
+C
+#include <fcntl.h>
+int fcntl(int fd, int cmd, struct flock *lock);
+// cmd: F_SETLK (非阻塞加锁/解锁), F_SETLKW (阻塞加锁), F_GETLK (查询锁冲突)
+锁定粒度：字节范围锁（Range Lock）。通过 struct flock 指定：
+
+C
+struct flock fl;
+fl.l_type   = F_WRLCK;    // F_RDLCK (读), F_WRLCK (写), F_UNLCK (解锁)
+fl.l_whence = SEEK_SET;   // SEEK_SET, SEEK_CUR, SEEK_END
+fl.l_start  = 0;          // 起始偏移量
+fl.l_len    = 1024;       // 锁定长度 (传 0 代表直到文件末尾 EOF，无论文件后续如何扩容)
+内核绑定关系：绑定在 (inode, PID) 二元组上。
+这个设计是 UNIX 历史上最受诟病的设计之一，直接带来了两个灾难性的陷阱：
+
+陷阱 A：任何一个 close() 都会引爆全盘解锁
+只要当前进程关闭了指向该文件的“任何一个”描述符，该进程持有的该文件的所有 POSIX 锁全部会被内核强制清除！
+
+C
+int fd1 = open("data.db", O_RDWR);
+fcntl(fd1, F_SETLK, &fl); // 成功加上了锁！
+
+int fd2 = open("data.db", O_RDWR); // 比如某个基础库、日志组件无意间也打开了同一个文件
+close(fd2); 
+
+// 灾难发生：调用 close(fd2) 的瞬间，fd1 上持有的锁被内核全部静默释放！
+// 此时外部其他进程可以肆无忌惮地修改 data.db，引发数据损坏！
+陷阱 B：fork() 完全不继承
+子进程不会继承父进程持有的 POSIX 记录锁。如果子进程也去访问文件，甚至可以和父进程互相冲突加锁。
+
+陷阱 C：同一进程内的多线程无法互斥
+由于锁绑定在 PID 上，同一个进程内的多个线程持有的是同一个 PID。线程 A 加了写锁，线程 B 依然可以成功加上写锁，POSIX 记录锁在同进程多线程间完全无法起到互斥保护作用。
+
+注：关于 lockf(3)：
+C 标准库提供的 lockf(fd, cmd, len) 底层在 Linux 上纯粹是对 fcntl(F_SETLK) 的一层薄封装，它完全具备 POSIX 锁的所有陷阱。

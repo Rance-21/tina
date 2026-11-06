@@ -10,7 +10,7 @@ module;
 export module ide.server;
 
 import std;
-import ide.protocol;
+export import ide.server_protocol;
 
 namespace {
 
@@ -178,6 +178,69 @@ std::optional<std::string> resolve_workspace_path(std::string_view rel_path) {
     return root;
 }
 
+// 枚举指定完整目录路径下的一级子项（深度为 1，不递归展开）。
+// 成功返回 0，失败返回对应的 errno（> 0 表示 open 失败，< 0 表示 readdir 失败的 -errno）。
+int read_directory_entries(const std::string &target_path, std::vector<DirEntry> &entries) {
+    ScopedDir dir(::opendir(target_path.c_str()));
+    if (!dir)
+        return errno != 0 ? errno : EIO;
+
+    const int dfd = ::dirfd(dir.get());
+
+    while (true) {
+        errno = 0;
+        dirent *entry = ::readdir(dir.get());
+        if (entry == nullptr) {
+            if (errno != 0)
+                return -errno;
+            break;
+        }
+
+        std::string_view name(entry->d_name);
+        if (name == "." || name == ".." || name.size() > std::numeric_limits<std::uint16_t>::max())
+            continue;
+
+        // 忽略服务端原子写文件期间产生的同目录临时文件。
+        if (name.find(".tmp.") != std::string_view::npos)
+            continue;
+
+        std::optional<DirEntryType> type;
+        switch (entry->d_type) {
+        case DT_REG:
+            type = DirEntryType::file;
+            break;
+        case DT_DIR:
+            type = DirEntryType::directory;
+            break;
+        case DT_LNK:
+            type = DirEntryType::symlink;
+            break;
+        case DT_UNKNOWN: {
+            struct stat st{};
+            if (::fstatat(dfd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
+                if (S_ISREG(st.st_mode))
+                    type = DirEntryType::file;
+                else if (S_ISDIR(st.st_mode))
+                    type = DirEntryType::directory;
+                else if (S_ISLNK(st.st_mode))
+                    type = DirEntryType::symlink;
+            }
+            break;
+        }
+        default:
+            break;
+        }
+
+        if (type)
+            entries.push_back(DirEntry{.type = *type, .name = std::string(name)});
+    }
+
+    std::ranges::sort(entries, [](const DirEntry &a, const DirEntry &b) {
+        return a.name < b.name;
+    });
+    return 0;
+}
+
 // ============================================================================
 // 4. 路径锁（Striped Path Mutex）
 // ============================================================================
@@ -207,13 +270,45 @@ bool write_all(int fd, std::string_view data) noexcept {
 
 } // namespace
 
+export namespace server {
+
+// 解析客户端相对目录路径为服务端绝对路径（供 IO 线程注册 inotify 使用）。
+std::optional<std::string> resolve_workspace_dir_path(std::string_view rel_path) {
+    return resolve_workspace_path(rel_path);
+}
+
+// 当 inotify 监听到目录变化时，由 Worker 线程重新扫描目录并构造 Kind::event 帧。
+// 事件负载格式与 workspace_list_dir 响应完全一致：[u16 dirPathLen][dirPath bytes][entries...]。
+std::optional<Frame> build_workspace_list_dir_event(std::string_view rel_path) {
+    auto target_path = resolve_workspace_path(rel_path);
+    if (!target_path)
+        return std::nullopt;
+
+    std::vector<DirEntry> entries;
+    if (read_directory_entries(*target_path, entries) != 0)
+        return std::nullopt;
+
+    auto payload = encode_workspace_list_dir(rel_path, entries);
+    if (payload.size() > max_frame_length - min_frame_length)
+        return std::nullopt;
+
+    return Frame{
+        .length = 0,
+        .kind = Kind::event,
+        .request_id = 0,
+        .method = Method::workspace_list_dir,
+        .status = Status::ok,
+        .payload = std::move(payload),
+    };
+}
+
 // ============================================================================
 // Workspace 模块服务端业务处理函数
 // ============================================================================
 
 // 处理 0x0011 (workspace_list_projects)：
 // 列出 ~/projects 下的所有一级文件夹，响应格式为流式拼接的 [u16 nameLen][name bytes]。
-export void handle_workspace_list_projects(Frame &frame) {
+void handle_workspace_list_projects(Frame &frame) {
     if (!decode_workspace_list_projects(frame.payload)) {
         frame.status = Status::invalid_argument;
         frame.payload = "workspace_list_projects requires an empty payload";
@@ -272,9 +367,10 @@ export void handle_workspace_list_projects(Frame &frame) {
 
 // 处理 0x0013 (workspace_list_dir)：
 // 枚举 ~/projects/<path> 下的一级文件与文件夹（深度为 1，不递归展开子目录）。
-// 每个条目编码为 [u8 type][u16 nameLen][name bytes]，其中：
-//   type = 0（普通文件）、type = 1（目录）、type = 2（符号链接）。
-export void handle_workspace_list_dir(Frame &frame) {
+// 响应头部为 [u16 dirPathLen][dirPath bytes]，随后每个条目编码为 [u8 type][u16 nameLen][name bytes]，
+// 其中：type = 0（普通文件）、type = 1（目录）、type = 2（符号链接）。
+// 若成功且 watched_dir 非空，则将标准化后的目录相对路径写入 *watched_dir 供 IO 线程注册 inotify。
+void handle_workspace_list_dir(Frame &frame, std::string *watched_dir = nullptr) {
     auto req = decode_workspace_list_dir(frame.payload);
     if (!req) {
         frame.status = Status::invalid_argument;
@@ -289,74 +385,28 @@ export void handle_workspace_list_dir(Frame &frame) {
         return;
     }
 
-    ScopedDir dir(::opendir(target_path->c_str()));
-    if (!dir) {
-        set_errno_error(frame, errno, "failed to open target directory");
+    std::vector<DirEntry> entries;
+    const int rc = read_directory_entries(*target_path, entries);
+    if (rc > 0) {
+        set_errno_error(frame, rc, "failed to open target directory");
+        return;
+    }
+    if (rc < 0) {
+        set_errno_error(frame, -rc, "failed to read directory entries");
         return;
     }
 
-    const int dfd = ::dirfd(dir.get());
-    std::vector<DirEntry> entries;
-
-    while (true) {
-        errno = 0;
-        dirent *entry = ::readdir(dir.get());
-        if (entry == nullptr) {
-            if (errno != 0) {
-                set_errno_error(frame, errno, "failed to read directory entries");
-                return;
-            }
-            break;
-        }
-
-        std::string_view name(entry->d_name);
-        if (name == "." || name == ".." || name.size() > std::numeric_limits<std::uint16_t>::max())
-            continue;
-
-        std::optional<DirEntryType> type;
-        switch (entry->d_type) {
-        case DT_REG:
-            type = DirEntryType::file;
-            break;
-        case DT_DIR:
-            type = DirEntryType::directory;
-            break;
-        case DT_LNK:
-            type = DirEntryType::symlink;
-            break;
-        case DT_UNKNOWN: {
-            struct stat st{};
-            if (::fstatat(dfd, entry->d_name, &st, AT_SYMLINK_NOFOLLOW) == 0) {
-                if (S_ISREG(st.st_mode))
-                    type = DirEntryType::file;
-                else if (S_ISDIR(st.st_mode))
-                    type = DirEntryType::directory;
-                else if (S_ISLNK(st.st_mode))
-                    type = DirEntryType::symlink;
-            }
-            break;
-        }
-        default:
-            break;
-        }
-
-        if (type)
-            entries.push_back(DirEntry{.type = *type, .name = std::string(name)});
-    }
-
-    std::ranges::sort(entries, [](const DirEntry &a, const DirEntry &b) {
-        return a.name < b.name;
-    });
-
     frame.status = Status::ok;
-    frame.payload = encode_workspace_list_dir(entries);
+    frame.payload = encode_workspace_list_dir(req->path, entries);
+    if (watched_dir != nullptr)
+        *watched_dir = std::move(req->path);
 }
 
 // 处理 0x0014 (workspace_read_file)：
 // 按 [offset, maxBytes] 分段读取 UTF-8 文件内容。
 // 采用乐观并发控制：每次 pread 读取前后各做一次 fstat 计算 revision，
 // 若前后 revision 一致则返回 [u64 fileSize][u64 revision][bytes...]；若不一致则自动重试。
-export void handle_workspace_read_file(Frame &frame) {
+void handle_workspace_read_file(Frame &frame) {
     auto req = decode_workspace_read_file(frame.payload);
     if (!req) {
         frame.status = Status::invalid_argument;
@@ -445,7 +495,7 @@ export void handle_workspace_read_file(Frame &frame) {
 //      创建同目录临时文件 -> 写入全部内容并 fsync -> 再次检查原文件 revision ->
 //      确认未变化后 rename 原子替换原文件 -> 取得新文件 revision -> 释放锁并返回 OK + [u64
 //      newRevision]。
-export void handle_workspace_write_file(Frame &frame) {
+void handle_workspace_write_file(Frame &frame) {
     auto req = decode_workspace_write_file(frame.payload);
     if (!req) {
         frame.status = Status::invalid_argument;
@@ -543,14 +593,14 @@ export void handle_workspace_write_file(Frame &frame) {
 }
 
 // Workspace 模块请求统一分发入口（对应 Method 掩码分组 0x0010）。
-export void handle_workspace_request(Frame &frame) {
+void handle_workspace_request(Frame &frame, std::string *watched_dir = nullptr) {
     switch (frame.method) {
     case Method::workspace_list_projects:
         handle_workspace_list_projects(frame);
         return;
 
     case Method::workspace_list_dir:
-        handle_workspace_list_dir(frame);
+        handle_workspace_list_dir(frame, watched_dir);
         return;
 
     case Method::workspace_read_file:
@@ -567,3 +617,5 @@ export void handle_workspace_request(Frame &frame) {
         return;
     }
 }
+
+} // namespace server

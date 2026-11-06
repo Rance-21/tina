@@ -55,6 +55,12 @@ RpcClient::~RpcClient() {
     io_pool_.shutdown();
 }
 
+void RpcClient::set_event_handler(EventHandler handler) {
+    (void)loop_->post_task([state = state_, handler = std::move(handler)]() mutable {
+        state->event_handler = std::move(handler);
+    });
+}
+
 // 发起异步 RPC 请求，立即返回 std::future<Frame>，实际编码与发送由客户端 I/O 线程异步完成。
 // 分支逻辑：
 //   1. timeout <= 0：不进队列直接令 Promise 以 TimeoutError 失败。

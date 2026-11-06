@@ -100,6 +100,19 @@ class Connection {
         return true;
     }
 
+    // 服务端主动向客户端推送 Event 帧（如 workspace_list_dir 目录变更通知），不核销 pending_。
+    bool enqueue_event(const Frame &event) {
+        if (peer_eof_ || draining_)
+            return false;
+
+        const auto frame_size = frame_header_size + event.payload.size();
+        if (output_.readable_bytes() + frame_size > max_output)
+            return false;
+
+        encode_frame(event, output_);
+        return true;
+    }
+
     // 非阻塞将 output_ 中的待发数据刷入内核 Socket 发送缓冲区。
     // 分支逻辑：若 try_send 返回 nullopt（EAGAIN，内核发送缓冲区已满）则立即中断循环，
     // 剩余未发完的数据留在 output_ 中，由随后的 refresh_connection() 按需挂载 EPOLLOUT。

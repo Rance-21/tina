@@ -102,6 +102,8 @@ void run_server(std::string_view port) {
         net::EventLoop *loop;
         // 仅在对应的 I/O 线程中读写，供退出时枚举活跃连接。
         ConnectionMap connections;
+        // 本 I/O 线程专属的 inotify 目录监听管理器（无全局监听表）。
+        std::shared_ptr<detail::DirWatcher> watcher;
     };
 
     // 析构顺序：先回收 Worker，再回收 I/O 线程，最后销毁连接登记表。
@@ -110,8 +112,12 @@ void run_server(std::string_view port) {
     runtime::WorkerPool workers(config.worker_threads, config.max_pending_tasks);
 
     slots.reserve(config.io_threads);
-    for (std::size_t i = 0; i < config.io_threads; ++i)
-        slots.push_back({&io_pool.next_loop(), {}});
+    for (std::size_t i = 0; i < config.io_threads; ++i) {
+        slots.push_back({&io_pool.next_loop(), {}, nullptr});
+        auto &slot = slots.back();
+        slot.watcher = std::make_shared<detail::DirWatcher>(*slot.loop, slot.connections, workers,
+                                                            connection_counter);
+    }
 
     std::size_t next_io = 0;
     runtime::log::info("tina listening on port " + std::string(port));
@@ -148,9 +154,9 @@ void run_server(std::string_view port) {
                 IoSlot &slot = slots[next_io];
                 next_io = (next_io + 1) % slots.size();
 
-                bool accepted =
-                    detail::post_connection(std::move(*client), *slot.loop, slot.connections,
-                                            workers, connection_counter, kv);
+                bool accepted = detail::post_connection(std::move(*client), *slot.loop,
+                                                        slot.connections, workers,
+                                                        connection_counter, kv, slot.watcher);
 
                 if (!accepted)
                     runtime::log::warn("I/O EventLoop rejected connection");
@@ -169,21 +175,25 @@ void run_server(std::string_view port) {
     for (auto &slot : slots) {
         auto *loop = slot.loop;
         auto *connections = &slot.connections;
+        auto watcher = slot.watcher;
 
-        bool posted = loop->post_task([loop, connections, &connection_counter, frozen] {
-            try {
-                for (auto it = connections->begin(); it != connections->end();) {
-                    auto conn = it->second;
-                    ++it; // refresh_connection 可能删除当前连接。
-                    conn->begin_shutdown();
-                    detail::refresh_connection(*loop, *connections, connection_counter, conn);
+        bool posted =
+            loop->post_task([loop, connections, watcher, &connection_counter, frozen] {
+                try {
+                    if (watcher)
+                        watcher->stop();
+                    for (auto it = connections->begin(); it != connections->end();) {
+                        auto conn = it->second;
+                        ++it; // refresh_connection 可能删除当前连接。
+                        conn->begin_shutdown();
+                        detail::refresh_connection(*loop, *connections, connection_counter, conn);
+                    }
+                } catch (...) {
+                    // 不允许异常跳过屏障通知，否则管理线程会永久等待。
+                    runtime::log::error("shutdown: failed to freeze an I/O loop");
                 }
-            } catch (...) {
-                // 不允许异常跳过屏障通知，否则管理线程会永久等待。
-                runtime::log::error("shutdown: failed to freeze an I/O loop");
-            }
-            frozen->count_down();
-        });
+                frozen->count_down();
+            });
         if (!posted)
             throw std::runtime_error("cannot initiate I/O shutdown");
     }
