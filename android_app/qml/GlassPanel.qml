@@ -1,13 +1,14 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Effects
 
 Item {
     id: root
 
-    // Required reference to the full-window background source item for real-time frosted blur
+    // 采样背景和代码场景，生成真实毛玻璃效果。
     required property Item blurSource
     property int cornerRadius: 16
-    // When true, the left edge is completely flat (0 radius on top-left and bottom-left) so it sits flush against the screen left edge
+    // 左侧标签贴齐屏幕边缘，不保留左上和左下圆角。
     property bool flatLeftEdge: false
     property color tintColor: "#78101624"
     property color borderColor: "#3894b8ff"
@@ -15,7 +16,7 @@ Item {
     property int blurRadius: 48
     property bool highlightGlow: false
 
-    // Clip the blurred background into rounded corners (with optional flat left edge)
+    // 圆角遮罩裁剪背景；隐藏的面板不需要持续更新纹理。
     Item {
         id: clipContainer
         anchors.fill: parent
@@ -34,7 +35,9 @@ Item {
             sourceRect: root.blurSource
                         ? root.mapToItem(root.blurSource, 0, 0, root.width, root.height)
                         : Qt.rect(0, 0, root.width, root.height)
-            live: true
+            live: root.visible
+            // 平板上以半分辨率采样，模糊仍平滑，减少纹理带宽和离屏渲染开销。
+            textureSize: Qt.size(Math.max(1, Math.ceil(width / 2)), Math.max(1, Math.ceil(height / 2)))
         }
 
         MultiEffect {
@@ -63,7 +66,7 @@ Item {
             radius: root.cornerRadius
         }
 
-        // Fill left corners to make left edge straight when flatLeftEdge is true
+        // 填平左侧圆角。
         Rectangle {
             visible: root.flatLeftEdge
             width: root.cornerRadius
@@ -73,7 +76,7 @@ Item {
         }
     }
 
-    // Outer glass rim
+    // 毛玻璃外边缘。
     Item {
         anchors.fill: parent
         clip: true

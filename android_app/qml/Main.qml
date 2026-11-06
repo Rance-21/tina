@@ -1,3 +1,4 @@
+pragma ComponentBehavior: Bound
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
@@ -13,27 +14,58 @@ Window {
     visible: true
     title: qsTr("Tina Android IDE — Client Shell (16:10)")
     color: "#090d16"
+    // 默认沿用现有服务端地址；桌面测试可从启动参数注入本地模拟服务端。
+    property string serverHost: "100.65.173.4"
+    property int serverPort: 3490
 
     FfiClientBridge {
-    id: ffiBridge
-
-    onPingResult: function(ok, message) {
-        mainWindow.title = ok
-            ? "Tina — Fedora Connected: " + message
-            : "Tina — Connection Error: " + message
+        id: ffiBridge
+        objectName: "workspaceBridge"
+        onPingResult: function(ok, message) {
+            mainWindow.title = ok ? "Tina — 已连接 Fedora" : "Tina — " + message
+        }
+        onDocumentsChanged: {
+            // 增量追加，已有编辑器及其撤销栈不会随列表更新被重建。
+            const opened = documents
+            while (fileTabsModel.count < opened.length)
+                fileTabsModel.append({document: opened[fileTabsModel.count]})
+        }
+        onFileOpened: {
+            rootCanvas.popupMode = "none"
+            Qt.callLater(rootCanvas.focusCurrentEditor)
+        }
+        onBrowserChanged: {
+            fileList.currentIndex = entries.length > 0 ? 0 : -1
+        }
     }
-}
 
-Component.onCompleted: {
-    ffiBridge.connectToServer("100.65.173.4", 3490)
-}
+    Component.onCompleted: ffiBridge.connectToServer(serverHost, serverPort)
+    Shortcut { sequence: "Ctrl+S"; onActivated: ffiBridge.saveCurrent() }
+    Shortcut {
+        sequence: "Ctrl+Tab"
+        onActivated: ffiBridge.selectDocument((ffiBridge.activeIndex + 1) % Math.max(1, fileTabsModel.count))
+    }
+    Shortcut {
+        sequence: "Ctrl+Shift+Tab"
+        onActivated: ffiBridge.selectDocument((ffiBridge.activeIndex - 1 + fileTabsModel.count)
+                                              % Math.max(1, fileTabsModel.count))
+    }
+    Shortcut { sequence: "Ctrl+P"; onActivated: rootCanvas.showFiles() }
+    Shortcut {
+        sequence: "Escape"
+        enabled: rootCanvas.popupMode !== "none"
+        onActivated: {
+            rootCanvas.popupMode = "none"
+            rootCanvas.focusCurrentEditor()
+        }
+    }
 
     Item {
         id: rootCanvas
         anchors.fill: parent
 
         // 状态控制
-        property int currentTabIndex: 0
+        readonly property int currentTabIndex: ffiBridge.activeIndex
 
         // 右侧 AI Agent 窗口：默认不显示，输入 @AI 回车切换显示/关闭（点击别处不关闭）
         property bool agentWindowVisible: false
@@ -42,41 +74,28 @@ Component.onCompleted: {
         // "none"   -> 不显示
         // "menu"   -> 首字母输入 '@' 时展示的三行菜单 (AI / GIT / FILE)
         // "git"    -> 输入 @GIT 回车后，把当前窗口变成横向可滑动的 Git 树
-        // "folder" -> 点击左侧 Folder 按钮，或输入 @FILE 回车后弹出的文件窗口（目前留空）
+        // "folder" -> 点击左侧 Folder 按钮，或输入 @FILE 回车后弹出的文件窗口
         property string popupMode: "none"
 
         // 布局核心几何参数：
         // 左侧标签栏缩短，贴紧屏幕左侧；逻辑上保留左右分界区域，视觉上去除代码区左右分割线
         // 左侧最低点与右侧 Agent 窗口最低点一致 (panelBottomY)
         readonly property real leftColumnWidth: 132
-        readonly property real rightAgentWidth: 320
+        readonly property real rightAgentWidth: Math.min(320, width * 0.3)
         readonly property real bottomInputHeight: 54
         readonly property real bottomMargin: 18
         readonly property real panelBottomY: height - bottomMargin - bottomInputHeight - 16
 
-        // 模拟单文件标签页与各自代码内容
-        ListModel {
-            id: fileTabsModel
-            ListElement {
-                fileName: "server.cppm"
-                fileContent: "export module rpc.server;\n\nimport std;\nimport net.socket;\nimport net.epoll;\nimport net.event_loop;\nimport net.event_loop_thread_pool;\nimport runtime.worker_pool;\nimport rpc.protocol;\nimport rpc.connection;\n\nexport namespace rpc {\n\n// Tina Remote IDE Server — Fedora 44 C++23\nvoid run_server(std::string_view port = \"3490\") {\n    net::EventLoop main_loop;\n    net::EventLoopThreadPool io_pool(4);\n    runtime::WorkerPool worker_pool(8);\n\n    auto listen_sock = net::Socket::listen_tcp(\"0.0.0.0\", port);\n    std::println(\"Tina RPC Server listening on port {}\", port);\n\n    // 等待 Android Qt Quick 客户端通过 FFI Bridge 接入...\n    main_loop.run();\n}\n\n} // namespace rpc\n\n// [交互说明]\n// 1. 输入 @ 弹出三行菜单：AI / GIT / FILE（与底部对话框左右对齐）\n// 2. 输入 @AI 回车：开启/关闭右侧 AI Agent 窗口（展示时带分界线与模糊，点击别处不关闭，再次 @AI 回车关闭）\n// 3. 输入 @GIT 回车：将弹出窗口切换为横向 Git 树（支持 <- / -> 滑动，点击别处关闭）\n// 4. 输入 @FILE 回车 或 点击输入框内左侧 Folder 按钮：打开 Folder 模糊窗口（点击别处关闭）"
-            }
-            ListElement {
-                fileName: "client_ffi.rs"
-                fileContent: "// Rust FFI Client Layer for Tina Android Qt Quick App\nuse std::ffi::{CStr, c_char};\nuse std::net::TcpStream;\n\npub struct TinaFfiClientHandle {\n    endpoint: String,\n    connected: bool,\n}\n\n#[unsafe(no_mangle)]\npub extern \"C\" fn tina_ffi_client_create(\n    host: *const c_char,\n    port: u16,\n) -> *mut TinaFfiClientHandle {\n    // Phase 2: Connect to Fedora Tina RPC Server\n    std::ptr::null_mut()\n}\n\n#[unsafe(no_mangle)]\npub extern \"C\" fn tina_ffi_client_send_command(\n    _handle: *mut TinaFfiClientHandle,\n    _cmd_utf8: *const c_char,\n) -> u64 {\n    // Send terminal/command frame\n    1\n}"
-            }
-            ListElement {
-                fileName: "protocol.cppm"
-                fileContent: "export module ide.protocol;\n\nimport std;\nimport net.buffer;\nexport import rpc.protocol;\n\n// 客户端和服务端共用同一帧头。Length 不含自己的 4 字节。\nexport void encode_frame(const Frame &frame, net::Buffer &out) {\n    std::array<char, frame_header_size> header;\n    // Big-endian frame encoding for Android <-> Fedora RPC\n    out.append(header.data(), header.size());\n    out.append(frame.payload.data(), frame.payload.size());\n}\n\nexport std::optional<Frame> decode_frame(net::Buffer &in) {\n    if (in.readable_bytes() < 4)\n        return std::nullopt;\n    return std::nullopt;\n}"
-            }
-            ListElement {
-                fileName: "Main.qml"
-                fileContent: "import QtQuick\nimport QtQuick.Controls\nimport TinaIde\n\n// Qt Quick 6 + C++23 Glassmorphism UI Shell\n// 16:10 Landscape Aspect Ratio\n// - Left: Shortened tabs flush to left screen edge (no left border radius)\n// - Center: Full-height unblurred code area (logical left/right bounds, no visual divider lines)\n// - Right: AI Agent window (toggled by '@AI' + Enter, with divider line & blur when shown)\n// - Bottom: Unified dialog bar with left Folder button, command/@ input, right submit arrow"
-            }
-        }
+        ListModel { id: fileTabsModel }
 
-        onCurrentTabIndexChanged: {
-            codeEditor.text = fileTabsModel.get(currentTabIndex).fileContent
+        function focusCurrentEditor() {
+            const pane = editors.itemAt(ffiBridge.activeIndex) as CodePane
+            if (pane) pane.focusEditor()
+        }
+        function showFiles() {
+            popupMode = "folder"
+            ffiBridge.openFileBrowser()
+            fileList.forceActiveFocus()
         }
 
         // @ 出来的三行菜单数据：左侧图标，往右字 (AI / GIT / FILE)
@@ -190,79 +209,36 @@ Component.onCompleted: {
             }
 
             // ----------------------------------------------------------------
-            // 中间代码区域：逻辑上保留左右分界，视觉上去除左右分割线，不模糊，满整个上下屏幕
-            // ----------------------------------------------------------------
+            // 无边框代码区，底部避开命令栏；AI 隐藏时释放右侧空间。
             Item {
                 id: centerCodeArea
                 anchors.top: parent.top
                 anchors.bottom: parent.bottom
+                anchors.bottomMargin: rootCanvas.bottomMargin + rootCanvas.bottomInputHeight + 18
                 anchors.left: parent.left
                 anchors.leftMargin: rootCanvas.leftColumnWidth + 14
                 anchors.right: parent.right
-                anchors.rightMargin: rootCanvas.rightAgentWidth + 20
-
-                RowLayout {
-                    anchors.fill: parent
-                    anchors.leftMargin: 8
-                    anchors.rightMargin: 8
-                    spacing: 12
-
-                    // 行号列（贯通上下屏幕）
-                    Column {
-                        Layout.alignment: Qt.AlignTop
-                        Layout.topMargin: 18
-                        spacing: 0
-                        Repeater {
-                            model: 34
-                            Text {
-                                width: 32
-                                height: 24
-                                horizontalAlignment: Text.AlignRight
-                                verticalAlignment: Text.AlignVCenter
-                                text: (index + 1).toString()
-                                color: "#567096"
-                                font.family: "monospace"
-                                font.pixelSize: 13
-                            }
-                        }
-                    }
-
-                    // 代码编辑器主体（上下贯通整个屏幕）
-                    Flickable {
-                        id: codeFlick
-                        Layout.fillWidth: true
-                        Layout.fillHeight: true
-                        contentWidth: width
-                        contentHeight: Math.max(height, codeEditor.implicitHeight + 110)
-                        clip: true
-
-                        TextEdit {
-                            id: codeEditor
-                            width: codeFlick.width
-                            topPadding: 18
-                            bottomPadding: 96
-                            Component.onCompleted: {
-                                text = fileTabsModel.get(rootCanvas.currentTabIndex).fileContent
-                            }
-                            color: "#e2ecff"
-                            selectionColor: "#4058a6ff"
-                            selectedTextColor: "#ffffff"
-                            font.family: "monospace"
-                            font.pixelSize: 14
-                            wrapMode: TextEdit.NoWrap
-                            selectByMouse: true
-                            onTextChanged: {
-                                if (fileTabsModel.get(rootCanvas.currentTabIndex).fileContent !== text) {
-                                    fileTabsModel.setProperty(rootCanvas.currentTabIndex, "fileContent", text)
-                                }
-                            }
-                        }
+                anchors.rightMargin: rootCanvas.agentWindowVisible ? rootCanvas.rightAgentWidth + 20 : 20
+                Text {
+                    anchors.centerIn: parent
+                    visible: fileTabsModel.count === 0
+                    text: "输入 @FILE 或按 Ctrl+P 打开项目文件"
+                    color: "#a6bcda"
+                    font.pixelSize: 17
+                }
+                Repeater {
+                    id: editors
+                    model: fileTabsModel
+                    delegate: CodePane {
+                        required property int index
+                        anchors.fill: parent
+                        bridge: ffiBridge
+                        active: index === ffiBridge.activeIndex
                     }
                 }
             }
         }
 
-        // ====================================================================
         // 点击别处关闭弹窗的遮罩层（仅关闭 menu / git / folder 弹窗，绝不关闭右侧 AI 窗口）
         // ====================================================================
         MouseArea {
@@ -289,75 +265,65 @@ Component.onCompleted: {
             width: rootCanvas.leftColumnWidth
             height: rootCanvas.panelBottomY - y
 
-            Column {
+            ListView {
                 id: tabsColumn
-                anchors.top: parent.top
-                anchors.left: parent.left
-                width: parent.width
-                spacing: 12
-
-                Repeater {
-                    model: fileTabsModel
-                    delegate: Item {
-                        id: tabDelegate
-                        // 紧贴屏幕最左侧 (x = 0)，缩短标签宽度
-                        x: 0
-                        width: leftTabsContainer.width
-                        height: 42
-                        readonly property bool isSelected: index === rootCanvas.currentTabIndex
-
-                        GlassPanel {
-                            anchors.fill: parent
-                            blurSource: backgroundAndCodeScene
-                            cornerRadius: 14
-                            flatLeftEdge: true // 取消左边的圆角，紧贴屏幕左边缘
-                            blurRadius: 48
-                            highlightGlow: tabDelegate.isSelected
-                            tintColor: tabDelegate.isSelected
-                                       ? "#98203a68"
-                                       : (tabMouse.containsMouse ? "#7818243a" : "#58101726")
-                            borderColor: tabDelegate.isSelected
-                                         ? "#c06cb8ff"
-                                         : "#348aa8d8"
-                            borderWidth: tabDelegate.isSelected ? 1.5 : 1.0
-                        }
-
-                        // 紧贴屏幕左边缘的高亮竖条
-                        Rectangle {
-                            width: 3
-                            height: parent.height
-                            anchors.left: parent.left
-                            color: "#63b3ed"
-                            visible: tabDelegate.isSelected
-                        }
-
-                        Text {
-                            anchors.fill: parent
-                            anchors.leftMargin: 12
-                            anchors.rightMargin: 10
-                            verticalAlignment: Text.AlignVCenter
-                            text: model.fileName
-                            color: tabDelegate.isSelected ? "#ffffff" : "#b0c4de"
-                            font.pixelSize: 13
-                            font.weight: tabDelegate.isSelected ? Font.DemiBold : Font.Normal
-                            elide: Text.ElideRight
-                        }
-
-                        MouseArea {
-                            id: tabMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                rootCanvas.currentTabIndex = index
-                            }
+                anchors.fill: parent
+                spacing: 10
+                clip: true
+                model: fileTabsModel
+                ScrollBar.vertical: ScrollBar {}
+                delegate: Item {
+                    id: tabDelegate
+                    required property int index
+                    required property WorkspaceDocument document
+                    width: leftTabsContainer.width
+                    height: 48
+                    readonly property bool isSelected: index === ffiBridge.activeIndex
+                    GlassPanel {
+                        anchors.fill: parent
+                        blurSource: backgroundAndCodeScene
+                        cornerRadius: 14
+                        flatLeftEdge: true
+                        blurRadius: 24
+                        highlightGlow: tabDelegate.isSelected || tabDelegate.document.dirty
+                        tintColor: tabDelegate.isSelected ? "#98203a68" : "#58101726"
+                        // 未保存标签边缘用琥珀色，与蓝色选中态区分。
+                        borderColor: tabDelegate.document.dirty ? "#ffd18b"
+                                     : tabDelegate.isSelected ? "#c06cb8ff" : "#348aa8d8"
+                        borderWidth: tabDelegate.document.dirty ? 2 : 1
+                    }
+                    Rectangle {
+                        width: 3
+                        height: parent.height
+                        color: tabDelegate.document.dirty ? "#ffd18b" : "#63b3ed"
+                        visible: tabDelegate.isSelected || tabDelegate.document.dirty
+                    }
+                    Text {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 8
+                        verticalAlignment: Text.AlignVCenter
+                        text: (tabDelegate.document.dirty ? "• " : "") + tabDelegate.document.name
+                        color: tabDelegate.isSelected ? "#ffffff" : "#b0c4de"
+                        font.pixelSize: 13
+                        elide: Text.ElideRight
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            ffiBridge.selectDocument(tabDelegate.index)
+                            rootCanvas.focusCurrentEditor()
                         }
                     }
+                    ToolTip.visible: tabHover.hovered
+                    ToolTip.text: tabDelegate.document.path
+                    HoverHandler { id: tabHover }
                 }
             }
         }
 
-        // ====================================================================
         // 2. 右侧：AI Agent 窗口
         //    - 平时不显示（右侧区域也不模糊、无分界线）
         //    - 只有输入 @AI 回车才展示，展示时带有左侧分界线与背景模糊
@@ -395,7 +361,7 @@ Component.onCompleted: {
                 anchors.fill: parent
                 blurSource: backgroundAndCodeScene
                 cornerRadius: 20
-                blurRadius: 56
+                blurRadius: 32
                 tintColor: "#74111828"
                 borderColor: "#4c8cb4ff"
                 borderWidth: 1.2
@@ -413,8 +379,8 @@ Component.onCompleted: {
                     spacing: 8
 
                     Rectangle {
-                        width: 8
-                        height: 8
+                        implicitWidth: 8
+                        implicitHeight: 8
                         radius: 4
                         color: "#38bdf8"
                     }
@@ -446,6 +412,8 @@ Component.onCompleted: {
 
                     delegate: Item {
                         id: dialogueCard
+                        required property var model
+                        required property int index
                         width: agentDialogueList.width
                         height: cardCol.implicitHeight + 22
 
@@ -454,8 +422,8 @@ Component.onCompleted: {
                             radius: 14
                             color: cardMouse.containsMouse
                                    ? "#42243452"
-                                   : (model.expanded ? "#381e2d48" : "#26162034")
-                            border.color: model.expanded ? "#687cb8ff" : "#288aa8d8"
+                                   : (dialogueCard.model.expanded ? "#381e2d48" : "#26162034")
+                            border.color: dialogueCard.model.expanded ? "#687cb8ff" : "#288aa8d8"
                             border.width: 1
                         }
 
@@ -474,17 +442,17 @@ Component.onCompleted: {
                                 // 左上角模型 Icon
                                 Rectangle {
                                     Layout.alignment: Qt.AlignTop
-                                    width: 30
-                                    height: 30
+                                    implicitWidth: 30
+                                    implicitHeight: 30
                                     radius: 15
                                     color: "#30ffffff"
-                                    border.color: model.modelColor
+                                    border.color: dialogueCard.model.modelColor
                                     border.width: 1.5
 
                                     Text {
                                         anchors.centerIn: parent
-                                        text: model.modelIcon
-                                        color: model.modelColor
+                                        text: dialogueCard.model.modelIcon
+                                        color: dialogueCard.model.modelColor
                                         font.pixelSize: 15
                                         font.bold: true
                                     }
@@ -494,7 +462,7 @@ Component.onCompleted: {
                                 Text {
                                     Layout.fillWidth: true
                                     Layout.alignment: Qt.AlignVCenter
-                                    text: model.dialogueTitle
+                                    text: dialogueCard.model.dialogueTitle
                                     color: "#f0f6ff"
                                     font.pixelSize: 13
                                     font.weight: Font.Medium
@@ -503,23 +471,23 @@ Component.onCompleted: {
 
                                 Text {
                                     Layout.alignment: Qt.AlignTop
-                                    text: model.expanded ? "▾" : "▸"
+                                    text: dialogueCard.model.expanded ? "▾" : "▸"
                                     color: "#7c93b8"
                                     font.pixelSize: 13
                                 }
                             }
 
                             Rectangle {
-                                visible: model.expanded
+                                visible: dialogueCard.model.expanded
                                 Layout.fillWidth: true
-                                height: 1
+                                implicitHeight: 1
                                 color: "#22ffffff"
                             }
 
                             Text {
-                                visible: model.expanded
+                                visible: dialogueCard.model.expanded
                                 Layout.fillWidth: true
-                                text: "[" + model.modelTag + "] " + model.detailText
+                                text: "[" + dialogueCard.model.modelTag + "] " + dialogueCard.model.detailText
                                 color: "#b6c8e4"
                                 font.pixelSize: 12
                                 lineHeight: 1.35
@@ -533,7 +501,7 @@ Component.onCompleted: {
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
-                                agentDialoguesModel.setProperty(index, "expanded", !model.expanded)
+                                agentDialoguesModel.setProperty(dialogueCard.index, "expanded", !dialogueCard.model.expanded)
                             }
                         }
                     }
@@ -546,7 +514,7 @@ Component.onCompleted: {
         //    支持三种状态：
         //    - "menu"   : 首字母输入 '@' 时出现的三行选项（左侧图标，往右字：AI / GIT / FILE）
         //    - "git"    : 输入 @GIT 回车后，把当前三行窗口变成横向可滑动（<- / ->）的 Git 树
-        //    - "folder" : 点击 Folder 按钮或输入 @FILE 回车后弹出的窗口（目前留空）
+        //    - "folder" : 点击 Folder 按钮或输入 @FILE 回车后弹出的文件列表
         //    以上弹窗均在点击别处时关闭。
         // ====================================================================
         Item {
@@ -554,7 +522,8 @@ Component.onCompleted: {
             // 左右严格与下方对话框（bottomDialogBar）对齐
             x: bottomDialogBar.x
             width: bottomDialogBar.width
-            height: rootCanvas.popupMode === "menu" ? 156 : 190
+            height: rootCanvas.popupMode === "menu" ? 180
+                    : rootCanvas.popupMode === "folder" ? Math.min(380, bottomDialogBar.y - 24) : 190
             y: bottomDialogBar.y - height - 10
             visible: rootCanvas.popupMode !== "none"
             opacity: visible ? 1.0 : 0.0
@@ -571,7 +540,7 @@ Component.onCompleted: {
                 anchors.fill: parent
                 blurSource: backgroundAndCodeScene
                 cornerRadius: 20
-                blurRadius: 56
+                blurRadius: 32
                 tintColor: "#78121a2c"
                 borderColor: "#588cb8ff"
                 borderWidth: 1.2
@@ -591,13 +560,14 @@ Component.onCompleted: {
                     model: atMenuModel
                     delegate: Rectangle {
                         id: menuRow
+                        required property var model
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         radius: 12
                         readonly property string currentFilter: cmdInput.text.length > 1
                                                                 ? cmdInput.text.substring(1).trim().toUpperCase()
                                                                 : ""
-                        readonly property bool isMatched: currentFilter.length > 0 && model.cmdKey.startsWith(currentFilter)
+                        readonly property bool isMatched: currentFilter.length > 0 && menuRow.model.cmdKey.startsWith(currentFilter)
                         color: rowMouse.containsMouse
                                ? "#482a4268"
                                : (isMatched ? "#3622385a" : "transparent")
@@ -612,17 +582,17 @@ Component.onCompleted: {
 
                             // 左侧图标
                             Rectangle {
-                                width: 28
-                                height: 28
+                                implicitWidth: 28
+                                implicitHeight: 28
                                 radius: 8
                                 color: "#28ffffff"
-                                border.color: model.iconColor
+                                border.color: menuRow.model.iconColor
                                 border.width: 1.2
 
                                 Text {
                                     anchors.centerIn: parent
-                                    text: model.iconSymbol
-                                    color: model.iconColor
+                                    text: menuRow.model.iconSymbol
+                                    color: menuRow.model.iconColor
                                     font.pixelSize: 14
                                     font.bold: true
                                 }
@@ -631,7 +601,7 @@ Component.onCompleted: {
                             // 往右字：AI / GIT / FILE
                             Text {
                                 Layout.fillWidth: true
-                                text: model.cmdKey
+                                text: menuRow.model.cmdKey
                                 color: "#f0f6ff"
                                 font.family: "monospace"
                                 font.pixelSize: 14
@@ -645,7 +615,7 @@ Component.onCompleted: {
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
-                                cmdInput.text = "@" + model.cmdKey
+                                cmdInput.text = "@" + menuRow.model.cmdKey
                                 rootCanvas.submitCurrentInput()
                             }
                         }
@@ -665,8 +635,8 @@ Component.onCompleted: {
                 // 左滑按钮 "<-"
                 Rectangle {
                     Layout.alignment: Qt.AlignVCenter
-                    width: 38
-                    height: 38
+                    implicitWidth: 38
+                    implicitHeight: 38
                     radius: 19
                     color: leftSlideMouse.containsMouse ? "#4c2c446e" : "#2e1a2a44"
                     border.color: "#588cb8ff"
@@ -713,12 +683,15 @@ Component.onCompleted: {
                         Repeater {
                             model: gitTreeCommitsModel
                             delegate: Item {
+                                id: commitNode
+                                required property var model
+                                required property int index
                                 width: 230
                                 height: 136
 
                                 // 连接主干横线（横着的 Git 树连线）
                                 Rectangle {
-                                    visible: index < gitTreeCommitsModel.count - 1
+                                    visible: commitNode.index < gitTreeCommitsModel.count - 1
                                     x: 115
                                     y: 40
                                     width: 230
@@ -728,7 +701,7 @@ Component.onCompleted: {
 
                                 // 分支示意曲线（第2个节点画一条分叉演进线作为占位示意）
                                 Canvas {
-                                    visible: index === 1
+                                    visible: commitNode.index === 1
                                     anchors.fill: parent
                                     onPaint: {
                                         var ctx = getContext("2d")
@@ -754,15 +727,15 @@ Component.onCompleted: {
                                         height: 20
                                         width: branchLabel.implicitWidth + 14
                                         radius: 10
-                                        visible: model.branch.length > 0
-                                        color: model.isHead ? "#3834d399" : "#3258a6ff"
-                                        border.color: model.isHead ? "#34d399" : "#58a6ff"
+                                        visible: commitNode.model.branch.length > 0
+                                        color: commitNode.model.isHead ? "#3834d399" : "#3258a6ff"
+                                        border.color: commitNode.model.isHead ? "#34d399" : "#58a6ff"
                                         border.width: 1
 
                                         Text {
                                             id: branchLabel
                                             anchors.centerIn: parent
-                                            text: model.branch
+                                            text: commitNode.model.branch
                                             color: "#f0f6ff"
                                             font.family: "monospace"
                                             font.pixelSize: 11
@@ -770,7 +743,7 @@ Component.onCompleted: {
                                     }
 
                                     Item {
-                                        visible: model.branch.length === 0
+                                        visible: commitNode.model.branch.length === 0
                                         width: 1
                                         height: 20
                                     }
@@ -781,7 +754,7 @@ Component.onCompleted: {
                                         width: 18
                                         height: 18
                                         radius: 9
-                                        color: model.isHead ? "#34d399" : "#58a6ff"
+                                        color: commitNode.model.isHead ? "#34d399" : "#58a6ff"
                                         border.color: "#ffffff"
                                         border.width: 2.5
                                     }
@@ -803,7 +776,7 @@ Component.onCompleted: {
                                             RowLayout {
                                                 width: parent.width
                                                 Text {
-                                                    text: model.hash
+                                                    text: commitNode.model.hash
                                                     color: "#7cc4ff"
                                                     font.family: "monospace"
                                                     font.pixelSize: 11
@@ -811,7 +784,7 @@ Component.onCompleted: {
                                                 }
                                                 Item { Layout.fillWidth: true }
                                                 Text {
-                                                    text: model.author
+                                                    text: commitNode.model.author
                                                     color: "#8aa0c0"
                                                     font.pixelSize: 11
                                                 }
@@ -819,7 +792,7 @@ Component.onCompleted: {
 
                                             Text {
                                                 width: parent.width
-                                                text: model.msg
+                                                text: commitNode.model.msg
                                                 color: "#e2ecff"
                                                 font.pixelSize: 12
                                                 elide: Text.ElideRight
@@ -835,8 +808,8 @@ Component.onCompleted: {
                 // 右滑按钮 "->"
                 Rectangle {
                     Layout.alignment: Qt.AlignVCenter
-                    width: 38
-                    height: 38
+                    implicitWidth: 38
+                    implicitHeight: 38
                     radius: 19
                     color: rightSlideMouse.containsMouse ? "#4c2c446e" : "#2e1a2a44"
                     border.color: "#588cb8ff"
@@ -865,15 +838,111 @@ Component.onCompleted: {
             }
 
             // ----------------------------------------------------------------
-            // 状态 C ("folder")：点击 Folder 按钮或 @FILE 回车弹出的窗口（目前留空）
-            // ----------------------------------------------------------------
-            Item {
+            // 状态 C：复用 AI / GIT / FILE 所在的同一个毛玻璃弹窗。
+            ColumnLayout {
                 anchors.fill: parent
+                anchors.margins: 12
+                spacing: 4
                 visible: rootCanvas.popupMode === "folder"
+                RowLayout {
+                    Layout.fillWidth: true
+                    Button {
+                        text: "↑ 上级"
+                        enabled: ffiBridge.directory.length > 0 && !ffiBridge.browsing
+                        onClicked: ffiBridge.parentDirectory()
+                    }
+                    Label {
+                        Layout.fillWidth: true
+                        text: ffiBridge.directory.length > 0 ? ffiBridge.directory : "项目"
+                        color: "#dceaff"
+                        elide: Text.ElideMiddle
+                    }
+                    BusyIndicator {
+                        running: ffiBridge.browsing
+                        visible: running
+                        implicitWidth: 30
+                        implicitHeight: 30
+                    }
+                    Button {
+                        text: "刷新"
+                        enabled: !ffiBridge.browsing
+                        onClicked: ffiBridge.openFileBrowser()
+                    }
+                }
+                ListView {
+                    id: fileList
+                    objectName: "fileBrowserList"
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    model: ffiBridge.entries
+                    currentIndex: -1
+                    keyNavigationEnabled: true
+                    keyNavigationWraps: true
+                    highlightMoveDuration: 100
+                    ScrollBar.vertical: ScrollBar {}
+                    Keys.onReturnPressed: ffiBridge.activateEntry(currentIndex)
+                    Keys.onEnterPressed: ffiBridge.activateEntry(currentIndex)
+                    Keys.onPressed: function(event) {
+                        if (event.key === Qt.Key_Up && (event.modifiers & Qt.AltModifier)) {
+                            ffiBridge.parentDirectory()
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_Left || event.key === Qt.Key_Backspace) {
+                            ffiBridge.parentDirectory()
+                            event.accepted = true
+                        } else if (event.key === Qt.Key_Right) {
+                            ffiBridge.activateEntry(currentIndex)
+                            event.accepted = true
+                        }
+                    }
+                    delegate: Rectangle {
+                        id: fileRow
+                        required property var modelData
+                        required property int index
+                        width: fileList.width
+                        height: 48
+                        radius: 10
+                        color: ListView.isCurrentItem ? "#60365d8c" : "#101d2f48"
+                        border.color: ListView.isCurrentItem ? "#80baff" : "transparent"
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 14
+                            anchors.rightMargin: 14
+                            Label {
+                                text: fileRow.modelData.type === 1 ? "▸" : fileRow.modelData.type === 2 ? "↗" : "≡"
+                                color: fileRow.modelData.type === 1 ? "#ffd18b" : "#8fc2ff"
+                                font.pixelSize: 22
+                            }
+                            Label {
+                                Layout.fillWidth: true
+                                text: fileRow.modelData.name
+                                color: "#edf4ff"
+                                elide: Text.ElideRight
+                            }
+                            Label {
+                                text: fileRow.modelData.type === 1 ? "目录" : fileRow.modelData.type === 2 ? "符号链接" : "文件"
+                                color: "#8ea8c9"
+                            }
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            onClicked: {
+                                fileList.currentIndex = fileRow.index
+                                fileList.forceActiveFocus()
+                                ffiBridge.activateEntry(fileRow.index)
+                            }
+                        }
+                    }
+                    Label {
+                        anchors.centerIn: parent
+                        visible: !ffiBridge.browsing && fileList.count === 0
+                        text: "没有可显示的项目或文件；可点击刷新重新获取"
+                        color: "#a6bcda"
+                    }
+                }
             }
         }
 
-        // ====================================================================
         // 4. 下边：统一对话框（删除最左侧的 $，以 Folder 按钮取代；右边是向上箭头提交）
         // ====================================================================
         Item {
@@ -906,8 +975,8 @@ Component.onCompleted: {
                 // 对话框内最左侧：Folder 按钮（取代原来的 $）
                 Item {
                     id: folderButton
-                    width: rootCanvas.bottomInputHeight - 12
-                    height: rootCanvas.bottomInputHeight - 12
+                    Layout.preferredWidth: rootCanvas.bottomInputHeight - 6
+                    Layout.preferredHeight: rootCanvas.bottomInputHeight - 6
 
                     Rectangle {
                         anchors.fill: parent
@@ -952,7 +1021,7 @@ Component.onCompleted: {
                             if (rootCanvas.popupMode === "folder") {
                                 rootCanvas.popupMode = "none"
                             } else {
-                                rootCanvas.popupMode = "folder"
+                                rootCanvas.showFiles()
                             }
                         }
                     }
@@ -961,6 +1030,7 @@ Component.onCompleted: {
                 // 中间命令行 / @ 输入框
                 TextField {
                     id: cmdInput
+                    objectName: "commandInput"
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     verticalAlignment: TextInput.AlignVCenter
@@ -983,13 +1053,16 @@ Component.onCompleted: {
 
                     Keys.onReturnPressed: rootCanvas.submitCurrentInput()
                     Keys.onEnterPressed: rootCanvas.submitCurrentInput()
+                    Keys.onDownPressed: {
+                        if (rootCanvas.popupMode === "folder") fileList.forceActiveFocus()
+                    }
                 }
 
                 // 右边：向上箭头提交按钮
                 Item {
                     id: submitButton
-                    width: rootCanvas.bottomInputHeight - 12
-                    height: rootCanvas.bottomInputHeight - 12
+                    Layout.preferredWidth: rootCanvas.bottomInputHeight - 6
+                    Layout.preferredHeight: rootCanvas.bottomInputHeight - 6
 
                     Rectangle {
                         anchors.fill: parent
@@ -1034,9 +1107,20 @@ Component.onCompleted: {
         }
 
         // ====================================================================
+        Label {
+            anchors.left: bottomDialogBar.left
+            anchors.right: bottomDialogBar.right
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: 1
+            text: ffiBridge.message
+            color: ffiBridge.connected ? "#aac5e8" : "#ffd18b"
+            font.pixelSize: 11
+            elide: Text.ElideRight
+        }
+
         // 提交处理逻辑：
         // - @AI 回车   -> 切换右侧 AI 窗口显示/关闭（展示时带分界线与模糊，点击别处不关闭，再次 @AI 关闭）
-        // - @FILE 回车 -> 等同于点击左侧 Folder 按钮，打开留空模糊窗口（点击别处关闭）
+        // - @FILE 回车 -> 等同于点击左侧 Folder 按钮，打开当前目录文件列表（点击别处关闭）
         // - @GIT 回车  -> 把当前三行窗口变成横向可滑动的 Git 树（点击别处关闭）
         // - 其他 @...  -> 关闭三行弹窗并提交给 Agent
         // - 非 @ 开头  -> 作为命令行提交
@@ -1057,7 +1141,7 @@ Component.onCompleted: {
                     rootCanvas.popupMode = "none"
                 } else if (upper === "@FILE") {
                     cmdInput.text = ""
-                    rootCanvas.popupMode = "folder"
+                    rootCanvas.showFiles()
                 } else if (upper === "@GIT") {
                     cmdInput.text = ""
                     rootCanvas.popupMode = "git"

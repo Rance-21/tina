@@ -1,104 +1,565 @@
-
 #include "ffi_client_bridge.hpp"
 
-#include <QAbstractSocket>
+#include <QStringConverter>
 #include <QtEndian>
+#include <algorithm>
 
 namespace tina::ui {
+namespace {
+constexpr quint16 Ping = 0x0001;
+constexpr quint16 ListProjects = 0x0011;
+constexpr quint16 ListDir = 0x0013;
+constexpr quint16 ReadFile = 0x0014;
+constexpr quint16 WriteFile = 0x0015;
+constexpr quint16 Unavailable = 11;
+constexpr quint32 MaxFrame = 1024 * 1024;
+constexpr quint32 ReadChunk = 256 * 1024;
+constexpr quint64 MaxEditableRead = 8 * 1024 * 1024;
+
+template<typename T> void appendInteger(QByteArray &bytes, T value) {
+    const auto offset = bytes.size();
+    bytes.resize(offset + sizeof(T));
+    qToBigEndian(value, reinterpret_cast<uchar *>(bytes.data() + offset));
+}
+
+QByteArray pathPayload(const QString &path) {
+    auto bytes = path.toUtf8();
+    QByteArray payload;
+    appendInteger(payload, quint16(bytes.size()));
+    payload.append(bytes);
+    return payload;
+}
+
+bool validPath(const QString &path) {
+    if (path.isEmpty() || path.toUtf8().size() > 65535 || path.contains(QChar::Null))
+        return false;
+    for (const auto &part : path.split('/')) {
+        if (part.isEmpty() || part == "." || part == "..")
+            return false;
+    }
+    return true;
+}
+
+// 响应解析先检查边界和 UTF-8，错误数据不得进入可保存的编辑缓冲区。
+bool readString(const QByteArray &bytes, qsizetype &offset, QString &value) {
+    if (bytes.size() - offset < 2)
+        return false;
+    const auto size = qFromBigEndian<quint16>(
+        reinterpret_cast<const uchar *>(bytes.constData() + offset));
+    offset += 2;
+    if (!size || size > bytes.size() - offset)
+        return false;
+    QStringDecoder decoder(QStringDecoder::Utf8, QStringConverter::Flag::Stateless);
+    value = decoder(QByteArrayView(bytes.constData() + offset, size));
+    offset += size;
+    return !decoder.hasError() && !value.contains(QChar::Null);
+}
+
+QVariantMap entry(const QString &name, const QString &path, int type) {
+    return {{"name", name}, {"path", path}, {"type", type}};
+}
+
+void sortEntries(QVariantList &entries) {
+    std::sort(entries.begin(), entries.end(), [](const QVariant &a, const QVariant &b) {
+        const auto left = a.toMap(), right = b.toMap();
+        const bool leftDir = left.value("type").toInt() == 1;
+        const bool rightDir = right.value("type").toInt() == 1;
+        if (leftDir != rightDir)
+            return leftDir;
+        return QString::compare(left.value("name").toString(), right.value("name").toString(),
+                                Qt::CaseInsensitive) < 0;
+    });
+}
+} // namespace
 
 FfiClientBridge::FfiClientBridge(QObject *parent) : QObject(parent) {
-
+    clock_.start();
+    pollTimer_.setInterval(100);
+    connect(&pollTimer_, &QTimer::timeout, this, &FfiClientBridge::pollRequests);
+    pollTimer_.start();
+    reconnectTimer_.setSingleShot(true);
+    connect(&reconnectTimer_, &QTimer::timeout, this, [this] {
+        socket_.abort();
+        socket_.connectToHost(host_, port_);
+        scheduleReconnect();
+    });
     connect(&socket_, &QTcpSocket::connected, this, [this] {
+        reconnectTimer_.stop();
+        reconnectAttempts_ = 0;
+        input_.clear();
+        emit connectionChanged();
         emit connectionStateChanged(true);
+        setMessage(QStringLiteral("已连接服务端"));
         ping();
+        if (browserRequested_)
+            openFileBrowser();
+        // 重连后读回最新版本；包括写入已成功但响应丢失的情况。
+        for (auto *document : documents_)
+            refreshDocument(document);
     });
-
     connect(&socket_, &QTcpSocket::disconnected, this, [this] {
-        pendingPingId_ = 0;
+        input_.clear();
+        failRequests(QStringLiteral("连接断开").toUtf8());
+        for (auto *document : documents_) {
+            document->stale_ = true;
+            emit document->stateChanged();
+        }
+        emit connectionChanged();
         emit connectionStateChanged(false);
+        scheduleReconnect();
     });
-
-    connect(&socket_, &QAbstractSocket::errorOccurred, this, [this](QAbstractSocket::SocketError) {
+    connect(&socket_, &QAbstractSocket::errorOccurred, this, [this] {
+        setMessage(QStringLiteral("连接失败，正在重连：") + socket_.errorString());
         emit pingResult(false, socket_.errorString());
+        scheduleReconnect();
     });
-
     connect(&socket_, &QTcpSocket::readyRead, this, &FfiClientBridge::onReadyRead);
 }
 
-void FfiClientBridge::connectToServer(const QString &host, int port) {
-    if (host.isEmpty() || port <= 0 || port > 65535) {
-        emit pingResult(false, QStringLiteral("Invalid host or port"));
-        return;
-    }
-
+FfiClientBridge::~FfiClientBridge() {
+    // 成员按逆序析构；先解除套接字信号，避免其析构时回调已经销毁的请求表。
+    socket_.disconnect(this);
     socket_.abort();
-    input_.clear();
-    pendingPingId_ = 0;
-
-    socket_.connectToHost(host, static_cast<quint16>(port));
 }
 
-void FfiClientBridge::ping() {
-    if (socket_.state() != QAbstractSocket::ConnectedState) {
-        emit pingResult(false, QStringLiteral("Not connected"));
+bool FfiClientBridge::connected() const {
+    return socket_.state() == QAbstractSocket::ConnectedState;
+}
+
+void FfiClientBridge::setMessage(const QString &message) {
+    message_ = message;
+    emit messageChanged();
+}
+
+void FfiClientBridge::connectToServer(const QString &host, int port) {
+    if (host.trimmed().isEmpty() || port <= 0 || port > 65535) {
+        setMessage(QStringLiteral("服务器地址或端口无效"));
         return;
     }
+    host_ = host.trimmed();
+    port_ = static_cast<quint16>(port);
+    reconnectTimer_.stop();
+    socket_.abort();
+    failRequests(QStringLiteral("正在重新连接").toUtf8());
+    input_.clear();
+    socket_.connectToHost(host_, port_);
+    // 同时覆盖连接建立阶段卡住的情况，退避上限为 10 秒。
+    scheduleReconnect();
+}
 
-    // Tina RPC 固定帧头：
-    // Length(4) + Kind(1) + ID(8) + Method(2) + Status(2)
-    // Ping 没有 Payload，Length = 13。
-    QByteArray frame(17, '\0');
+void FfiClientBridge::scheduleReconnect() {
+    if (host_.isEmpty() || reconnectTimer_.isActive())
+        return;
+    const int delay = std::min(10000, 500 * (1 << std::min(reconnectAttempts_++, 4)));
+    reconnectTimer_.start(delay);
+}
 
-    qToBigEndian<quint32>(13, reinterpret_cast<uchar *>(frame.data()));
+void FfiClientBridge::request(quint16 method, QByteArray payload, Reply reply) {
+    if (!connected()) {
+        reply(Unavailable, QStringLiteral("未连接服务端，连接恢复后可重新获取").toUtf8());
+        return;
+    }
+    if (payload.size() > MaxFrame - 13) {
+        reply(1, QStringLiteral("请求超过服务端 1 MiB 帧上限").toUtf8());
+        return;
+    }
+    const auto token = nextId_++;
+    requests_.insert(token, Request{method, std::move(payload), std::move(reply)});
+    sendRequest(token);
+}
 
-    frame[4] = 0x01; // Request
+void FfiClientBridge::sendRequest(quint64 token) {
+    auto it = requests_.find(token);
+    if (it == requests_.end())
+        return;
+    auto &req = it.value();
+    req.wireId = nextId_++;
+    ++req.attempts;
+    req.waiting = true;
+    req.deadline = clock_.elapsed() + 6000;
+    QByteArray frame;
+    appendInteger(frame, quint32(13 + req.payload.size()));
+    frame.append(char(1));
+    appendInteger(frame, req.wireId);
+    appendInteger(frame, req.method);
+    appendInteger(frame, quint16(0));
+    frame.append(req.payload);
+    if (socket_.write(frame) != frame.size())
+        completeRequest(token, Unavailable, QStringLiteral("发送失败").toUtf8());
+}
 
-    const quint64 id = nextId_++;
-    pendingPingId_ = id;
+void FfiClientBridge::completeRequest(quint64 token, quint16 status, const QByteArray &payload) {
+    auto it = requests_.find(token);
+    if (it == requests_.end())
+        return;
+    // 只重试读操作和临时错误。写操作结果不明时先 readFile，禁止盲目重放写请求。
+    const bool transient = status == 6 || status == 7 || status >= 10;
+    if (status && transient && it->method != WriteFile && it->attempts < 3 && connected()) {
+        it->waiting = false;
+        it->wireId = 0;
+        it->deadline = clock_.elapsed() + 250 * it->attempts;
+        setMessage(QStringLiteral("服务端暂时无法完成请求，正在重新获取…"));
+        return;
+    }
+    auto reply = std::move(it->reply);
+    requests_.erase(it);
+    reply(status, payload);
+}
 
-    qToBigEndian<quint64>(id, reinterpret_cast<uchar *>(frame.data() + 5));
+void FfiClientBridge::pollRequests() {
+    const auto now = clock_.elapsed();
+    for (const auto token : requests_.keys()) {
+        const auto it = requests_.constFind(token);
+        if (it == requests_.cend() || it->deadline > now)
+            continue;
+        if (it->waiting)
+            completeRequest(token, 12, QStringLiteral("请求超时").toUtf8());
+        else
+            sendRequest(token);
+    }
+}
 
-    qToBigEndian<quint16>(0x0001, reinterpret_cast<uchar *>(frame.data() + 13));
-
-    // Status = 0，frame 初始化时已清零。
-    socket_.write(frame);
+void FfiClientBridge::failRequests(const QByteArray &reason) {
+    auto requests = std::move(requests_);
+    requests_.clear();
+    for (auto &request : requests)
+        request.reply(Unavailable, reason);
 }
 
 void FfiClientBridge::onReadyRead() {
     input_.append(socket_.readAll());
-
     while (input_.size() >= 4) {
         const auto *data = reinterpret_cast<const uchar *>(input_.constData());
-
-        const quint32 length = qFromBigEndian<quint32>(data);
-
-        if (length < 13 || length > 1024 * 1024) {
-            emit pingResult(false, QStringLiteral("Invalid RPC frame"));
+        const auto length = qFromBigEndian<quint32>(data);
+        if (length < 13 || length > MaxFrame) {
+            setMessage(QStringLiteral("服务端帧长度无效，重新连接"));
             socket_.abort();
-            input_.clear();
             return;
         }
-
-        const qsizetype total = 4 + length;
-        if (input_.size() < total)
-            return; // TCP 半包，等待下一次 readyRead。
-
-        const quint8 kind = data[4];
-        const quint64 id = qFromBigEndian<quint64>(data + 5);
-        const quint16 method = qFromBigEndian<quint16>(data + 13);
-        const quint16 status = qFromBigEndian<quint16>(data + 15);
-
-        const QByteArray payload(input_.constData() + 17, static_cast<qsizetype>(length - 13));
-
-        input_.remove(0, total);
-
-        if (kind != 0x02 || method != 0x0001 || id != pendingPingId_)
+        if (input_.size() < 4 + length)
+            return; // TCP 半包：保留缓冲区，等下一次 readyRead。
+        const auto kind = data[4];
+        const auto id = qFromBigEndian<quint64>(data + 5);
+        const auto method = qFromBigEndian<quint16>(data + 13);
+        const auto status = qFromBigEndian<quint16>(data + 15);
+        const QByteArray payload(input_.constData() + 17, length - 13);
+        input_.remove(0, 4 + length);
+        if ((kind != 2 && kind != 3) || (kind == 2 && (!id || status > 12))
+            || (kind == 3 && (id || status))) {
+            setMessage(QStringLiteral("服务端帧头无效，重新连接"));
+            socket_.abort();
+            return;
+        }
+        if (kind == 3 && method == ListDir) {
+            QString path;
+            QVariantList entries;
+            if (decodeDirectory(payload, path, entries) && path == directory_) {
+                if (browsing_) {
+                    directoryChangedDuringFetch_ = true;
+                } else {
+                    entries_ = entries;
+                    emit browserChanged();
+                }
+            }
             continue;
+        }
+        // 按请求 ID 和方法匹配，允许多个文件同时读取、响应乱序及迟到响应。
+        for (auto it = requests_.cbegin(); it != requests_.cend(); ++it) {
+            if (it->wireId == id && it->method == method) {
+                completeRequest(it.key(), status, payload);
+                break;
+            }
+        }
+    }
+}
 
-        pendingPingId_ = 0;
+void FfiClientBridge::ping() {
+    request(Ping, {}, [this](quint16 status, const QByteArray &payload) {
+        emit pingResult(status == 0 && payload == "PONG", QString::fromUtf8(payload));
+    });
+}
 
-        const bool ok = status == 0 && payload == "PONG";
-        emit pingResult(ok, QString::fromUtf8(payload));
+bool FfiClientBridge::decodeDirectory(const QByteArray &payload, QString &path,
+                                     QVariantList &entries) {
+    qsizetype offset = 0;
+    if (!readString(payload, offset, path) || !validPath(path))
+        return false;
+    while (offset < payload.size()) {
+        const int type = static_cast<quint8>(payload.at(offset++));
+        QString name;
+        if (type > 2 || !readString(payload, offset, name) || !validPath(name) || name.contains('/'))
+            return false;
+        entries.append(entry(name, path + '/' + name, type));
+    }
+    sortEntries(entries);
+    return true;
+}
+
+void FfiClientBridge::openFileBrowser() {
+    browserRequested_ = true;
+    // 未选项目时列项目；选定目录后每次 @FILE 都刷新当前位置。
+    fetchDirectory(directory_);
+}
+
+void FfiClientBridge::listProjects() {
+    browserRequested_ = true;
+    fetchDirectory({});
+}
+
+void FfiClientBridge::listDir(const QString &path) {
+    if (!validPath(path)) {
+        setMessage(QStringLiteral("目录路径无效"));
+        return;
+    }
+    browserRequested_ = true;
+    fetchDirectory(path);
+}
+
+void FfiClientBridge::fetchDirectory(const QString &path) {
+    const auto generation = ++browserGeneration_;
+    directory_ = path;
+    entries_.clear();
+    browsing_ = true;
+    directoryChangedDuringFetch_ = false;
+    emit browserChanged();
+    request(path.isEmpty() ? ListProjects : ListDir, path.isEmpty() ? QByteArray{} : pathPayload(path),
+            [this, path, generation](quint16 status, const QByteArray &payload) {
+        if (generation != browserGeneration_)
+            return; // 旧目录的迟到响应不能覆盖用户刚进入的目录。
+        browsing_ = false;
+        QVariantList entries;
+        bool valid = true;
+        if (!status && path.isEmpty()) {
+            qsizetype offset = 0;
+            while (offset < payload.size()) {
+                QString name;
+                if (!readString(payload, offset, name) || !validPath(name) || name.contains('/')) {
+                    valid = false;
+                    break;
+                }
+                entries.append(entry(name, name, 1));
+            }
+            sortEntries(entries);
+        } else if (!status) {
+            QString receivedPath;
+            valid = decodeDirectory(payload, receivedPath, entries) && receivedPath == path;
+        }
+        if (status || !valid) {
+            setMessage(QStringLiteral("目录获取失败：")
+                       + (status ? QString::fromUtf8(payload) : QStringLiteral("响应格式无效")));
+            emit browserChanged();
+            if (status == 4 && !path.isEmpty())
+                parentDirectory(); // 目录被删除，重新获取上级，直到项目列表。
+            return;
+        }
+        entries_ = entries;
+        setMessage(entries.isEmpty() ? QStringLiteral("此处没有文件或项目")
+                                    : QStringLiteral("↑ ↓ 选择，Enter 打开，Alt+↑ 返回上级"));
+        emit browserChanged();
+        // 读取期间收到变更通知，旧响应可能已过时，再取一次当前目录。
+        if (directoryChangedDuringFetch_)
+            fetchDirectory(path);
+    });
+}
+
+void FfiClientBridge::parentDirectory() {
+    const auto slash = directory_.lastIndexOf('/');
+    fetchDirectory(slash < 0 ? QString{} : directory_.left(slash));
+}
+
+void FfiClientBridge::activateEntry(int index) {
+    if (browsing_ || index < 0 || index >= entries_.size())
+        return;
+    const auto item = entries_.at(index).toMap();
+    if (item.value("type").toInt() == 1)
+        listDir(item.value("path").toString());
+    else if (item.value("type").toInt() == 2)
+        setMessage(QStringLiteral("符号链接未区分目标类型，请选择实际文件或目录"));
+    else
+        readFile(item.value("path").toString());
+}
+
+QVariantList FfiClientBridge::documents() const {
+    QVariantList result;
+    for (auto *document : documents_)
+        result.append(QVariant::fromValue(document));
+    return result;
+}
+
+WorkspaceDocument *FfiClientBridge::currentDocument() const {
+    return activeIndex_ >= 0 && activeIndex_ < documents_.size() ? documents_[activeIndex_] : nullptr;
+}
+
+void FfiClientBridge::selectDocument(int index) {
+    if (index < 0 || index >= documents_.size() || index == activeIndex_)
+        return;
+    activeIndex_ = index;
+    emit activeIndexChanged();
+}
+
+void FfiClientBridge::readFile(const QString &path) {
+    if (!validPath(path)) {
+        setMessage(QStringLiteral("文件路径无效"));
+        return;
+    }
+    for (int i = 0; i < documents_.size(); ++i) {
+        if (documents_[i]->path() == path) {
+            selectDocument(i);
+            if (documents_[i]->stale_ && !documents_[i]->refreshing_)
+                refreshDocument(documents_[i]);
+            emit fileOpened();
+            return;
+        }
+    }
+    auto *document = new WorkspaceDocument(path, this);
+    documents_.append(document);
+    emit documentsChanged();
+    selectDocument(documents_.size() - 1);
+    refreshDocument(document);
+    emit fileOpened();
+}
+
+void FfiClientBridge::refreshDocument(WorkspaceDocument *document) {
+    if (document->saving_)
+        return;
+    document->refreshing_ = true;
+    document->stale_ = true;
+    emit document->stateChanged();
+    auto transfer = std::make_shared<ReadTransfer>();
+    transfer->generation = ++document->loadGeneration_;
+    readChunk(document, transfer);
+}
+
+void FfiClientBridge::readChunk(WorkspaceDocument *document, std::shared_ptr<ReadTransfer> transfer) {
+    auto payload = pathPayload(document->path_);
+    appendInteger(payload, quint64(transfer->bytes.size()));
+    appendInteger(payload, ReadChunk);
+    request(ReadFile, payload, [this, document, transfer](quint16 status, const QByteArray &payload) {
+        if (transfer->generation != document->loadGeneration_)
+            return;
+        auto fail = [this, document](const QString &reason) {
+            document->refreshing_ = false;
+            document->stale_ = true;
+            emit document->stateChanged();
+            setMessage(QStringLiteral("读取失败，本地内容已保留：") + reason);
+        };
+        if (status) {
+            fail(QString::fromUtf8(payload));
+            if (status == 4 && browserRequested_)
+                openFileBrowser();
+            return;
+        }
+        if (payload.size() < 16) {
+            fail(QStringLiteral("响应格式无效"));
+            return;
+        }
+        const auto *data = reinterpret_cast<const uchar *>(payload.constData());
+        const auto size = qFromBigEndian<quint64>(data);
+        const auto revision = qFromBigEndian<quint64>(data + 8);
+        if (size > MaxEditableRead) {
+            fail(QStringLiteral("文件超过平板编辑器 8 MiB 读取上限"));
+            return;
+        }
+        if (!transfer->bytes.isEmpty() && (revision != transfer->revision || size != transfer->size)) {
+            if (++transfer->restarts > 2) {
+                fail(QStringLiteral("文件持续变化，请稍后重新获取"));
+                return;
+            }
+            // 分段期间版本变化，从零读取，绝不拼接两个版本的内容。
+            transfer->bytes.clear();
+            readChunk(document, transfer);
+            return;
+        }
+        transfer->size = size;
+        transfer->revision = revision;
+        const auto chunk = payload.mid(16);
+        if (chunk.size() > ReadChunk || quint64(transfer->bytes.size() + chunk.size()) > size
+            || (chunk.isEmpty() && quint64(transfer->bytes.size()) < size)) {
+            fail(QStringLiteral("文件分段长度无效"));
+            return;
+        }
+        transfer->bytes.append(chunk);
+        if (quint64(transfer->bytes.size()) < size) {
+            readChunk(document, transfer);
+            return;
+        }
+        if (!document->applyRemote(transfer->bytes, revision)) {
+            fail(QStringLiteral("文件不是有效的 UTF-8 文本"));
+            return;
+        }
+        setMessage(document->conflict_ ? QStringLiteral("服务端文件已变化；本地修改已保留，请比较后选择保存版本")
+                   : document->readOnly_ ? QStringLiteral("文件超过服务端写入上限，仅供阅读")
+                   : document->dirty() ? QStringLiteral("已重新获取，本地修改仍待保存：") + document->path_
+                   : QStringLiteral("已获取：") + document->path_);
+    });
+}
+
+void FfiClientBridge::saveCurrent() {
+    writeFile(currentDocument());
+}
+
+void FfiClientBridge::writeFile(WorkspaceDocument *document) {
+    if (!document || !documents_.contains(document) || document->saving_ || document->refreshing_)
+        return;
+    if (document->stale_) {
+        refreshDocument(document);
+        return;
+    }
+    if (document->conflict_) {
+        setMessage(QStringLiteral("请先比较服务端版本，再选择保留本地并保存或采用服务端版本"));
+        return;
+    }
+    if (!document->dirty() || document->readOnly())
+        return;
+    const QString snapshot = document->text_;
+    QByteArray payload = pathPayload(document->path_);
+    appendInteger(payload, document->revision_);
+    payload.append(document->encodedText());
+    if (payload.size() > MaxFrame - 13) {
+        setMessage(QStringLiteral("保存失败：文本超过服务端单次写入上限，请缩小文件"));
+        return;
+    }
+    document->saving_ = true;
+    emit document->stateChanged();
+    request(WriteFile, payload, [this, document, snapshot](quint16 status, const QByteArray &payload) {
+        document->saving_ = false;
+        if (!status && payload.size() == 8) {
+            document->revision_ = qFromBigEndian<quint64>(
+                reinterpret_cast<const uchar *>(payload.constData()));
+            // 只确认本次发送的快照；等待保存响应期间的新输入仍标为未保存。
+            document->savedText_ = snapshot;
+            document->stale_ = false;
+            emit document->stateChanged();
+            setMessage(QStringLiteral("已保存：") + document->path_);
+        } else {
+            setMessage(status == 6 ? QStringLiteral("保存版本冲突，正在重新获取服务端文件…")
+                                   : QStringLiteral("保存未确认，正在重新获取；本地修改已保留"));
+            refreshDocument(document);
+        }
+    });
+}
+
+void FfiClientBridge::refreshCurrent() {
+    if (auto *document = currentDocument())
+        refreshDocument(document);
+}
+
+void FfiClientBridge::useServerVersion() {
+    if (auto *document = currentDocument(); document && document->conflict_
+        && !document->stale_ && !document->refreshing_ && !document->saving_) {
+        document->conflict_ = false;
+        document->setText(document->savedText_);
+        emit document->stateChanged();
+        setMessage(QStringLiteral("已采用服务端版本"));
+    }
+}
+
+void FfiClientBridge::saveLocalVersion() {
+    if (auto *document = currentDocument(); document && document->conflict_
+        && !document->stale_ && !document->refreshing_ && !document->saving_) {
+        document->conflict_ = false;
+        writeFile(document); // 显式选择本地版本后，仍用最新 revision 做条件写入。
+        emit document->stateChanged();
     }
 }
 
@@ -107,9 +568,8 @@ void FfiClientBridge::submitCommand(const QString &command) {
 }
 
 void FfiClientBridge::submitAgentInput(const QString &input) {
-    if (input.trimmed().compare(QStringLiteral("@AI"), Qt::CaseInsensitive) == 0) {
+    if (input.trimmed().compare(QStringLiteral("@AI"), Qt::CaseInsensitive) == 0)
         emit openAgentWindowRequested();
-    }
 }
 
 } // namespace tina::ui
