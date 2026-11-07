@@ -34,9 +34,7 @@ Window {
             rootCanvas.popupMode = "none"
             Qt.callLater(rootCanvas.focusCurrentEditor)
         }
-        onBrowserChanged: {
-            fileList.currentIndex = entries.length > 0 ? 0 : -1
-        }
+        onBrowserChanged: fileList.updateEntries(entries)
     }
 
     Component.onCompleted: ffiBridge.connectToServer(serverHost, serverPort)
@@ -82,7 +80,9 @@ Window {
         // 左侧最低点与右侧 Agent 窗口最低点一致 (panelBottomY)
         readonly property real leftColumnWidth: 132
         readonly property real rightAgentWidth: Math.min(320, width * 0.3)
-        readonly property real bottomInputHeight: 54
+        readonly property real codeLeftMargin: leftColumnWidth + 14
+        readonly property real codeRightMargin: agentWindowVisible ? rightAgentWidth + 20 : 20
+        readonly property real bottomInputHeight: 43
         readonly property real bottomMargin: 18
         readonly property real panelBottomY: height - bottomMargin - bottomInputHeight - 16
 
@@ -92,9 +92,12 @@ Window {
             const pane = editors.itemAt(ffiBridge.activeIndex) as CodePane
             if (pane) pane.focusEditor()
         }
-        function showFiles() {
+        function showFiles(projectPicker = false) {
             popupMode = "folder"
-            ffiBridge.openFileBrowser()
+            if (projectPicker)
+                ffiBridge.listProjects()
+            else
+                ffiBridge.openFileBrowser()
             fileList.forceActiveFocus()
         }
 
@@ -194,38 +197,31 @@ Window {
             id: backgroundAndCodeScene
             anchors.fill: parent
 
-            // 16:10 背景图片
+            // 保持原图比例铺满屏幕。
             Image {
                 id: wallpaperImage
                 anchors.fill: parent
-                source: "qrc:/qt/qml/TinaIde/assets/bg_16_10.png"
+                source: "qrc:/qt/qml/TinaIde/assets/background.jpg"
                 fillMode: Image.PreserveAspectCrop
             }
 
-            // 暗色底衬（不模糊，无分割线）
+            // 压低壁纸亮度，让浅色代码在原图的高光区域也能读清。
             Rectangle {
                 anchors.fill: parent
-                color: "#5c080c14"
+                color: "#99080c14"
             }
 
             // ----------------------------------------------------------------
-            // 无边框代码区，底部避开命令栏；AI 隐藏时释放右侧空间。
+            // 代码区铺到屏幕底边，输入框悬浮在代码上方。
             Item {
                 id: centerCodeArea
+                objectName: "centerCodeArea"
                 anchors.top: parent.top
                 anchors.bottom: parent.bottom
-                anchors.bottomMargin: rootCanvas.bottomMargin + rootCanvas.bottomInputHeight + 18
                 anchors.left: parent.left
-                anchors.leftMargin: rootCanvas.leftColumnWidth + 14
+                anchors.leftMargin: rootCanvas.codeLeftMargin
                 anchors.right: parent.right
-                anchors.rightMargin: rootCanvas.agentWindowVisible ? rootCanvas.rightAgentWidth + 20 : 20
-                Text {
-                    anchors.centerIn: parent
-                    visible: fileTabsModel.count === 0
-                    text: "输入 @FILE 或按 Ctrl+P 打开项目文件"
-                    color: "#a6bcda"
-                    font.pixelSize: 17
-                }
+                anchors.rightMargin: rootCanvas.codeRightMargin
                 Repeater {
                     id: editors
                     model: fileTabsModel
@@ -234,6 +230,7 @@ Window {
                         anchors.fill: parent
                         bridge: ffiBridge
                         active: index === ffiBridge.activeIndex
+                        bottomOverlayHeight: rootCanvas.bottomMargin + rootCanvas.bottomInputHeight
                     }
                 }
             }
@@ -305,7 +302,7 @@ Window {
                         verticalAlignment: Text.AlignVCenter
                         text: (tabDelegate.document.dirty ? "• " : "") + tabDelegate.document.name
                         color: tabDelegate.isSelected ? "#ffffff" : "#b0c4de"
-                        font.pixelSize: 13
+                        font.pixelSize: 14
                         elide: Text.ElideRight
                     }
                     MouseArea {
@@ -510,7 +507,7 @@ Window {
         }
 
         // ====================================================================
-        // 3. 对齐底部对话框弹出的模糊窗口（左右严格与 bottomDialogBar 对齐）
+        // 3. 与底部输入框对齐的毛玻璃弹窗。
         //    支持三种状态：
         //    - "menu"   : 首字母输入 '@' 时出现的三行选项（左侧图标，往右字：AI / GIT / FILE）
         //    - "git"    : 输入 @GIT 回车后，把当前三行窗口变成横向可滑动（<- / ->）的 Git 树
@@ -539,9 +536,10 @@ Window {
             GlassPanel {
                 anchors.fill: parent
                 blurSource: backgroundAndCodeScene
+                sampleOrigin: Qt.point(alignedPopupWindow.x, alignedPopupWindow.y)
                 cornerRadius: 20
                 blurRadius: 32
-                tintColor: "#78121a2c"
+                tintColor: "#98121a2c"
                 borderColor: "#588cb8ff"
                 borderWidth: 1.2
                 highlightGlow: true
@@ -838,128 +836,172 @@ Window {
             }
 
             // ----------------------------------------------------------------
-            // 状态 C：复用 AI / GIT / FILE 所在的同一个毛玻璃弹窗。
-            ColumnLayout {
+            // 状态 C：项目列表和项目内文件树共用同一个弹窗。
+            ListView {
+                id: fileList
+                objectName: "fileBrowserList"
                 anchors.fill: parent
                 anchors.margins: 12
-                spacing: 4
                 visible: rootCanvas.popupMode === "folder"
-                RowLayout {
-                    Layout.fillWidth: true
-                    Button {
-                        text: "↑ 上级"
-                        enabled: ffiBridge.directory.length > 0 && !ffiBridge.browsing
-                        onClicked: ffiBridge.parentDirectory()
+                clip: true
+                model: []
+                currentIndex: -1
+                keyNavigationEnabled: true
+                keyNavigationWraps: true
+                property string revealingPrefix: ""
+                property real revealProgress: 1
+                ScrollBar.vertical: ScrollBar {}
+
+                NumberAnimation {
+                    id: revealChildren
+                    target: fileList
+                    property: "revealProgress"
+                    from: 0.35
+                    to: 1
+                    duration: 135
+                    easing.type: Easing.OutCubic
+                    onFinished: fileList.revealingPrefix = ""
+                }
+
+                function updateEntries(rows) {
+                    // 更新分支后按路径恢复选中项，并保留当前滚动位置。
+                    const previousIndex = currentIndex
+                    const selectedPath = model[previousIndex]?.path
+                    const scrollOffset = contentY - originY
+                    // 找出原来没有可见子项、现在插入了子项的目录，只动画这一支。
+                    if (visible && rows.length > model.length) {
+                        let first = 0
+                        while (first < model.length && model[first].path === rows[first].path)
+                            ++first
+                        const folder = rows[first - 1]
+                        if (folder?.expanded && rows[first].depth > folder.depth
+                                && !(model[first]?.depth > folder.depth)) {
+                            revealingPrefix = folder.path + "/"
+                            revealChildren.restart()
+                        }
                     }
-                    Label {
-                        Layout.fillWidth: true
-                        text: ffiBridge.directory.length > 0 ? ffiBridge.directory : "项目"
-                        color: "#dceaff"
-                        elide: Text.ElideMiddle
-                    }
-                    BusyIndicator {
-                        running: ffiBridge.browsing
-                        visible: running
-                        implicitWidth: 30
-                        implicitHeight: 30
-                    }
-                    Button {
-                        text: "刷新"
-                        enabled: !ffiBridge.browsing
-                        onClicked: ffiBridge.openFileBrowser()
+                    model = rows
+                    const index = rows.findIndex(row => row.path === selectedPath)
+                    currentIndex = index >= 0 ? index : Math.min(Math.max(previousIndex, 0), rows.length - 1)
+                    if (index >= 0) {
+                        forceLayout()
+                        contentY = originY + Math.max(0, Math.min(scrollOffset, contentHeight - height))
                     }
                 }
-                ListView {
-                    id: fileList
-                    objectName: "fileBrowserList"
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    clip: true
-                    model: ffiBridge.entries
-                    currentIndex: -1
-                    keyNavigationEnabled: true
-                    keyNavigationWraps: true
-                    highlightMoveDuration: 100
-                    ScrollBar.vertical: ScrollBar {}
-                    Keys.onReturnPressed: ffiBridge.activateEntry(currentIndex)
-                    Keys.onEnterPressed: ffiBridge.activateEntry(currentIndex)
-                    Keys.onPressed: function(event) {
-                        if (event.key === Qt.Key_Up && (event.modifiers & Qt.AltModifier)) {
-                            ffiBridge.parentDirectory()
-                            event.accepted = true
-                        } else if (event.key === Qt.Key_Left || event.key === Qt.Key_Backspace) {
-                            ffiBridge.parentDirectory()
-                            event.accepted = true
-                        } else if (event.key === Qt.Key_Right) {
-                            ffiBridge.activateEntry(currentIndex)
-                            event.accepted = true
+
+                Keys.onReturnPressed: ffiBridge.activateEntry(currentIndex)
+                Keys.onEnterPressed: ffiBridge.activateEntry(currentIndex)
+                Keys.onLeftPressed: {
+                    const row = model[currentIndex]
+                    if (row?.expanded) {
+                        ffiBridge.setEntryExpanded(currentIndex, false)
+                    } else if (row?.depth > 0) {
+                        const parentPath = row.path.slice(0, row.path.lastIndexOf("/"))
+                        currentIndex = model.findIndex(item => item.path === parentPath)
+                    }
+                }
+                Keys.onRightPressed: {
+                    const row = model[currentIndex]
+                    if (row?.type !== 1)
+                        return
+                    if (!row.expanded)
+                        ffiBridge.setEntryExpanded(currentIndex, true)
+                    else if (model[currentIndex + 1]?.depth > row.depth)
+                        incrementCurrentIndex()
+                }
+                Keys.onPressed: function(event) {
+                    if ((event.key === Qt.Key_Up && (event.modifiers & Qt.AltModifier))
+                        || event.key === Qt.Key_Backspace) {
+                        if (ffiBridge.directory.length > 0)
+                            ffiBridge.listProjects()
+                        event.accepted = true
+                    }
+                }
+
+                delegate: Rectangle {
+                    id: fileRow
+                    required property var modelData
+                    required property int index
+                    objectName: "fileRow:" + modelData.path
+                    width: fileList.width
+                    height: 48
+                    radius: 10
+                    color: ListView.isCurrentItem ? "#60365d8c" : "#101d2f48"
+                    border.color: ListView.isCurrentItem ? "#80baff" : "transparent"
+                    // 所有新行共用一个进度值，位置变化不参与列表布局。
+                    opacity: fileList.revealingPrefix && modelData.path.startsWith(fileList.revealingPrefix)
+                             ? fileList.revealProgress : 1
+                    transform: Translate { y: -5 * (1 - fileRow.opacity) }
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 14 + Math.min(fileRow.modelData.depth * 20, fileRow.width / 2)
+                        anchors.rightMargin: 14
+                        Label {
+                            text: fileRow.modelData.type === 1
+                                  ? (fileRow.modelData.loading ? "…" : fileRow.modelData.expanded ? "▾" : "▸")
+                                  : (fileRow.modelData.type === 2 ? "↗" : "≡")
+                            color: fileRow.modelData.type === 1 ? "#ffd18b" : "#8fc2ff"
+                            font.pixelSize: 22
+                        }
+                        Label {
+                            Layout.fillWidth: true
+                            text: fileRow.modelData.name
+                            color: "#edf4ff"
+                            font.pixelSize: 15
+                            elide: Text.ElideRight
+                        }
+                        Label {
+                            text: fileRow.modelData.type === 1 ? "目录" : fileRow.modelData.type === 2 ? "符号链接" : "文件"
+                            color: "#8ea8c9"
                         }
                     }
-                    delegate: Rectangle {
-                        id: fileRow
-                        required property var modelData
-                        required property int index
-                        width: fileList.width
-                        height: 48
-                        radius: 10
-                        color: ListView.isCurrentItem ? "#60365d8c" : "#101d2f48"
-                        border.color: ListView.isCurrentItem ? "#80baff" : "transparent"
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 14
-                            anchors.rightMargin: 14
-                            Label {
-                                text: fileRow.modelData.type === 1 ? "▸" : fileRow.modelData.type === 2 ? "↗" : "≡"
-                                color: fileRow.modelData.type === 1 ? "#ffd18b" : "#8fc2ff"
-                                font.pixelSize: 22
-                            }
-                            Label {
-                                Layout.fillWidth: true
-                                text: fileRow.modelData.name
-                                color: "#edf4ff"
-                                elide: Text.ElideRight
-                            }
-                            Label {
-                                text: fileRow.modelData.type === 1 ? "目录" : fileRow.modelData.type === 2 ? "符号链接" : "文件"
-                                color: "#8ea8c9"
-                            }
-                        }
-                        MouseArea {
-                            anchors.fill: parent
-                            onClicked: {
-                                fileList.currentIndex = fileRow.index
-                                fileList.forceActiveFocus()
-                                ffiBridge.activateEntry(fileRow.index)
-                            }
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: {
+                            fileList.currentIndex = fileRow.index
+                            fileList.forceActiveFocus()
+                            ffiBridge.activateEntry(fileRow.index)
                         }
                     }
-                    Label {
-                        anchors.centerIn: parent
-                        visible: !ffiBridge.browsing && fileList.count === 0
-                        text: "没有可显示的项目或文件；可点击刷新重新获取"
-                        color: "#a6bcda"
-                    }
+                }
+
+                BusyIndicator {
+                    anchors.centerIn: parent
+                    width: 30
+                    height: width
+                    running: fileList.visible && ffiBridge.browsing && fileList.count === 0
+                    visible: running
+                }
+                Label {
+                    anchors.centerIn: parent
+                    visible: !ffiBridge.browsing && fileList.count === 0
+                    text: "没有可显示的项目或文件"
+                    color: "#a6bcda"
                 }
             }
         }
 
-        // 4. 下边：统一对话框（删除最左侧的 $，以 Folder 按钮取代；右边是向上箭头提交）
+        // 4. 底部输入框，两端按钮共用外框的高度和圆角。
         // ====================================================================
         Item {
             id: bottomDialogBar
+            objectName: "bottomDialogBar"
             anchors.left: parent.left
             anchors.right: parent.right
             anchors.bottom: parent.bottom
-            anchors.leftMargin: 16
-            anchors.rightMargin: 16
+            anchors.leftMargin: rootCanvas.codeLeftMargin
+            anchors.rightMargin: rootCanvas.codeRightMargin
             anchors.bottomMargin: rootCanvas.bottomMargin
             height: rootCanvas.bottomInputHeight
 
             GlassPanel {
                 anchors.fill: parent
                 blurSource: backgroundAndCodeScene
+                // 底层场景与根画布同原点，窗口改高时也要更新取样位置。
+                sampleOrigin: Qt.point(bottomDialogBar.x, bottomDialogBar.y)
                 cornerRadius: height / 2
-                blurRadius: 52
+                blurRadius: 32
                 highlightGlow: cmdInput.activeFocus
                 tintColor: cmdInput.activeFocus ? "#82141e32" : "#68101726"
                 borderColor: cmdInput.activeFocus ? "#886ab4ff" : "#408aa8d8"
@@ -968,25 +1010,19 @@ Window {
 
             RowLayout {
                 anchors.fill: parent
-                anchors.leftMargin: 7
-                anchors.rightMargin: 7
                 spacing: 10
 
-                // 对话框内最左侧：Folder 按钮（取代原来的 $）
-                Item {
+                Rectangle {
                     id: folderButton
-                    Layout.preferredWidth: rootCanvas.bottomInputHeight - 6
-                    Layout.preferredHeight: rootCanvas.bottomInputHeight - 6
-
-                    Rectangle {
-                        anchors.fill: parent
-                        radius: height / 2
-                        color: rootCanvas.popupMode === "folder"
-                               ? "#483b82f6"
-                               : (folderMouse.containsMouse ? "#32ffffff" : "#1cffffff")
-                        border.color: rootCanvas.popupMode === "folder" ? "#7cc4ff" : "#388aa8d8"
-                        border.width: 1.1
-                    }
+                    objectName: "folderButton"
+                    Layout.preferredWidth: bottomDialogBar.height
+                    Layout.fillHeight: true
+                    radius: height / 2
+                    color: rootCanvas.popupMode === "folder"
+                           ? "#483b82f6"
+                           : (folderMouse.containsMouse ? "#32ffffff" : "#1cffffff")
+                    border.color: rootCanvas.popupMode === "folder" ? "#7cc4ff" : "#388aa8d8"
+                    border.width: 1.1
 
                     // Folder 矢量图标
                     Canvas {
@@ -1018,12 +1054,13 @@ Window {
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
-                            if (rootCanvas.popupMode === "folder") {
+                            if (rootCanvas.popupMode === "folder")
                                 rootCanvas.popupMode = "none"
-                            } else {
+                            else
                                 rootCanvas.showFiles()
-                            }
                         }
+                        // 触屏长按可切换项目，树顶部不需要额外按钮。
+                        onPressAndHold: rootCanvas.showFiles(true)
                     }
                 }
 
@@ -1038,9 +1075,7 @@ Window {
                     selectionColor: "#4058a6ff"
                     selectedTextColor: "#ffffff"
                     font.family: "monospace"
-                    font.pixelSize: 14
-                    placeholderText: qsTr("输入命令行，或输入 @ 呼出 AI / GIT / FILE...")
-                    placeholderTextColor: "#6e84a6"
+                    font.pixelSize: 16
                     background: Item {}
 
                     onTextChanged: {
@@ -1059,20 +1094,17 @@ Window {
                 }
 
                 // 右边：向上箭头提交按钮
-                Item {
+                Rectangle {
                     id: submitButton
-                    Layout.preferredWidth: rootCanvas.bottomInputHeight - 6
-                    Layout.preferredHeight: rootCanvas.bottomInputHeight - 6
-
-                    Rectangle {
-                        anchors.fill: parent
-                        radius: height / 2
-                        color: submitMouse.pressed
-                               ? "#2563eb"
-                               : (submitMouse.containsMouse ? "#3b82f6" : "#38284878")
-                        border.color: "#788cc0ff"
-                        border.width: 1.2
-                    }
+                    objectName: "submitButton"
+                    Layout.preferredWidth: bottomDialogBar.height
+                    Layout.fillHeight: true
+                    radius: height / 2
+                    color: submitMouse.pressed
+                           ? "#2563eb"
+                           : (submitMouse.containsMouse ? "#3b82f6" : "#38284878")
+                    border.color: "#788cc0ff"
+                    border.width: 1.2
 
                     Canvas {
                         anchors.centerIn: parent
@@ -1106,21 +1138,9 @@ Window {
             }
         }
 
-        // ====================================================================
-        Label {
-            anchors.left: bottomDialogBar.left
-            anchors.right: bottomDialogBar.right
-            anchors.bottom: parent.bottom
-            anchors.bottomMargin: 1
-            text: ffiBridge.message
-            color: ffiBridge.connected ? "#aac5e8" : "#ffd18b"
-            font.pixelSize: 11
-            elide: Text.ElideRight
-        }
-
         // 提交处理逻辑：
         // - @AI 回车   -> 切换右侧 AI 窗口显示/关闭（展示时带分界线与模糊，点击别处不关闭，再次 @AI 关闭）
-        // - @FILE 回车 -> 等同于点击左侧 Folder 按钮，打开当前目录文件列表（点击别处关闭）
+        // - @FILE 回车 -> 等同于点击左侧 Folder 按钮，打开项目列表或当前项目文件树（点击别处关闭）
         // - @GIT 回车  -> 把当前三行窗口变成横向可滑动的 Git 树（点击别处关闭）
         // - 其他 @...  -> 关闭三行弹窗并提交给 Agent
         // - 非 @ 开头  -> 作为命令行提交

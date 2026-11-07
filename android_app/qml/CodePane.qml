@@ -9,6 +9,7 @@ Item {
     required property WorkspaceDocument document
     required property FfiClientBridge bridge
     property bool active: false
+    property real bottomOverlayHeight: 0
     visible: active
 
     // 只动画透明度和 8 像素位移，不截图、不对编辑器做模糊或缩放。
@@ -38,23 +39,12 @@ Item {
             text: pane.document.path + (pane.document.dirty ? "  • 未保存" : "")
             color: pane.document.dirty ? "#ffd18b" : "#99b4d7"
             elide: Text.ElideMiddle
-            font.pixelSize: 12
+            font.pixelSize: 14
         }
         Label {
             text: pane.document.saving ? "保存中…" : pane.document.refreshing ? "获取中…"
                   : pane.document.readOnly ? "只读" : ""
             color: "#99b4d7"
-        }
-        Button {
-            text: pane.document.stale ? "重新获取" : "刷新"
-            enabled: !pane.document.saving && !pane.document.refreshing
-            onClicked: pane.bridge.refreshCurrent()
-        }
-        Button {
-            text: "保存"
-            enabled: pane.document.dirty && !pane.document.readOnly
-                     && !pane.document.saving && !pane.document.refreshing && !pane.document.conflict
-            onClicked: pane.bridge.saveCurrent()
         }
     }
 
@@ -92,7 +82,7 @@ Item {
         id: gutter
         anchors.top: conflictBar.bottom
         anchors.bottom: parent.bottom
-        width: 44
+        width: 48
         clip: true
         readonly property int firstLine: Math.max(0, Math.floor(flick.contentY / metrics.height))
         // 只创建屏幕附近的行号，长文件不生成成千上万个 QML 对象。
@@ -103,7 +93,7 @@ Item {
                 required property int index
                 x: 0
                 y: 8 + (gutter.firstLine + index) * metrics.height - flick.contentY
-                width: 34
+                width: gutter.width - 10
                 height: metrics.height
                 text: gutter.firstLine + index + 1
                 font: editor.font
@@ -133,9 +123,11 @@ Item {
             if (rect.x < contentX) contentX = rect.x
             if (rect.x + rect.width > contentX + width)
                 contentX = rect.x + rect.width - width + 16
+            // 编辑时让光标避开悬浮输入框，滚动时仍可看到输入框后面的代码。
+            const unobscuredHeight = Math.max(1, height - pane.bottomOverlayHeight)
             if (rect.y < contentY) contentY = rect.y
-            if (rect.y + rect.height > contentY + height)
-                contentY = rect.y + rect.height - height
+            if (rect.y + rect.height > contentY + unobscuredHeight)
+                contentY = rect.y + rect.height - unobscuredHeight
         }
 
         TextEdit {
@@ -144,7 +136,7 @@ Item {
             width: Math.max(flick.width, contentWidth + 24)
             height: Math.max(flick.height, contentHeight + topPadding + bottomPadding)
             topPadding: 8
-            bottomPadding: 24
+            bottomPadding: pane.bottomOverlayHeight + 8
             text: pane.document.text
             textFormat: TextEdit.PlainText
             readOnly: pane.document.readOnly
@@ -152,7 +144,7 @@ Item {
             selectionColor: "#8058a6ff"
             selectedTextColor: "#ffffff"
             font.family: "monospace"
-            font.pixelSize: 14
+            font.pixelSize: 16
             wrapMode: TextEdit.NoWrap
             selectByMouse: true
             selectByKeyboard: true

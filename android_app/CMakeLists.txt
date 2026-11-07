@@ -28,6 +28,10 @@ target_include_directories(tina_ide_client PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/src"
 )
 
+# 桌面和 APK 直接打包仓库里的同一份背景图。
+set(wallpaper "${CMAKE_CURRENT_SOURCE_DIR}/../background.jpg")
+set_source_files_properties("${wallpaper}" PROPERTIES QT_RESOURCE_ALIAS assets/background.jpg)
+
 qt_add_qml_module(tina_ide_client
     URI TinaIde
     VERSION 1.0
@@ -36,7 +40,7 @@ qt_add_qml_module(tina_ide_client
         qml/GlassPanel.qml
         qml/CodePane.qml
     RESOURCES
-        assets/bg_16_10.png
+        "${wallpaper}"
 )
 
 set_target_properties(tina_ide_client PROPERTIES
@@ -76,7 +80,7 @@ if(TINA_BUILD_TESTS AND NOT ANDROID)
     target_link_libraries(tina_workspace_test PRIVATE
         Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Test)
     qt_add_resources(tina_workspace_test test_wallpaper
-        PREFIX "/qt/qml/TinaIde" FILES assets/bg_16_10.png
+        PREFIX "/qt/qml/TinaIde" FILES "${wallpaper}"
         qml/Main.qml qml/CodePane.qml qml/GlassPanel.qml)
     add_test(NAME workspace COMMAND tina_workspace_test)
     set_tests_properties(workspace PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")

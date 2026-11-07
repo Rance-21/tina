@@ -1,8 +1,10 @@
 #include "ffi_client_bridge.hpp"
 
+#include <QSet>
 #include <QStringConverter>
 #include <QtEndian>
 #include <algorithm>
+#include <utility>
 
 namespace tina::ui {
 namespace {
@@ -253,13 +255,14 @@ void FfiClientBridge::onReadyRead() {
         if (kind == 3 && method == ListDir) {
             QString path;
             QVariantList entries;
-            if (decodeDirectory(payload, path, entries) && path == directory_) {
-                if (browsing_) {
-                    directoryChangedDuringFetch_ = true;
-                } else {
-                    entries_ = entries;
-                    emit browserChanged();
-                }
+            if (!decodeDirectory(payload, path, entries))
+                continue;
+            auto directory = browserDirectories_.find(path);
+            if (directory != browserDirectories_.end()) {
+                if (directory->requestId)
+                    directory->refreshPending = true;
+                else
+                    applyDirectoryEntries(path, std::move(entries));
             }
             continue;
         }
@@ -297,13 +300,18 @@ bool FfiClientBridge::decodeDirectory(const QByteArray &payload, QString &path,
 
 void FfiClientBridge::openFileBrowser() {
     browserRequested_ = true;
-    // 未选项目时列项目；选定目录后每次 @FILE 都刷新当前位置。
+    // 重开弹窗或重连时重新获取项目根和当前可见的展开分支，保留树的展开状态。
+    const auto visibleRows = entries_;
     fetchDirectory(directory_);
+    for (const auto &row : visibleRows) {
+        const auto item = row.toMap();
+        if (item.value("expanded").toBool())
+            fetchDirectory(item.value("path").toString());
+    }
 }
 
 void FfiClientBridge::listProjects() {
-    browserRequested_ = true;
-    fetchDirectory({});
+    setBrowserRoot({});
 }
 
 void FfiClientBridge::listDir(const QString &path) {
@@ -311,22 +319,37 @@ void FfiClientBridge::listDir(const QString &path) {
         setMessage(QStringLiteral("目录路径无效"));
         return;
     }
+    setBrowserRoot(path);
+}
+
+void FfiClientBridge::setBrowserRoot(const QString &path) {
     browserRequested_ = true;
+    if (directory_ != path) {
+        directory_ = path;
+        browserDirectories_.clear();
+    }
     fetchDirectory(path);
 }
 
-void FfiClientBridge::fetchDirectory(const QString &path) {
-    const auto generation = ++browserGeneration_;
-    directory_ = path;
-    entries_.clear();
-    browsing_ = true;
-    directoryChangedDuringFetch_ = false;
-    emit browserChanged();
+bool FfiClientBridge::browsing() const {
+    const auto root = browserDirectories_.constFind(directory_);
+    return root != browserDirectories_.cend() && root->requestId != 0;
+}
+
+void FfiClientBridge::fetchDirectory(QString path) {
+    auto &directory = browserDirectories_[path];
+    if (directory.requestId)
+        return;
+    const auto requestId = nextId_++;
+    directory.requestId = requestId;
+    rebuildBrowserEntries();
     request(path.isEmpty() ? ListProjects : ListDir, path.isEmpty() ? QByteArray{} : pathPayload(path),
-            [this, path, generation](quint16 status, const QByteArray &payload) {
-        if (generation != browserGeneration_)
-            return; // 旧目录的迟到响应不能覆盖用户刚进入的目录。
-        browsing_ = false;
+            [this, path, requestId](quint16 status, const QByteArray &payload) {
+        auto directory = browserDirectories_.find(path);
+        if (directory == browserDirectories_.end() || directory->requestId != requestId)
+            return; // 切换项目或删除分支后，丢弃旧请求的响应。
+        directory->requestId = 0;
+        const bool refreshPending = std::exchange(directory->refreshPending, false);
         QVariantList entries;
         bool valid = true;
         if (!status && path.isEmpty()) {
@@ -347,36 +370,110 @@ void FfiClientBridge::fetchDirectory(const QString &path) {
         if (status || !valid) {
             setMessage(QStringLiteral("目录获取失败：")
                        + (status ? QString::fromUtf8(payload) : QStringLiteral("响应格式无效")));
-            emit browserChanged();
-            if (status == 4 && !path.isEmpty())
-                parentDirectory(); // 目录被删除，重新获取上级，直到项目列表。
+            if (status == 4 && path == directory_ && !path.isEmpty()) {
+                listProjects();
+                return;
+            }
+            if (status == 4 && !path.isEmpty()) {
+                // 分支已删除，重取它的父目录，其他分支仍留在原位。
+                discardDirectory(path);
+                fetchDirectory(path.left(path.lastIndexOf('/')));
+            }
+            rebuildBrowserEntries();
             return;
         }
-        entries_ = entries;
         setMessage(entries.isEmpty() ? QStringLiteral("此处没有文件或项目")
-                                    : QStringLiteral("↑ ↓ 选择，Enter 打开，Alt+↑ 返回上级"));
-        emit browserChanged();
-        // 读取期间收到变更通知，旧响应可能已过时，再取一次当前目录。
-        if (directoryChangedDuringFetch_)
+                                    : QStringLiteral("↑ ↓ 选择，← → 折叠或展开，Enter 打开"));
+        applyDirectoryEntries(path, std::move(entries));
+        // 通知与读取交错时再取一次同一分支，避免迟到的快照盖掉变更。
+        if (refreshPending)
             fetchDirectory(path);
     });
 }
 
-void FfiClientBridge::parentDirectory() {
-    const auto slash = directory_.lastIndexOf('/');
-    fetchDirectory(slash < 0 ? QString{} : directory_.left(slash));
+void FfiClientBridge::applyDirectoryEntries(const QString &path, QVariantList entries) {
+    auto &directory = browserDirectories_[path];
+    QSet<QString> removed;
+    for (const auto &row : directory.children) {
+        const auto child = row.toMap().value("path").toString();
+        if (browserDirectories_.contains(child))
+            removed.insert(child);
+    }
+    for (const auto &row : entries) {
+        const auto item = row.toMap();
+        if (item.value("type").toInt() == 1)
+            removed.remove(item.value("path").toString());
+    }
+    directory.children = std::move(entries);
+    for (const auto &child : removed)
+        discardDirectory(child);
+    rebuildBrowserEntries();
+}
+
+void FfiClientBridge::discardDirectory(const QString &path) {
+    const auto directory = browserDirectories_.take(path);
+    for (const auto &row : directory.children) {
+        const auto item = row.toMap();
+        if (item.value("type").toInt() == 1)
+            discardDirectory(item.value("path").toString());
+    }
+}
+
+void FfiClientBridge::rebuildBrowserEntries() {
+    // 用一份扁平列表显示可见行，仍由 ListView 按需创建代理；折叠只隐藏子项。
+    entries_.clear();
+    const auto appendVisible = [this](auto &&append, const QString &path, int depth) -> void {
+        const auto directory = browserDirectories_.constFind(path);
+        if (directory == browserDirectories_.cend())
+            return;
+        for (const auto &row : directory->children) {
+            auto item = row.toMap();
+            const auto childPath = item.value("path").toString();
+            const auto child = browserDirectories_.constFind(childPath);
+            const bool expanded = child != browserDirectories_.cend() && child->expanded;
+            item.insert("depth", depth);
+            item.insert("expanded", expanded);
+            item.insert("loading", expanded && child->requestId != 0);
+            entries_.append(item);
+            if (expanded)
+                append(append, childPath, depth + 1);
+        }
+    };
+    appendVisible(appendVisible, directory_, 0);
+    emit browserChanged();
 }
 
 void FfiClientBridge::activateEntry(int index) {
-    if (browsing_ || index < 0 || index >= entries_.size())
+    if (index < 0 || index >= entries_.size())
         return;
     const auto item = entries_.at(index).toMap();
     if (item.value("type").toInt() == 1)
-        listDir(item.value("path").toString());
+        setEntryExpanded(index, !item.value("expanded").toBool());
     else if (item.value("type").toInt() == 2)
         setMessage(QStringLiteral("符号链接未区分目标类型，请选择实际文件或目录"));
     else
         readFile(item.value("path").toString());
+}
+
+void FfiClientBridge::setEntryExpanded(int index, bool expanded) {
+    const auto item = entries_.value(index).toMap();
+    if (item.value("type").toInt() != 1)
+        return;
+    const auto path = item.value("path").toString();
+    if (directory_.isEmpty()) {
+        if (expanded)
+            listDir(path);
+        return;
+    }
+
+    auto &directory = browserDirectories_[path];
+    if (directory.expanded == expanded)
+        return;
+    directory.expanded = expanded;
+    if (expanded && !directory.requestId)
+        fetchDirectory(path);
+    else
+        rebuildBrowserEntries();
 }
 
 QVariantList FfiClientBridge::documents() const {

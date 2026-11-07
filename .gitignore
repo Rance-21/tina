@@ -28,4 +28,4 @@ notes.md
 # 编辑器与通用缓存
 .cache/
 logs/
-
+.venv

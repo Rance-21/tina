@@ -6,6 +6,7 @@
 #include <QQuickItem>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QStyleHints>
 #include <QTcpServer>
 #include <QTest>
 #include <QTextBlock>
@@ -193,19 +194,45 @@ class WorkspaceTest : public QObject {
         QTRY_COMPARE(bridge.directory(), QString("demo"));
         QTRY_VERIFY(!bridge.browsing());
         QCOMPARE(bridge.entries()[0].toMap().value("name").toString(), QString("src"));
+
+        bridge.activateEntry(0);
+        QTRY_COMPARE(bridge.entries().size(), 3);
+        QCOMPARE(bridge.directory(), QString("demo"));
+        QCOMPARE(bridge.entries()[1].toMap().value("depth").toInt(), 1);
+        QCOMPARE(bridge.entries()[2].toMap().value("name").toString(), QString("main.cpp"));
+        server.event("demo/src", QByteArray(1, char(0)) + string("new.cpp"));
+        QTRY_COMPARE(bridge.entries()[1].toMap().value("name").toString(), QString("new.cpp"));
+        bridge.activateEntry(0);
+        QCOMPARE(bridge.entries().size(), 2);
+
         bridge.openFileBrowser();
-        QTRY_COMPARE(server.count(0x13), 2);
+        QTRY_COMPARE(server.count(0x13), 3);
         QTRY_VERIFY(!bridge.browsing());
-        server.event("demo", QByteArray(1, char(0)) + string("new.cpp"));
-        QTRY_COMPARE(bridge.entries()[0].toMap().value("name").toString(), QString("new.cpp"));
-        bridge.listDir("demo/slow");
+        server.event("demo", QByteArray(1, char(1)) + string("slow") + char(1) + string("src")
+                             + char(0) + string("main.cpp"));
+        QTRY_COMPARE(bridge.entries().size(), 3);
+        bridge.activateEntry(0); // slow 的请求仍在等待时，可以展开别的分支。
         QTRY_VERIFY(delayed.has_value());
-        bridge.listDir("demo/src");
+        bridge.activateEntry(1);
+        QTRY_COMPARE(bridge.entries()[2].toMap().value("name").toString(), QString("a.cpp"));
+        bridge.activateEntry(0);
+        server.respond(*delayed, 0, string("demo/slow") + char(0) + string("old.cpp"));
+        QTest::qWait(40);
+        QCOMPARE(bridge.directory(), QString("demo"));
+        QCOMPARE(bridge.entries().size(), 4); // 折叠后的迟到响应不会把子项重新显示出来。
+        QCOMPARE(bridge.entries()[2].toMap().value("name").toString(), QString("a.cpp"));
+
+        delayed.reset();
+        bridge.activateEntry(0);
+        QTRY_VERIFY(delayed.has_value());
+        bridge.listProjects();
+        QTRY_COMPARE(bridge.entries().size(), 2);
+        bridge.activateEntry(1);
         QTRY_VERIFY(!bridge.browsing());
         server.respond(*delayed, 0, string("demo/slow") + char(0) + string("old.cpp"));
         QTest::qWait(40);
-        QCOMPARE(bridge.directory(), QString("demo/src"));
-        QCOMPARE(bridge.entries()[0].toMap().value("name").toString(), QString("a.cpp"));
+        QCOMPARE(bridge.directory(), QString("other"));
+        QCOMPARE(bridge.entries()[0].toMap().value("path").toString(), QString("other/a.cpp"));
     }
 
     void chunkedReadRevisionChangeAndUtf8() {
@@ -379,6 +406,22 @@ class WorkspaceTest : public QObject {
         QTRY_VERIFY(window->isActive());
         auto *command = window->findChild<QQuickItem *>("commandInput");
         QVERIFY(command);
+        auto *bar = findVisualItem(window->contentItem(), "bottomDialogBar");
+        auto *codeArea = findVisualItem(window->contentItem(), "centerCodeArea");
+        auto *folderButton = findVisualItem(window->contentItem(), "folderButton");
+        auto *submitButton = findVisualItem(window->contentItem(), "submitButton");
+        QVERIFY(bar && codeArea && folderButton && submitButton);
+        // 悬浮输入框与代码区等宽，代码区本身仍延伸到窗口底边。
+        QCOMPARE(bar->mapToItem(codeArea, QPointF()).x(), 0.0);
+        QCOMPARE(bar->width(), codeArea->width());
+        QCOMPARE(codeArea->mapToScene(QPointF(0, codeArea->height())).y(), qreal(window->height()));
+        QCOMPARE(folderButton->mapToItem(bar, QPointF()), QPointF());
+        QCOMPARE(folderButton->width(), bar->height());
+        QCOMPARE(folderButton->height(), bar->height());
+        QCOMPARE(submitButton->mapToItem(bar, QPointF(submitButton->width(), submitButton->height())),
+                 QPointF(bar->width(), bar->height()));
+        QCOMPARE(submitButton->width(), bar->height());
+        QCOMPARE(submitButton->height(), bar->height());
         command->forceActiveFocus();
         command->setProperty("text", "@FILE");
         QTest::keyClick(window, Qt::Key_Return);
@@ -386,7 +429,25 @@ class WorkspaceTest : public QObject {
         QTest::keyClick(window, Qt::Key_Return); // demo
         QTRY_COMPARE(bridge->directory(), QString("demo"));
         QTRY_VERIFY(!bridge->browsing());
-        QTest::keyClick(window, Qt::Key_Down); // main.cpp
+        auto *fileList = findVisualItem(window->contentItem(), "fileBrowserList");
+        QVERIFY(fileList);
+        QTest::keyClick(window, Qt::Key_Right); // 展开 src，保持选中目录。
+        QTRY_COMPARE(bridge->entries().size(), 3);
+        QCOMPARE(fileList->property("currentIndex").toInt(), 0);
+        QTest::keyClick(window, Qt::Key_Right); // 进入首个子项的选中态。
+        QCOMPARE(fileList->property("currentIndex").toInt(), 1);
+        QTest::keyClick(window, Qt::Key_Left);
+        QCOMPARE(fileList->property("currentIndex").toInt(), 0);
+        QTest::keyClick(window, Qt::Key_Left);
+        QCOMPARE(bridge->entries().size(), 2);
+
+        const auto *folder = findVisualItem(window->contentItem(), "fileRow:demo/src");
+        QVERIFY(folder);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          folder->mapToScene(QPointF(folder->width() / 2, folder->height() / 2)).toPoint());
+        QTRY_COMPARE(bridge->entries().size(), 3);
+        QTest::keyClick(window, Qt::Key_Down); // a.cpp
+        QTest::keyClick(window, Qt::Key_Down); // main.cpp 仍与 src 同级。
         QTest::keyClick(window, Qt::Key_Return);
         QTRY_COMPARE(bridge->documents().size(), 1);
         QTRY_VERIFY(document(*bridge)->loaded());
@@ -409,6 +470,16 @@ class WorkspaceTest : public QObject {
         QTest::keyClick(window, Qt::Key_Z, Qt::ControlModifier);
         QTRY_VERIFY(document(*bridge)->dirty()); // 切换标签后撤销栈仍在。
         QCOMPARE(document(*bridge)->text(), QString("int main() {\n    return 0;\n}\n"));
+
+        // 长按后松手仍停留在项目列表，触屏用户可以直接切换项目。
+        const auto folderCenter = folderButton->mapToScene(
+            QPointF(folderButton->width() / 2, folderButton->height() / 2)).toPoint();
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, folderCenter);
+        QTest::qWait(QGuiApplication::styleHints()->mousePressAndHoldInterval() + 100);
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, folderCenter);
+        QTRY_VERIFY(bridge->directory().isEmpty());
+        QTRY_COMPARE(bridge->entries().size(), 2);
+        QVERIFY(fileList->isVisible());
         for (const auto &warning : warnings)
             qWarning() << warning;
         QVERIFY(warnings.isEmpty());

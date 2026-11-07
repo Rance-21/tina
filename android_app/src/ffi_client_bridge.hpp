@@ -33,7 +33,7 @@ class FfiClientBridge : public QObject {
     bool connected() const;
     QString directory() const { return directory_; }
     QVariantList entries() const { return entries_; }
-    bool browsing() const { return browsing_; }
+    bool browsing() const;
     QVariantList documents() const;
     int activeIndex() const { return activeIndex_; }
     QString message() const { return message_; }
@@ -43,8 +43,8 @@ class FfiClientBridge : public QObject {
     Q_INVOKABLE void openFileBrowser();
     Q_INVOKABLE void listProjects();
     Q_INVOKABLE void listDir(const QString &path);
-    Q_INVOKABLE void parentDirectory();
     Q_INVOKABLE void activateEntry(int index);
+    Q_INVOKABLE void setEntryExpanded(int index, bool expanded);
     Q_INVOKABLE void readFile(const QString &path);
     Q_INVOKABLE void selectDocument(int index);
     Q_INVOKABLE void saveCurrent();
@@ -85,6 +85,12 @@ class FfiClientBridge : public QObject {
         quint64 generation{};
         int restarts{};
     };
+    struct BrowserDirectory {
+        QVariantList children;
+        quint64 requestId{};
+        bool expanded{};
+        bool refreshPending{};
+    };
     void request(quint16 method, QByteArray payload, Reply reply);
     void sendRequest(quint64 token);
     void completeRequest(quint64 token, quint16 status, const QByteArray &payload);
@@ -92,7 +98,11 @@ class FfiClientBridge : public QObject {
     void onReadyRead();
     void pollRequests();
     void scheduleReconnect();
-    void fetchDirectory(const QString &path);
+    void setBrowserRoot(const QString &path);
+    void fetchDirectory(QString path);
+    void applyDirectoryEntries(const QString &path, QVariantList entries);
+    void discardDirectory(const QString &path);
+    void rebuildBrowserEntries();
     bool decodeDirectory(const QByteArray &payload, QString &path, QVariantList &entries);
     void refreshDocument(WorkspaceDocument *document);
     void readChunk(WorkspaceDocument *document, std::shared_ptr<ReadTransfer> transfer);
@@ -110,11 +120,9 @@ class FfiClientBridge : public QObject {
     quint16 port_{3490};
     int reconnectAttempts_{};
     QString directory_;
+    QHash<QString, BrowserDirectory> browserDirectories_;
     QVariantList entries_;
-    bool browsing_{};
-    bool directoryChangedDuringFetch_{};
     bool browserRequested_{};
-    quint64 browserGeneration_{};
     QList<WorkspaceDocument *> documents_;
     int activeIndex_{-1};
     QString message_;
