@@ -5,6 +5,9 @@ Qt Quick 客户端通过异步 TCP 实现与 `src/ide/client.cppm` 对应的
 
 ## 使用
 
+- Android 使用沉浸式全屏，隐藏状态栏和系统导航栏；从屏幕边缘滑动可临时呼出系统栏。
+- 左侧使用紧凑文件标签，代码顶部不再重复显示文件名；输入框与代码区左右对齐，AI Agent 面板与输入框底边对齐。
+- 文件树、菜单和 Agent 图标使用矢量路径绘制，不依赖系统字体中的特殊符号。
 - 输入 `@FILE`，或点击底部文件夹按钮、按 `Ctrl+P`，在 AI / GIT / FILE 毛玻璃弹窗中浏览文件。
 - 首次列出项目。选中项目后，文件夹会在树中原地展开和折叠，再次打开文件窗口时会更新当前展开的分支。
 - `↑` / `↓` 选择，`Enter` 或单击打开文件或展开、折叠目录，`←` / `→` 在树中导航。长按文件夹按钮、按 `Alt+↑` 或退格可返回项目列表，`Esc` 关闭弹窗。
@@ -28,6 +31,20 @@ Qt Quick 客户端通过异步 TCP 实现与 `src/ide/client.cppm` 对应的
 
 ## 构建与验证
 
+### 本地连接配置
+
+首次构建先复制示例配置，然后在 `android_app/client.local.cmake` 填写实际域名或 IP 和端口：
+
+```sh
+cp android_app/client.local.cmake.example android_app/client.local.cmake
+```
+
+`TINA_SERVER_HOST` 只填写地址，不带协议和端口；`TINA_SERVER_PORT` 填写端口。
+本地配置已加入 `.gitignore`，真实地址不会写入可提交的源码或文档。
+Android APK 和 PC 预览程序在构建时共用此配置，修改后再次构建会自动更新。
+
+### 桌面预览
+
 桌面预览（使用本机 Qt 6 开发环境）：
 
 ```sh
@@ -40,9 +57,22 @@ cmake --build android_app/build-workspace --target tina_ide_client_qmllint
 测试使用仅监听本机的模拟 TCP 服务端，覆盖分包、失败重试、目录事件、响应乱序、分段版本变化、
 保存冲突、保存期间继续编辑、断线恢复、UTF-8、写入上限、语法高亮和外接键盘交互。
 
-可通过 `--host 地址 --port 端口` 更改桌面预览连接地址，默认沿用原来的 `100.65.173.4:3490`。
+PC 客户端输出为项目根目录的 `tina_ide_client`（Windows 为 `tina_ide_client.exe`）。
+可运行 `./tina_ide_client` 启动，通过 `--host 地址 --port 端口` 临时覆盖本地构建配置。
 `--smoke-test` 启动界面后自动退出。
 
+### Android APK
+
 Android 请使用 Qt 的 Android **arm64-v8a** Kit 和配套 SDK/NDK 配置此 CMake 项目。
+配置完成后执行：
+
+```sh
+cmake --build android_app/build-android-arm64 --target apk -j 4
+```
+
+标准 APK 构建（默认构建、`apk` 或 `tina_ide_client_make_apk` 目标）完成后，
+会自动将最新安装包更新到项目根目录的 `tina_ide_client.apk`。
+APK、PC 客户端及构建中间文件均已忽略，不提交到 Git。
+
 测试目标不会进入 Android 构建。界面使用 48 像素触控行、低分辨率毛玻璃采样和 150 ms 位移/透明度动画；
 隐藏标签不重新创建编辑器，高亮按文本块增量更新，行号只创建可见区域附近的对象。

@@ -1,3 +1,5 @@
+#include "client_config.hpp"
+
 #include <QGuiApplication>
 #include <QCommandLineParser>
 #include <QQmlApplicationEngine>
@@ -14,8 +16,11 @@ int main(int argc, char* argv[]) {
 
     QCommandLineParser parser;
     parser.addHelpOption();
-    parser.addOption({"host", "服务端地址", "address", "100.65.173.4"});
-    parser.addOption({"port", "服务端端口", "port", "3490"});
+    // 默认值由本地配置编译生成；桌面调试仍可通过启动参数临时覆盖。
+    parser.addOption({"host", "服务端地址", "address",
+                      QString::fromUtf8(tina::ui::config::ServerHost)});
+    parser.addOption({"port", "服务端端口", "port",
+                      QString::number(tina::ui::config::ServerPort)});
     parser.addOption({"smoke-test", "启动界面后退出，用于构建检查"});
     parser.process(app);
 

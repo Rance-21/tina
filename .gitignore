@@ -25,7 +25,16 @@ notes.md
 *.jsc
 *.aotstats
 
+# 客户端实际连接地址只保存在本机，不提交域名和生成的安装包。
+/android_app/client.local.cmake
+/tina_ide_client
+/tina_ide_client.exe
+/tina_ide_client.app/
+/tina_ide_client.apk
+
 # 编辑器与通用缓存
 .cache/
 logs/
 .venv
+
+ddns

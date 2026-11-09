@@ -11,12 +11,13 @@ Window {
     height: 800
     minimumWidth: 960
     minimumHeight: 600
-    visible: true
+    // Qt 的 Android 全屏模式会同时隐藏状态栏和系统导航栏。
+    visibility: Qt.platform.os === "android" ? Window.FullScreen : Window.Windowed
     title: qsTr("Tina Android IDE — Client Shell (16:10)")
     color: "#090d16"
-    // 默认沿用现有服务端地址；桌面测试可从启动参数注入本地模拟服务端。
-    property string serverHost: "100.65.173.4"
-    property int serverPort: 3490
+    // 由 C++ 注入本地构建配置，QML 不保存真实域名；测试可注入本机模拟服务端。
+    required property string serverHost
+    required property int serverPort
 
     FfiClientBridge {
         id: ffiBridge
@@ -77,14 +78,13 @@ Window {
 
         // 布局核心几何参数：
         // 左侧标签栏缩短，贴紧屏幕左侧；逻辑上保留左右分界区域，视觉上去除代码区左右分割线
-        // 左侧最低点与右侧 Agent 窗口最低点一致 (panelBottomY)
-        readonly property real leftColumnWidth: 132
+        // 标签栏和 Agent 面板底边跟随输入框，窗口尺寸变化时保持对齐。
+        readonly property real leftColumnWidth: 108
         readonly property real rightAgentWidth: Math.min(320, width * 0.3)
-        readonly property real codeLeftMargin: leftColumnWidth + 14
+        readonly property real codeLeftMargin: leftColumnWidth + 10
         readonly property real codeRightMargin: agentWindowVisible ? rightAgentWidth + 20 : 20
         readonly property real bottomInputHeight: 43
         readonly property real bottomMargin: 18
-        readonly property real panelBottomY: height - bottomMargin - bottomInputHeight - 16
 
         ListModel { id: fileTabsModel }
 
@@ -106,17 +106,17 @@ Window {
             id: atMenuModel
             ListElement {
                 cmdKey: "AI"
-                iconSymbol: "✦"
+                iconName: "sparkle"
                 iconColor: "#58a6ff"
             }
             ListElement {
                 cmdKey: "GIT"
-                iconSymbol: "⎇"
+                iconName: "branch"
                 iconColor: "#f59e0b"
             }
             ListElement {
                 cmdKey: "FILE"
-                iconSymbol: "📁"
+                iconName: "folder"
                 iconColor: "#34d399"
             }
         }
@@ -165,7 +165,7 @@ Window {
         ListModel {
             id: agentDialoguesModel
             ListElement {
-                modelIcon: "✦"
+                modelIcon: "sparkle"
                 modelColor: "#58a6ff"
                 modelTag: "Gemini"
                 dialogueTitle: "重构 epoll 事件分发与零拷贝发包"
@@ -173,7 +173,7 @@ Window {
                 detailText: "已分析 src/net/epoll.cppm 与 socket.cppm：\n建议在发送大文件分块时引入 MSG_ZEROCOPY，并将 signalfd 纳入主 EventLoop 统一管理。"
             }
             ListElement {
-                modelIcon: "◈"
+                modelIcon: "diamond"
                 modelColor: "#c084fc"
                 modelTag: "Codex"
                 dialogueTitle: "生成 Rust FFI 与 C++23 QObject 桥接层"
@@ -181,7 +181,7 @@ Window {
                 detailText: "已生成 extern \"C\" 导出符号定义：\n- tina_ffi_client_create\n- tina_ffi_client_send_command\n- tina_ffi_client_send_agent_prompt"
             }
             ListElement {
-                modelIcon: "❖"
+                modelIcon: "cluster"
                 modelColor: "#34d399"
                 modelTag: "Antigravity"
                 dialogueTitle: "检查 workspace 相对路径安全校验"
@@ -257,10 +257,12 @@ Window {
         // ====================================================================
         Item {
             id: leftTabsContainer
+            objectName: "fileTabs"
             x: 0
-            y: 18
+            anchors.top: parent.top
+            anchors.topMargin: 18
+            anchors.bottom: bottomDialogBar.bottom
             width: rootCanvas.leftColumnWidth
-            height: rootCanvas.panelBottomY - y
 
             ListView {
                 id: tabsColumn
@@ -297,12 +299,12 @@ Window {
                     }
                     Text {
                         anchors.fill: parent
-                        anchors.leftMargin: 12
+                        anchors.leftMargin: 10
                         anchors.rightMargin: 8
                         verticalAlignment: Text.AlignVCenter
                         text: (tabDelegate.document.dirty ? "• " : "") + tabDelegate.document.name
                         color: tabDelegate.isSelected ? "#ffffff" : "#b0c4de"
-                        font.pixelSize: 14
+                        font.pixelSize: 13
                         elide: Text.ElideRight
                     }
                     MouseArea {
@@ -325,15 +327,17 @@ Window {
         //    - 平时不显示（右侧区域也不模糊、无分界线）
         //    - 只有输入 @AI 回车才展示，展示时带有左侧分界线与背景模糊
         //    - 点击别处不关闭，再次输入 @AI 回车关闭
-        //    - 最低点与左侧标签区最低点一致
+        //    - 底边与输入框底边一致
         // ====================================================================
         Item {
             id: rightAgentWindow
+            objectName: "agentPanel"
             width: rootCanvas.rightAgentWidth
             anchors.right: parent.right
             anchors.rightMargin: 16
-            y: 18
-            height: rootCanvas.panelBottomY - y
+            anchors.top: parent.top
+            anchors.topMargin: 18
+            anchors.bottom: bottomDialogBar.bottom
             visible: rootCanvas.agentWindowVisible
             opacity: rootCanvas.agentWindowVisible ? 1.0 : 0.0
 
@@ -446,12 +450,12 @@ Window {
                                     border.color: dialogueCard.model.modelColor
                                     border.width: 1.5
 
-                                    Text {
+                                    UiIcon {
                                         anchors.centerIn: parent
-                                        text: dialogueCard.model.modelIcon
+                                        name: dialogueCard.model.modelIcon
                                         color: dialogueCard.model.modelColor
-                                        font.pixelSize: 15
-                                        font.bold: true
+                                        width: 18
+                                        height: 18
                                     }
                                 }
 
@@ -466,11 +470,12 @@ Window {
                                     wrapMode: Text.WordWrap
                                 }
 
-                                Text {
+                                UiIcon {
                                     Layout.alignment: Qt.AlignTop
-                                    text: dialogueCard.model.expanded ? "▾" : "▸"
+                                    name: dialogueCard.model.expanded ? "chevron-down" : "chevron-right"
                                     color: "#7c93b8"
-                                    font.pixelSize: 13
+                                    implicitWidth: 14
+                                    implicitHeight: 14
                                 }
                             }
 
@@ -587,12 +592,12 @@ Window {
                                 border.color: menuRow.model.iconColor
                                 border.width: 1.2
 
-                                Text {
+                                UiIcon {
                                     anchors.centerIn: parent
-                                    text: menuRow.model.iconSymbol
+                                    name: menuRow.model.iconName
                                     color: menuRow.model.iconColor
-                                    font.pixelSize: 14
-                                    font.bold: true
+                                    width: 18
+                                    height: 18
                                 }
                             }
 
@@ -937,12 +942,13 @@ Window {
                         anchors.fill: parent
                         anchors.leftMargin: 14 + Math.min(fileRow.modelData.depth * 20, fileRow.width / 2)
                         anchors.rightMargin: 14
-                        Label {
-                            text: fileRow.modelData.type === 1
-                                  ? (fileRow.modelData.loading ? "…" : fileRow.modelData.expanded ? "▾" : "▸")
-                                  : (fileRow.modelData.type === 2 ? "↗" : "≡")
+                        UiIcon {
+                            name: fileRow.modelData.type === 1
+                                  ? (fileRow.modelData.loading ? "more" : fileRow.modelData.expanded ? "chevron-down" : "chevron-right")
+                                  : (fileRow.modelData.type === 2 ? "link" : "file")
                             color: fileRow.modelData.type === 1 ? "#ffd18b" : "#8fc2ff"
-                            font.pixelSize: 22
+                            implicitWidth: 22
+                            implicitHeight: 22
                         }
                         Label {
                             Layout.fillWidth: true
@@ -1024,28 +1030,12 @@ Window {
                     border.color: rootCanvas.popupMode === "folder" ? "#7cc4ff" : "#388aa8d8"
                     border.width: 1.1
 
-                    // Folder 矢量图标
-                    Canvas {
+                    UiIcon {
                         anchors.centerIn: parent
+                        name: "folder"
+                        color: rootCanvas.popupMode === "folder" ? "#ffffff" : "#d0e0ff"
                         width: 20
-                        height: 16
-                        onPaint: {
-                            var ctx = getContext("2d")
-                            ctx.clearRect(0, 0, width, height)
-                            ctx.strokeStyle = rootCanvas.popupMode === "folder" ? "#ffffff" : "#d0e0ff"
-                            ctx.lineWidth = 1.7
-                            ctx.lineJoin = "round"
-                            ctx.beginPath()
-                            ctx.moveTo(1.5, 4.0)
-                            ctx.lineTo(1.5, 14.0)
-                            ctx.lineTo(18.5, 14.0)
-                            ctx.lineTo(18.5, 6.0)
-                            ctx.lineTo(10.0, 6.0)
-                            ctx.lineTo(7.8, 2.8)
-                            ctx.lineTo(1.5, 2.8)
-                            ctx.closePath()
-                            ctx.stroke()
-                        }
+                        height: 20
                     }
 
                     MouseArea {
@@ -1106,25 +1096,12 @@ Window {
                     border.color: "#788cc0ff"
                     border.width: 1.2
 
-                    Canvas {
+                    UiIcon {
                         anchors.centerIn: parent
+                        name: "arrow-up"
+                        color: "#f4f8ff"
                         width: 18
                         height: 18
-                        onPaint: {
-                            var ctx = getContext("2d")
-                            ctx.clearRect(0, 0, width, height)
-                            ctx.strokeStyle = "#f4f8ff"
-                            ctx.lineWidth = 2.2
-                            ctx.lineCap = "round"
-                            ctx.lineJoin = "round"
-                            ctx.beginPath()
-                            ctx.moveTo(9, 15)
-                            ctx.lineTo(9, 3.5)
-                            ctx.moveTo(4, 8.5)
-                            ctx.lineTo(9, 3.5)
-                            ctx.lineTo(14, 8.5)
-                            ctx.stroke()
-                        }
                     }
 
                     MouseArea {
@@ -1169,7 +1146,7 @@ Window {
                     const titleText = raw.substring(1).trim()
                     if (titleText.length > 0) {
                         agentDialoguesModel.insert(0, {
-                            modelIcon: "✦",
+                            modelIcon: "sparkle",
                             modelColor: "#58a6ff",
                             modelTag: "Agent",
                             dialogueTitle: titleText,

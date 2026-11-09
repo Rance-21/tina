@@ -3,6 +3,7 @@
 
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
+#include <QQmlComponent>
 #include <QQuickItem>
 #include <QQuickStyle>
 #include <QQuickWindow>
@@ -384,6 +385,50 @@ class WorkspaceTest : public QObject {
         }));
     }
 
+    void vectorIconsRenderAndUpdate() {
+        QQmlEngine engine;
+        QQmlComponent component(&engine, QUrl::fromLocalFile(
+            QStringLiteral(TINA_QML_SOURCE_DIR "/UiIcon.qml")));
+        std::unique_ptr<QObject> object(component.createWithInitialProperties(
+            {{"name", "chevron-right"}, {"color", QColor(Qt::red)}}));
+        QVERIFY2(object, qPrintable(component.errorString()));
+        auto *icon = qobject_cast<QQuickItem *>(object.get());
+        QVERIFY(icon);
+        QQuickWindow window;
+        window.setColor(Qt::black);
+        window.resize(48, 48);
+        icon->setParentItem(window.contentItem());
+        icon->setSize(QSizeF(48, 48));
+        window.show();
+        const auto coloredPixels = [&window](bool red) {
+            const auto image = window.grabWindow();
+            int count = 0;
+            for (int y = 0; y < image.height(); ++y) {
+                for (int x = 0; x < image.width(); ++x) {
+                    const auto pixel = image.pixelColor(x, y);
+                    if (red ? pixel.red() > 100 : pixel.green() > 100)
+                        ++count;
+                }
+            }
+            return count;
+        };
+        QTRY_VERIFY(coloredPixels(true) > 20);
+        const auto rightArrow = window.grabWindow();
+        icon->setProperty("name", "chevron-down");
+        QTRY_VERIFY(window.grabWindow() != rightArrow);
+        icon->setProperty("color", QColor(Qt::green));
+        QTRY_VERIFY(coloredPixels(false) > 20);
+        QTRY_COMPARE(coloredPixels(true), 0);
+        // 每一种菜单、文件树和模型图标都必须有实际绘制内容。
+        for (const auto *name : {"folder", "file", "link", "arrow-up", "sparkle",
+                                 "diamond", "cluster", "branch", "more"}) {
+            icon->setProperty("name", "");
+            QTRY_COMPARE(coloredPixels(false), 0);
+            icon->setProperty("name", name);
+            QTRY_VERIFY(coloredPixels(false) > 20);
+        }
+    }
+
     void keyboardAndEditorState() {
         FakeServer server;
         qmlRegisterType<FfiClientBridge>("TinaIde", 1, 0, "FfiClientBridge");
@@ -454,6 +499,10 @@ class WorkspaceTest : public QObject {
         QCOMPARE(document(*bridge)->path(), QString("demo/main.cpp"));
         auto *editor = findVisualItem(window->contentItem(), "editor:demo/main.cpp");
         QVERIFY(editor);
+        auto *viewport = findVisualItem(window->contentItem(), "codeViewport:demo/main.cpp");
+        QVERIFY(viewport);
+        // 无冲突时，第一行代码直接从代码区顶部开始，不再空出文件名栏。
+        QTRY_COMPARE(viewport->mapToItem(codeArea, QPointF()).y(), 0.0);
         QTRY_VERIFY(editor->hasActiveFocus());
         QTest::keyClick(window, Qt::Key_End, Qt::ControlModifier);
         QTest::keyClick(window, Qt::Key_X);
@@ -480,6 +529,27 @@ class WorkspaceTest : public QObject {
         QTRY_VERIFY(bridge->directory().isEmpty());
         QTRY_COMPARE(bridge->entries().size(), 2);
         QVERIFY(fileList->isVisible());
+        QTest::keyClick(window, Qt::Key_Escape);
+        command->forceActiveFocus();
+        command->setProperty("text", "@AI");
+        QTest::keyClick(window, Qt::Key_Return);
+        auto *agent = findVisualItem(window->contentItem(), "agentPanel");
+        auto *tabs = findVisualItem(window->contentItem(), "fileTabs");
+        QVERIFY(agent && tabs);
+        QTRY_VERIFY(agent->isVisible());
+        for (const auto &size : {QSize(1280, 800), QSize(1600, 1000), QSize(960, 600)}) {
+            window->resize(size);
+            QTRY_COMPARE(bar->mapToScene(QPointF(0, bar->height())).y(),
+                         agent->mapToScene(QPointF(0, agent->height())).y());
+            QCOMPARE(bar->mapToItem(codeArea, QPointF()).x(), 0.0);
+            QCOMPARE(bar->width(), codeArea->width());
+            const auto gap = codeArea->x() - tabs->width();
+            QVERIFY(gap > 0 && gap <= 12);
+            QVERIFY(tabs->width() < 132);
+        }
+        window->resize(1280, 800);
+        QTest::qWait(200);
+        window->grabWindow().save(QStringLiteral("workspace-tablet-preview.png"));
         for (const auto &warning : warnings)
             qWarning() << warning;
         QVERIFY(warnings.isEmpty());

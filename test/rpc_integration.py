@@ -59,6 +59,22 @@ def expect_closed(sock):
     assert data == b"", f"connection not closed: {data!r}"
 
 
+def test_dual_stack(port):
+    # 先检查本机是否启用了 IPv6；未启用时仍由后续用例验证 IPv4 回退。
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
+            probe.bind(("::1", 0))
+    except OSError:
+        print("SKIP: IPv6 loopback unavailable", flush=True)
+        return
+
+    # 同一个服务端端口必须同时接受 IPv4 和 IPv6，避免只有 AAAA 的域名无法连接。
+    for host in (HOST, "::1"):
+        with socket.create_connection((host, port), timeout=TIMEOUT) as sock:
+            sock.sendall(frame(100, 1))
+            assert recv_response(sock, 1) == (100, 0, b"PONG")
+
+
 def test_fragmentation(port):
     with connect(port) as sock:
         request = frame(101, 2, b"frag-key\nhello")
@@ -263,6 +279,7 @@ def main():
                 raise RuntimeError("server startup timed out")
 
             tests = [
+                ("IPv4 / IPv6 dual stack", test_dual_stack),
                 ("fragmentation", test_fragmentation),
                 ("pipelining", test_pipelining),
                 ("KV dispatch", test_kv_dispatch),

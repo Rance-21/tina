@@ -27,30 +27,9 @@ Item {
     }
     function focusEditor() { editor.forceActiveFocus() }
 
-    RowLayout {
-        id: header
-        anchors.top: parent.top
-        anchors.left: parent.left
-        anchors.right: parent.right
-        height: 44
-        spacing: 8
-        Label {
-            Layout.fillWidth: true
-            text: pane.document.path + (pane.document.dirty ? "  • 未保存" : "")
-            color: pane.document.dirty ? "#ffd18b" : "#99b4d7"
-            elide: Text.ElideMiddle
-            font.pixelSize: 14
-        }
-        Label {
-            text: pane.document.saving ? "保存中…" : pane.document.refreshing ? "获取中…"
-                  : pane.document.readOnly ? "只读" : ""
-            color: "#99b4d7"
-        }
-    }
-
     ColumnLayout {
         id: conflictBar
-        anchors.top: header.bottom
+        anchors.top: parent.top
         anchors.left: parent.left
         anchors.right: parent.right
         visible: pane.document.conflict
@@ -105,6 +84,7 @@ Item {
 
     Flickable {
         id: flick
+        objectName: "codeViewport:" + pane.document.path
         anchors.top: conflictBar.bottom
         anchors.bottom: parent.bottom
         anchors.left: gutter.right
@@ -168,6 +148,19 @@ Item {
                 }
             }
         }
+    }
+
+    // 只在有状态时显示提示，不再为文件名和常驻标题栏占用代码高度。
+    Label {
+        anchors.top: conflictBar.bottom
+        anchors.right: parent.right
+        anchors.margins: 8
+        text: pane.document.saving ? "保存中…" : pane.document.refreshing ? "获取中…"
+              : pane.document.readOnly ? "只读" : ""
+        visible: text.length > 0
+        color: "#b6c8e4"
+        padding: 4
+        background: Rectangle { color: "#d0101726"; radius: 4 }
     }
 
     Dialog {

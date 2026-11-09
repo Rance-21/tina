@@ -243,3 +243,46 @@ close(fd2);
 
 注：关于 lockf(3)：
 C 标准库提供的 lockf(fd, cmd, len) 底层在 Linux 上纯粹是对 fcntl(F_SETLK) 的一层薄封装，它完全具备 POSIX 锁的所有陷阱。
+
+查看所有网卡
+ip link show
+查看网卡及其 IP：
+ip addr show
+
+
+只查看 IPv6：
+ip -6 addr show
+
+
+查看 Wi-Fi 的全局 IPv6
+ip -6 addr show dev wlp18s0 scope global
+
+ip -6 addr show
+
+查看 IPv6 路由表
+ip -6 route
+
+查看 Tina 域名解析
+dig AAAA tina.rance-21.com +short
+
+查看 DNS 详细信息：
+dig AAAA tina.rance-21.com
+
+查看定时器状态
+systemctl status tina-ddns.timer
+正常应该看到：
+Active: active (waiting)
+
+查看下次执行时间
+systemctl list-timers --all | grep tina-ddns
+查看服务状态
+systemctl status tina-ddns.service
+
+手动触发一次 DDNS
+sudo systemctl start tina-ddns.service
+journalctl -u tina-ddns.service -n 10 --no-pager
+
+监听流量
+sudo tcpdump -ni wlp18s0 -nn 'ip6 and tcp port 3490'
+
+systemd-inhibit --what=idle:sleep:handle-lid-switch --who="MyServer" --why="Running backend server" ./tina

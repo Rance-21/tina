@@ -1,0 +1,4 @@
+# 复制本文件为 client.local.cmake，填写实际地址；本地配置已加入 .gitignore。
+# 只填写域名或 IP，不带 http://、https:// 或端口。Android 和 PC 端共用此配置。
+set(TINA_SERVER_HOST "localhost")
+set(TINA_SERVER_PORT 3490)

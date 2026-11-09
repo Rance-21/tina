@@ -1,0 +1,8 @@
+#pragma once
+
+// 由 CMake 从本地配置生成，生成文件留在被忽略的构建目录中。
+// 两端编译进相同地址，APK 安装后无需携带额外配置文件。
+namespace tina::ui::config {
+inline constexpr char ServerHost[] = "@TINA_SERVER_HOST@";
+inline constexpr int ServerPort = @TINA_SERVER_PORT@;
+}

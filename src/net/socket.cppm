@@ -1,5 +1,6 @@
 module;
 #include <sys/socket.h>
+#include <netinet/in.h>
 #include <netdb.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -55,28 +56,42 @@ class Socket {
             throw std::runtime_error(::gai_strerror(rv));
         }
 
-        for (addrinfo *p = results; p != nullptr; p = p->ai_next) {
-            int fd = ::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+        // 优先建立双栈 IPv6 监听，同一端口也接收 IPv4 映射连接。
+        // 不能依赖 getaddrinfo 的返回顺序，否则先绑定 IPv4 后会遗漏域名的 AAAA 连接。
+        for (const int family : {AF_INET6, AF_INET}) {
+            for (addrinfo *p = results; p != nullptr; p = p->ai_next) {
+                if (p->ai_family != family)
+                    continue;
 
-            if (fd == -1) {
-                continue;
+                int fd = ::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+                if (fd == -1)
+                    continue;
+
+                int yes = 1;
+                ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+                // 显式启用双栈，不依赖系统 bindv6only 的默认值；不可用时回退 IPv4。
+                int ipv6_only = 0;
+                if (family == AF_INET6
+                    && ::setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY,
+                                    &ipv6_only, sizeof(ipv6_only)) == -1) {
+                    ::close(fd);
+                    continue;
+                }
+
+                if (::bind(fd, p->ai_addr, p->ai_addrlen) == -1) {
+                    ::close(fd);
+                    continue;
+                }
+
+                if (::listen(fd, 128) == -1) {
+                    ::close(fd);
+                    continue;
+                }
+
+                ::freeaddrinfo(results);
+                return Socket{fd};
             }
-
-            int yes = 1;
-            ::setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-
-            if (::bind(fd, p->ai_addr, p->ai_addrlen) == -1) {
-                ::close(fd);
-                continue;
-            }
-
-            if (::listen(fd, 128) == -1) {
-                ::close(fd);
-                continue;
-            }
-
-            ::freeaddrinfo(results);
-            return Socket{fd};
         }
 
         ::freeaddrinfo(results);
