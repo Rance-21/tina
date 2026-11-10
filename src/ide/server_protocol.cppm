@@ -152,4 +152,43 @@ std::string encode_workspace_write_file(std::uint64_t revision) {
     return out;
 }
 
+using ::decode_terminal_input;
+using ::decode_terminal_on_tab;
+using ::decode_terminal_output;
+using ::decode_terminal_payload;
+using ::decode_terminal_payload_view;
+using ::decode_terminal_state;
+using ::decode_terminal_state_id;
+using ::decode_terminal_state_view;
+using ::encode_terminal_input;
+using ::encode_terminal_on_tab;
+using ::encode_terminal_output;
+using ::encode_terminal_payload;
+using ::encode_terminal_state;
+using ::encode_terminal_state_id;
+
+// 构造 0x0281 (terminal_output) 服务端推送 Event 帧。
+inline Frame make_terminal_output_event(std::uint32_t terminal_id, std::string_view text) {
+    return Frame{
+        .length = 0,
+        .kind = Kind::event,
+        .request_id = 0,
+        .method = Method::terminal_output,
+        .status = Status::ok,
+        .payload = encode_terminal_output(terminal_id, text),
+    };
+}
+
+// 构造 0x0282 (terminal_state) 服务端推送 Event 帧（通知命令执行完毕或 Shell 退出）。
+inline Frame make_terminal_state_event(std::uint32_t terminal_id) {
+    return Frame{
+        .length = 0,
+        .kind = Kind::event,
+        .request_id = 0,
+        .method = Method::terminal_state,
+        .status = Status::ok,
+        .payload = encode_terminal_state_id(terminal_id),
+    };
+}
+
 } // namespace server

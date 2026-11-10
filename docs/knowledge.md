@@ -285,4 +285,4 @@ journalctl -u tina-ddns.service -n 10 --no-pager
 监听流量
 sudo tcpdump -ni wlp18s0 -nn 'ip6 and tcp port 3490'
 
-systemd-inhibit --what=idle:sleep:handle-lid-switch --who="MyServer" --why="Running backend server" ./tina
+systemd-inhibit --what=idle:sleep:handle-lid-switch --who="MyServer" --why="Running backend server" ./tina server

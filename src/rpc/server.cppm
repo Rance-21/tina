@@ -20,6 +20,7 @@ import runtime.log;
 
 import rpc.connection;
 import rpc.handler;
+import ide.server_terminal;
 
 namespace {
 
@@ -104,6 +105,8 @@ void run_server(std::string_view port) {
         ConnectionMap connections;
         // 本 I/O 线程专属的 inotify 目录监听管理器（无全局监听表）。
         std::shared_ptr<detail::DirWatcher> watcher;
+        // 本 I/O 线程专属的 PTY 终端管理器。
+        std::shared_ptr<server::TerminalManager> terminal_mgr;
     };
 
     // 析构顺序：先回收 Worker，再回收 I/O 线程，最后销毁连接登记表。
@@ -113,10 +116,12 @@ void run_server(std::string_view port) {
 
     slots.reserve(config.io_threads);
     for (std::size_t i = 0; i < config.io_threads; ++i) {
-        slots.push_back({&io_pool.next_loop(), {}, nullptr});
+        slots.push_back({&io_pool.next_loop(), {}, nullptr, nullptr});
         auto &slot = slots.back();
-        slot.watcher = std::make_shared<detail::DirWatcher>(*slot.loop, slot.connections, workers,
-                                                            connection_counter);
+        slot.watcher = detail::make_dir_watcher(*slot.loop, slot.connections, workers,
+                                                connection_counter);
+        slot.terminal_mgr =
+            detail::make_terminal_manager(*slot.loop, slot.connections, connection_counter);
     }
 
     std::size_t next_io = 0;
@@ -154,9 +159,9 @@ void run_server(std::string_view port) {
                 IoSlot &slot = slots[next_io];
                 next_io = (next_io + 1) % slots.size();
 
-                bool accepted = detail::post_connection(std::move(*client), *slot.loop,
-                                                        slot.connections, workers,
-                                                        connection_counter, kv, slot.watcher);
+                bool accepted = detail::post_connection(
+                    std::move(*client), *slot.loop, slot.connections, workers, connection_counter,
+                    kv, slot.watcher, slot.terminal_mgr);
 
                 if (!accepted)
                     runtime::log::warn("I/O EventLoop rejected connection");
@@ -176,12 +181,15 @@ void run_server(std::string_view port) {
         auto *loop = slot.loop;
         auto *connections = &slot.connections;
         auto watcher = slot.watcher;
+        auto terminal_mgr = slot.terminal_mgr;
 
-        bool posted =
-            loop->post_task([loop, connections, watcher, &connection_counter, frozen] {
+        bool posted = loop->post_task(
+            [loop, connections, watcher, terminal_mgr, &connection_counter, frozen] {
                 try {
                     if (watcher)
                         watcher->stop();
+                    if (terminal_mgr)
+                        terminal_mgr->stop();
                     for (auto it = connections->begin(); it != connections->end();) {
                         auto conn = it->second;
                         ++it; // refresh_connection 可能删除当前连接。

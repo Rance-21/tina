@@ -198,6 +198,62 @@ def test_workspace_and_inotify(port, projects_root):
         assert (struct.pack("!BH", 0, 5) + b"b.txt") in event_payload
 
 
+def test_terminal(port):
+    with connect(port) as sock:
+        # 1. terminal_state (0x0282) 启动 Shell：payload = [u32 len=0][""]
+        start_req = struct.pack("!I", 0)
+        sock.sendall(frame(801, 0x0282, start_req))
+        req_id, status, payload = recv_response(sock, 0x0282)
+        assert req_id == 801 and status == 0
+        data_len, term_id = struct.unpack("!II", payload)
+        assert data_len == 4 and term_id >= 1
+
+        # 2. terminal_on_tab (0x0022) Tab 补全：payload = [u32 len][u32 terminal_id][data]
+        tab_cmd = b"ls de"
+        tab_req = struct.pack("!II", len(tab_cmd), term_id) + tab_cmd
+        sock.sendall(frame(802, 0x0022, tab_req))
+        req_id, status, payload = recv_response(sock, 0x0022)
+        assert req_id == 802 and status == 0
+        res_len, res_tid = struct.unpack("!II", payload[:8])
+        completed = payload[8:]
+        assert res_len == len(completed) and res_tid == term_id
+        assert completed.startswith(b"ls demo")
+
+        # 3. terminal_input (0x0021) 执行命令，接收 0x0281 输出事件与 0x0282 完成事件
+        cmd = b"echo HELLO_TINA_TERM"
+        input_req = struct.pack("!II", len(cmd), term_id) + cmd
+        sock.sendall(frame(803, 0x0021, input_req))
+
+        got_input_resp = False
+        got_done_event = False
+        outputs = bytearray()
+
+        while not (got_input_resp and got_done_event):
+            length, = struct.unpack("!I", recv_exact(sock, 4))
+            kind, r_id, method, status = struct.unpack("!BQHH", recv_exact(sock, 13))
+            body = recv_exact(sock, length - 13)
+            if kind == 2 and method == 0x0021:
+                assert r_id == 803 and status == 0
+                got_input_resp = True
+            elif kind == 3 and method == 0x0281:
+                out_len, out_tid = struct.unpack("!II", body[:8])
+                assert out_tid == term_id and out_len == len(body) - 8
+                outputs.extend(body[8:])
+            elif kind == 3 and method == 0x0282:
+                ev_len, ev_tid = struct.unpack("!II", body)
+                assert ev_len == 4 and ev_tid == term_id
+                got_done_event = True
+
+        assert b"HELLO_TINA_TERM" in outputs
+
+        # 4. terminal_state (0x0282) 关闭 Shell：payload = [u32 len=4][u32 terminal_id]
+        close_req = struct.pack("!II", 4, term_id)
+        sock.sendall(frame(804, 0x0282, close_req))
+        req_id, status, payload = recv_response(sock, 0x0282)
+        assert req_id == 804 and status == 0
+        assert payload == struct.pack("!II", 4, term_id)
+
+
 def test_invalid_frames(port):
     for packet in (struct.pack("!I", 12), struct.pack("!I", 1024 * 1024 + 1),
                    frame(0, 1), frame(1, 1, status=1), frame(1, 1, kind=2)):
@@ -284,6 +340,7 @@ def main():
                 ("pipelining", test_pipelining),
                 ("KV dispatch", test_kv_dispatch),
                 ("workspace & inotify", lambda p: test_workspace_and_inotify(p, projects_root)),
+                ("terminal pty & tab", test_terminal),
                 ("invalid frames", test_invalid_frames),
                 ("half close", test_half_close),
                 ("concurrent clients", test_concurrent_clients),

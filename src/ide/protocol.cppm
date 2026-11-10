@@ -191,3 +191,167 @@ export struct WriteFileRequest {
     std::uint64_t expected_revision{}; // 客户端期望的原文件版本指纹
     std::string content;               // 待保存的完整 UTF-8 文本内容
 };
+
+// ============================================================================
+// Terminal 模块协议公共数据结构与编解码函数
+// ============================================================================
+// 帧内 Payload 编码规则：
+//   1. terminal_state (0x0282)               : [u32 len][data (len bytes)]
+//   2. terminal_input / on_tab / output (其余): [u32 len][u32 terminal_id][data (len bytes)]
+
+// 携带 terminal_id 与文本/字节数据的通用终端消息结构（用于 input / on_tab / output）。
+export struct TerminalMessage {
+    std::uint32_t terminal_id{};
+    std::string data;
+};
+
+// 零拷贝切片视图版本的终端消息结构（直接引用 Frame::payload 内存，不分配新 std::string）。
+export struct TerminalMessageView {
+    std::uint32_t terminal_id{};
+    std::string_view data;
+};
+
+// 编码非 state 的终端负载：[u32 len][u32 terminal_id][data]
+export inline std::string encode_terminal_payload(std::uint32_t terminal_id,
+                                                  std::string_view data) {
+    if (data.size() > max_frame_length - min_frame_length - 8)
+        throw std::invalid_argument("terminal payload exceeds maximum frame length");
+
+    std::string out;
+    out.reserve(8 + data.size());
+    append_be(out, static_cast<std::uint32_t>(data.size()));
+    append_be(out, terminal_id);
+    out.append(data);
+    return out;
+}
+
+export inline std::string encode_terminal_payload(const TerminalMessage &msg) {
+    return encode_terminal_payload(msg.terminal_id, msg.data);
+}
+
+// 零拷贝解码非 state 的终端负载：[u32 len][u32 terminal_id][data]
+export inline std::optional<TerminalMessageView>
+decode_terminal_payload_view(std::string_view payload) noexcept {
+    PayloadReader reader(payload);
+    auto len = reader.read_int<std::uint32_t>();
+    auto terminal_id = reader.read_int<std::uint32_t>();
+    if (!len || !terminal_id)
+        return std::nullopt;
+
+    auto data = reader.read_bytes(*len);
+    if (!data || !reader.finished())
+        return std::nullopt;
+
+    return TerminalMessageView{
+        .terminal_id = *terminal_id,
+        .data = *data,
+    };
+}
+
+// 解码非 state 的终端负载：[u32 len][u32 terminal_id][data]
+export inline std::optional<TerminalMessage> decode_terminal_payload(std::string_view payload) {
+    auto view = decode_terminal_payload_view(payload);
+    if (!view)
+        return std::nullopt;
+
+    return TerminalMessage{
+        .terminal_id = view->terminal_id,
+        .data = std::string(view->data),
+    };
+}
+
+// 0x0021 (terminal_input)：[u32 len][u32 terminal_id][data]
+export inline std::string encode_terminal_input(std::uint32_t terminal_id,
+                                                std::string_view command) {
+    return encode_terminal_payload(terminal_id, command);
+}
+
+export inline std::optional<TerminalMessage> decode_terminal_input(std::string_view payload) {
+    return decode_terminal_payload(payload);
+}
+
+// 0x0022 (terminal_on_tab)：[u32 len][u32 terminal_id][data]
+export inline std::string encode_terminal_on_tab(std::uint32_t terminal_id,
+                                                 std::string_view input) {
+    return encode_terminal_payload(terminal_id, input);
+}
+
+export inline std::optional<TerminalMessage> decode_terminal_on_tab(std::string_view payload) {
+    return decode_terminal_payload(payload);
+}
+
+// 0x0281 (terminal_output)：[u32 len][u32 terminal_id][data]
+export inline std::string encode_terminal_output(std::uint32_t terminal_id,
+                                                 std::string_view output) {
+    return encode_terminal_payload(terminal_id, output);
+}
+
+export inline std::optional<TerminalMessage> decode_terminal_output(std::string_view payload) {
+    return decode_terminal_payload(payload);
+}
+
+// 0x0282 (terminal_state)：[u32 len][data]
+export inline std::string encode_terminal_state(std::string_view data) {
+    if (data.size() > max_frame_length - min_frame_length - 4)
+        throw std::invalid_argument("terminal_state payload exceeds maximum frame length");
+
+    std::string out;
+    out.reserve(4 + data.size());
+    append_be(out, static_cast<std::uint32_t>(data.size()));
+    out.append(data);
+    return out;
+}
+
+// 零拷贝解码 0x0282 (terminal_state)：[u32 len][data]
+export inline std::optional<std::string_view>
+decode_terminal_state_view(std::string_view payload) noexcept {
+    PayloadReader reader(payload);
+    auto len = reader.read_int<std::uint32_t>();
+    if (!len)
+        return std::nullopt;
+
+    auto data = reader.read_bytes(*len);
+    if (!data || !reader.finished())
+        return std::nullopt;
+
+    return *data;
+}
+
+// 解码 0x0282 (terminal_state)：[u32 len][data]
+export inline std::optional<std::string> decode_terminal_state(std::string_view payload) {
+    auto view = decode_terminal_state_view(payload);
+    if (!view)
+        return std::nullopt;
+
+    return std::string(*view);
+}
+
+// 将 32 位大端 terminal_id 作为 data 封装进 terminal_state 的 [u32 len=4][u32 terminal_id] 负载中。
+// 约定：
+//   - Request 中 terminal_id == 0（或 data 为空 / "start"）表示请求启动新 Shell；
+//   - Request 中 terminal_id > 0 表示请求关闭指定 terminal_id 的 Shell；
+//   - Response / Event 中携带对应的 4 字节大端 terminal_id。
+export inline std::string encode_terminal_state_id(std::uint32_t terminal_id) {
+    std::string out;
+    out.reserve(8);
+    append_be(out, static_cast<std::uint32_t>(sizeof(std::uint32_t)));
+    append_be(out, terminal_id);
+    return out;
+}
+
+// 从 terminal_state 负载 [u32 len][data] 中零拷贝解析出 terminal_id：
+//   - 若 data 为空或 "start"：返回 0（代表启动新 Shell）；
+//   - 若 data 恰为 4 字节：按大端序 u32 解析 terminal_id。
+export inline std::optional<std::uint32_t> decode_terminal_state_id(std::string_view payload) {
+    auto data = decode_terminal_state_view(payload);
+    if (!data)
+        return std::nullopt;
+
+    if (data->empty() || *data == "start")
+        return std::uint32_t{0};
+
+    if (data->size() == sizeof(std::uint32_t))
+        return read_be<std::uint32_t>(data->data());
+
+    return std::nullopt;
+}

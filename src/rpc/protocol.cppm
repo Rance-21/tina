@@ -21,7 +21,7 @@ export enum class Method : std::uint16_t {
     workspace_write_file = 0x0015,    // 请求：保存完整的 UTF-8 文本文件。
 
     terminal_input = 0x0021,  // 请求：向默认 Shell 输入文本。
-    terminal_resize = 0x0022, // 请求：调整默认终端的行列数。
+    terminal_on_tab = 0x0022, // 请求：tab
     terminal_output = 0x0281, // 事件：推送终端输出。
     terminal_state = 0x0282,  // 事件：通知 Shell 启动、退出或重启。
 

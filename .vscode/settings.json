@@ -15,9 +15,10 @@
     // 使用项目预设固定 Clang，避免先前选择的 GCC 工具包覆盖模块编译配置。
     "cmake.useCMakePresets": "always",
     "cmake.configureOnOpen": true,
-    // 使用系统 clangd，随系统 LLVM 同步更新；模块解析和语义诊断由它负责。
+    // clangd 23 的依赖模块缓存可能过期；每次启动先清理它自己的 BMI，避免连续崩溃。
     "C_Cpp.intelliSenseEngine": "disabled",
-    "clangd.path": "/usr/bin/clangd",
+    "clangd.path": "/home/rance/projects/tina/.vscode/clangd-safe",
+    "clangd.useScriptAsExecutable": true,
     "clangd.arguments": [
         "--experimental-modules-support",
         "--background-index",

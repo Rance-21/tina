@@ -168,4 +168,19 @@ std::optional<std::uint64_t> decode_workspace_write_file(std::string_view payloa
     return *revision;
 }
 
+using ::decode_terminal_input;
+using ::decode_terminal_on_tab;
+using ::decode_terminal_output;
+using ::decode_terminal_payload;
+using ::decode_terminal_payload_view;
+using ::decode_terminal_state;
+using ::decode_terminal_state_id;
+using ::decode_terminal_state_view;
+using ::encode_terminal_input;
+using ::encode_terminal_on_tab;
+using ::encode_terminal_output;
+using ::encode_terminal_payload;
+using ::encode_terminal_state;
+using ::encode_terminal_state_id;
+
 } // namespace client
