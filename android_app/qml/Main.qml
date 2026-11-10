@@ -28,26 +28,27 @@ Window {
         onDocumentsChanged: {
             // 增量追加，已有编辑器及其撤销栈不会随列表更新被重建。
             const opened = documents
-            while (fileTabsModel.count < opened.length)
-                fileTabsModel.append({document: opened[fileTabsModel.count]})
+            while (editorDocuments.count < opened.length)
+                editorDocuments.append({document: opened[editorDocuments.count]})
         }
         onFileOpened: {
             rootCanvas.popupMode = "none"
             Qt.callLater(rootCanvas.focusCurrentEditor)
         }
         onBrowserChanged: fileList.updateEntries(entries)
+        onActiveTabChanged: Qt.callLater(rootCanvas.focusCurrentEditor)
     }
 
     Component.onCompleted: ffiBridge.connectToServer(serverHost, serverPort)
     Shortcut { sequence: "Ctrl+S"; onActivated: ffiBridge.saveCurrent() }
     Shortcut {
         sequence: "Ctrl+Tab"
-        onActivated: ffiBridge.selectDocument((ffiBridge.activeIndex + 1) % Math.max(1, fileTabsModel.count))
+        onActivated: ffiBridge.selectTab((ffiBridge.activeTabIndex + 1) % Math.max(1, ffiBridge.tabs.length))
     }
     Shortcut {
         sequence: "Ctrl+Shift+Tab"
-        onActivated: ffiBridge.selectDocument((ffiBridge.activeIndex - 1 + fileTabsModel.count)
-                                              % Math.max(1, fileTabsModel.count))
+        onActivated: ffiBridge.selectTab((ffiBridge.activeTabIndex - 1 + ffiBridge.tabs.length)
+                                         % Math.max(1, ffiBridge.tabs.length))
     }
     Shortcut { sequence: "Ctrl+P"; onActivated: rootCanvas.showFiles() }
     Shortcut {
@@ -64,14 +65,12 @@ Window {
         anchors.fill: parent
 
         // 状态控制
-        readonly property int currentTabIndex: ffiBridge.activeIndex
-
         // 右侧 AI Agent 窗口：默认不显示，输入 @AI 回车切换显示/关闭（点击别处不关闭）
         property bool agentWindowVisible: false
 
         // 对齐底部对话框弹出的窗口状态：
         // "none"   -> 不显示
-        // "menu"   -> 首字母输入 '@' 时展示的三行菜单 (AI / GIT / FILE)
+        // "menu"   -> 首字母输入 '@' 时展示的四行菜单 (AI / GIT / FILE / TERMINAL)
         // "git"    -> 输入 @GIT 回车后，把当前窗口变成横向可滑动的 Git 树
         // "folder" -> 点击左侧 Folder 按钮，或输入 @FILE 回车后弹出的文件窗口
         property string popupMode: "none"
@@ -83,12 +82,15 @@ Window {
         readonly property real rightAgentWidth: Math.min(320, width * 0.3)
         readonly property real codeLeftMargin: leftColumnWidth + 10
         readonly property real codeRightMargin: agentWindowVisible ? rightAgentWidth + 20 : 20
-        readonly property real bottomInputHeight: 43
         readonly property real bottomMargin: 18
 
-        ListModel { id: fileTabsModel }
+        ListModel { id: editorDocuments }
 
         function focusCurrentEditor() {
+            if (ffiBridge.terminalActive) {
+                bottomDialogBar.focusInput()
+                return
+            }
             const pane = editors.itemAt(ffiBridge.activeIndex) as CodePane
             if (pane) pane.focusEditor()
         }
@@ -101,7 +103,7 @@ Window {
             fileList.forceActiveFocus()
         }
 
-        // @ 出来的三行菜单数据：左侧图标，往右字 (AI / GIT / FILE)
+        // @ 出来的菜单数据：左侧图标，往右字 (AI / GIT / FILE / TERMINAL)
         ListModel {
             id: atMenuModel
             ListElement {
@@ -118,6 +120,11 @@ Window {
                 cmdKey: "FILE"
                 iconName: "folder"
                 iconColor: "#34d399"
+            }
+            ListElement {
+                cmdKey: "TERMINAL"
+                iconName: "terminal"
+                iconColor: "#a5b4fc"
             }
         }
 
@@ -224,13 +231,13 @@ Window {
                 anchors.rightMargin: rootCanvas.codeRightMargin
                 Repeater {
                     id: editors
-                    model: fileTabsModel
+                    model: editorDocuments
                     delegate: CodePane {
                         required property int index
                         anchors.fill: parent
                         bridge: ffiBridge
                         active: index === ffiBridge.activeIndex
-                        bottomOverlayHeight: rootCanvas.bottomMargin + rootCanvas.bottomInputHeight
+                        bottomOverlayHeight: rootCanvas.bottomMargin + bottomDialogBar.height
                     }
                 }
             }
@@ -249,7 +256,7 @@ Window {
         }
 
         // ====================================================================
-        // 1. 左侧：单文件标签页区
+        // 1. 左侧：按打开顺序混排文件和终端标签
         //    - 区域本身不模糊、无分界线、底部无小横线
         //    - 每个标签缩短、紧贴屏幕左侧（左边取消圆角 flatLeftEdge: true，仅右边圆角）
         //    - 标签内部透明模糊，选中高亮
@@ -269,55 +276,72 @@ Window {
                 anchors.fill: parent
                 spacing: 10
                 clip: true
-                model: fileTabsModel
+                model: ffiBridge.tabs
+                currentIndex: ffiBridge.activeTabIndex
                 ScrollBar.vertical: ScrollBar {}
                 delegate: Item {
                     id: tabDelegate
                     required property int index
-                    required property WorkspaceDocument document
+                    required property var modelData
+                    readonly property WorkspaceDocument document: modelData as WorkspaceDocument
+                    readonly property TerminalSession terminal: modelData as TerminalSession
+                    readonly property bool dirty: document !== null && document.dirty
+                    readonly property bool isSelected: index === ffiBridge.activeTabIndex
+                    objectName: terminal ? "terminalTab:" + terminal.sessionId : "fileTab:" + document.path
                     width: leftTabsContainer.width
                     height: 48
-                    readonly property bool isSelected: index === ffiBridge.activeIndex
                     GlassPanel {
                         anchors.fill: parent
                         blurSource: backgroundAndCodeScene
                         cornerRadius: 14
                         flatLeftEdge: true
                         blurRadius: 24
-                        highlightGlow: tabDelegate.isSelected || tabDelegate.document.dirty
+                        highlightGlow: tabDelegate.isSelected || tabDelegate.dirty
                         tintColor: tabDelegate.isSelected ? "#98203a68" : "#58101726"
                         // 未保存标签边缘用琥珀色，与蓝色选中态区分。
-                        borderColor: tabDelegate.document.dirty ? "#ffd18b"
+                        borderColor: tabDelegate.dirty ? "#ffd18b"
                                      : tabDelegate.isSelected ? "#c06cb8ff" : "#348aa8d8"
-                        borderWidth: tabDelegate.document.dirty ? 2 : 1
+                        borderWidth: tabDelegate.dirty ? 2 : 1
                     }
                     Rectangle {
                         width: 3
                         height: parent.height
-                        color: tabDelegate.document.dirty ? "#ffd18b" : "#63b3ed"
-                        visible: tabDelegate.isSelected || tabDelegate.document.dirty
+                        color: tabDelegate.dirty ? "#ffd18b" : "#63b3ed"
+                        visible: tabDelegate.isSelected || tabDelegate.dirty
                     }
                     Text {
                         anchors.fill: parent
-                        anchors.leftMargin: 10
+                        anchors.leftMargin: tabDelegate.terminal ? 30 : 10
                         anchors.rightMargin: 8
                         verticalAlignment: Text.AlignVCenter
-                        text: (tabDelegate.document.dirty ? "• " : "") + tabDelegate.document.name
+                        text: tabDelegate.terminal ? tabDelegate.terminal.title
+                              : (tabDelegate.dirty ? "• " : "") + tabDelegate.document.name
                         color: tabDelegate.isSelected ? "#ffffff" : "#b0c4de"
                         font.pixelSize: 13
                         elide: Text.ElideRight
+                    }
+                    UiIcon {
+                        visible: tabDelegate.terminal !== null
+                        anchors.left: parent.left
+                        anchors.leftMargin: 10
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: 14
+                        height: 14
+                        name: "terminal"
+                        color: tabDelegate.terminal && tabDelegate.terminal.busy ? "#ffd18b" : "#a5b4fc"
                     }
                     MouseArea {
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
-                            ffiBridge.selectDocument(tabDelegate.index)
+                            ffiBridge.selectTab(tabDelegate.index)
                             rootCanvas.focusCurrentEditor()
                         }
                     }
                     ToolTip.visible: tabHover.hovered
-                    ToolTip.text: tabDelegate.document.path
+                    ToolTip.text: tabDelegate.terminal ? tabDelegate.terminal.title
+                                  + (tabDelegate.terminal.busy ? " · 执行中" : "") : tabDelegate.document.path
                     HoverHandler { id: tabHover }
                 }
             }
@@ -514,17 +538,18 @@ Window {
         // ====================================================================
         // 3. 与底部输入框对齐的毛玻璃弹窗。
         //    支持三种状态：
-        //    - "menu"   : 首字母输入 '@' 时出现的三行选项（左侧图标，往右字：AI / GIT / FILE）
-        //    - "git"    : 输入 @GIT 回车后，把当前三行窗口变成横向可滑动（<- / ->）的 Git 树
+        //    - "menu"   : 首字母输入 '@' 时出现的四行选项（AI / GIT / FILE / TERMINAL）
+        //    - "git"    : 输入 @GIT 回车后，把当前菜单窗口变成横向可滑动（<- / ->）的 Git 树
         //    - "folder" : 点击 Folder 按钮或输入 @FILE 回车后弹出的文件列表
         //    以上弹窗均在点击别处时关闭。
         // ====================================================================
         Item {
             id: alignedPopupWindow
+            objectName: "commandMenuPopup"
             // 左右严格与下方对话框（bottomDialogBar）对齐
             x: bottomDialogBar.x
             width: bottomDialogBar.width
-            height: rootCanvas.popupMode === "menu" ? 180
+            height: rootCanvas.popupMode === "menu" ? 12 * 2 + atMenuModel.count * 48 + (atMenuModel.count - 1) * 6
                     : rootCanvas.popupMode === "folder" ? Math.min(380, bottomDialogBar.y - 24) : 190
             y: bottomDialogBar.y - height - 10
             visible: rootCanvas.popupMode !== "none"
@@ -551,7 +576,7 @@ Window {
             }
 
             // ----------------------------------------------------------------
-            // 状态 A ("menu")：@ 出来的三行窗口（左侧图标，往右字：AI / GIT / FILE）
+            // 状态 A ("menu")：@ 菜单（AI / GIT / FILE / TERMINAL）
             // ----------------------------------------------------------------
             ColumnLayout {
                 anchors.fill: parent
@@ -564,11 +589,12 @@ Window {
                     delegate: Rectangle {
                         id: menuRow
                         required property var model
+                        objectName: "commandMenu:" + model.cmdKey
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         radius: 12
-                        readonly property string currentFilter: cmdInput.text.length > 1
-                                                                ? cmdInput.text.substring(1).trim().toUpperCase()
+                        readonly property string currentFilter: bottomDialogBar.inputText.length > 1
+                                                                ? bottomDialogBar.inputText.substring(1).trim().split(/\s+/)[0].toUpperCase()
                                                                 : ""
                         readonly property bool isMatched: currentFilter.length > 0 && menuRow.model.cmdKey.startsWith(currentFilter)
                         color: rowMouse.containsMouse
@@ -601,7 +627,7 @@ Window {
                                 }
                             }
 
-                            // 往右字：AI / GIT / FILE
+                            // 往右字：AI / GIT / FILE / TERMINAL
                             Text {
                                 Layout.fillWidth: true
                                 text: menuRow.model.cmdKey
@@ -618,8 +644,13 @@ Window {
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
-                                cmdInput.text = "@" + menuRow.model.cmdKey
-                                rootCanvas.submitCurrentInput()
+                                if (menuRow.model.cmdKey === "TERMINAL") {
+                                    bottomDialogBar.inputText = "@terminal "
+                                    bottomDialogBar.focusInput()
+                                } else {
+                                    bottomDialogBar.inputText = "@" + menuRow.model.cmdKey
+                                    rootCanvas.submitCurrentInput()
+                                }
                             }
                         }
                     }
@@ -988,9 +1019,8 @@ Window {
             }
         }
 
-        // 4. 底部输入框，两端按钮共用外框的高度和圆角。
-        // ====================================================================
-        Item {
+        // 底部对话框直接作为终端；顶部手柄可向上拖高。
+        TerminalPanel {
             id: bottomDialogBar
             objectName: "bottomDialogBar"
             anchors.left: parent.left
@@ -999,148 +1029,57 @@ Window {
             anchors.leftMargin: rootCanvas.codeLeftMargin
             anchors.rightMargin: rootCanvas.codeRightMargin
             anchors.bottomMargin: rootCanvas.bottomMargin
-            height: rootCanvas.bottomInputHeight
-
-            GlassPanel {
-                anchors.fill: parent
-                blurSource: backgroundAndCodeScene
-                // 底层场景与根画布同原点，窗口改高时也要更新取样位置。
-                sampleOrigin: Qt.point(bottomDialogBar.x, bottomDialogBar.y)
-                cornerRadius: height / 2
-                blurRadius: 32
-                highlightGlow: cmdInput.activeFocus
-                tintColor: cmdInput.activeFocus ? "#82141e32" : "#68101726"
-                borderColor: cmdInput.activeFocus ? "#886ab4ff" : "#408aa8d8"
-                borderWidth: cmdInput.activeFocus ? 1.4 : 1.1
+            bridge: ffiBridge
+            blurSource: backgroundAndCodeScene
+            folderOpen: rootCanvas.popupMode === "folder"
+            onFolderRequested: function(projects) {
+                if (!projects && rootCanvas.popupMode === "folder")
+                    rootCanvas.popupMode = "none"
+                else
+                    rootCanvas.showFiles(projects)
             }
-
-            RowLayout {
-                anchors.fill: parent
-                spacing: 10
-
-                Rectangle {
-                    id: folderButton
-                    objectName: "folderButton"
-                    Layout.preferredWidth: bottomDialogBar.height
-                    Layout.fillHeight: true
-                    radius: height / 2
-                    color: rootCanvas.popupMode === "folder"
-                           ? "#483b82f6"
-                           : (folderMouse.containsMouse ? "#32ffffff" : "#1cffffff")
-                    border.color: rootCanvas.popupMode === "folder" ? "#7cc4ff" : "#388aa8d8"
-                    border.width: 1.1
-
-                    UiIcon {
-                        anchors.centerIn: parent
-                        name: "folder"
-                        color: rootCanvas.popupMode === "folder" ? "#ffffff" : "#d0e0ff"
-                        width: 20
-                        height: 20
-                    }
-
-                    MouseArea {
-                        id: folderMouse
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            if (rootCanvas.popupMode === "folder")
-                                rootCanvas.popupMode = "none"
-                            else
-                                rootCanvas.showFiles()
-                        }
-                        // 触屏长按可切换项目，树顶部不需要额外按钮。
-                        onPressAndHold: rootCanvas.showFiles(true)
-                    }
-                }
-
-                // 中间命令行 / @ 输入框
-                TextField {
-                    id: cmdInput
-                    objectName: "commandInput"
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    verticalAlignment: TextInput.AlignVCenter
-                    color: "#f0f6ff"
-                    selectionColor: "#4058a6ff"
-                    selectedTextColor: "#ffffff"
-                    font.family: "monospace"
-                    font.pixelSize: 16
-                    background: Item {}
-
-                    onTextChanged: {
-                        if (text.startsWith("@")) {
-                            rootCanvas.popupMode = "menu"
-                        } else if (rootCanvas.popupMode === "menu") {
-                            rootCanvas.popupMode = "none"
-                        }
-                    }
-
-                    Keys.onReturnPressed: rootCanvas.submitCurrentInput()
-                    Keys.onEnterPressed: rootCanvas.submitCurrentInput()
-                    Keys.onDownPressed: {
-                        if (rootCanvas.popupMode === "folder") fileList.forceActiveFocus()
-                    }
-                }
-
-                // 右边：向上箭头提交按钮
-                Rectangle {
-                    id: submitButton
-                    objectName: "submitButton"
-                    Layout.preferredWidth: bottomDialogBar.height
-                    Layout.fillHeight: true
-                    radius: height / 2
-                    color: submitMouse.pressed
-                           ? "#2563eb"
-                           : (submitMouse.containsMouse ? "#3b82f6" : "#38284878")
-                    border.color: "#788cc0ff"
-                    border.width: 1.2
-
-                    UiIcon {
-                        anchors.centerIn: parent
-                        name: "arrow-up"
-                        color: "#f4f8ff"
-                        width: 18
-                        height: 18
-                    }
-
-                    MouseArea {
-                        id: submitMouse
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: rootCanvas.submitCurrentInput()
-                    }
-                }
+            onSubmitted: rootCanvas.submitCurrentInput()
+            onInputTextChanged: {
+                commandError = ""
+                if (inputText.startsWith("@")) rootCanvas.popupMode = "menu"
+                else if (rootCanvas.popupMode === "menu") rootCanvas.popupMode = "none"
             }
         }
 
         // 提交处理逻辑：
         // - @AI 回车   -> 切换右侧 AI 窗口显示/关闭（展示时带分界线与模糊，点击别处不关闭，再次 @AI 关闭）
         // - @FILE 回车 -> 等同于点击左侧 Folder 按钮，打开项目列表或当前项目文件树（点击别处关闭）
-        // - @GIT 回车  -> 把当前三行窗口变成横向可滑动的 Git 树（点击别处关闭）
-        // - 其他 @...  -> 关闭三行弹窗并提交给 Agent
+        // - @GIT 回车  -> 把当前菜单窗口变成横向可滑动的 Git 树（点击别处关闭）
+        // - @TERMINAL add [id] / del id -> 管理左侧终端标签
+        // - 其他 @...  -> 关闭菜单并提交给 Agent
         // - 非 @ 开头  -> 作为命令行提交
         // ====================================================================
         function submitCurrentInput() {
-            const raw = cmdInput.text.trim()
-            if (raw.length === 0) {
-                return
-            }
-
-            if (raw.startsWith("@")) {
-                const upper = raw.toUpperCase()
+            const raw = bottomDialogBar.inputText
+            if (raw.trim().startsWith("@")) {
+                const upper = raw.trim().toUpperCase()
+                if (upper.split(/\s+/)[0] === "@TERMINAL") {
+                    // 先清掉来源草稿，避免新增/删除后误清另一个终端的输入。
+                    bottomDialogBar.inputText = ""
+                    if (!ffiBridge.handleTerminalCommand(raw)) {
+                        bottomDialogBar.inputText = raw
+                        bottomDialogBar.commandError = ffiBridge.message
+                    }
+                    rootCanvas.popupMode = "none"
+                    Qt.callLater(bottomDialogBar.focusInput)
+                    return
+                }
                 ffiBridge.submitAgentInput(raw)
 
                 if (upper === "@AI") {
                     rootCanvas.agentWindowVisible = !rootCanvas.agentWindowVisible
-                    cmdInput.text = ""
+                    bottomDialogBar.inputText = ""
                     rootCanvas.popupMode = "none"
                 } else if (upper === "@FILE") {
-                    cmdInput.text = ""
+                    bottomDialogBar.inputText = ""
                     rootCanvas.showFiles()
                 } else if (upper === "@GIT") {
-                    cmdInput.text = ""
+                    bottomDialogBar.inputText = ""
                     rootCanvas.popupMode = "git"
                 } else {
                     const titleText = raw.substring(1).trim()
@@ -1154,12 +1093,12 @@ Window {
                             detailText: "等待后端 FFI / RPC Agent 服务响应..."
                         })
                     }
-                    cmdInput.text = ""
+                    bottomDialogBar.inputText = ""
                     rootCanvas.popupMode = "none"
                 }
             } else {
-                ffiBridge.submitCommand(raw)
-                cmdInput.text = ""
+                if (ffiBridge.submitCommand(raw))
+                    bottomDialogBar.inputText = ""
                 rootCanvas.popupMode = "none"
             }
         }

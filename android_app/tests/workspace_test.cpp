@@ -31,6 +31,12 @@ QString pathOf(const QByteArray &payload) {
     const auto size = qFromBigEndian<quint16>(reinterpret_cast<const uchar *>(payload.constData()));
     return QString::fromUtf8(payload.mid(2, size));
 }
+QByteArray terminalPayload(quint32 id, const QByteArray &bytes) {
+    return integer(quint32(bytes.size())) + integer(id) + bytes;
+}
+QByteArray terminalState(quint32 id) {
+    return integer(quint32(4)) + integer(id);
+}
 
 struct Call {
     QPointer<QTcpSocket> peer;
@@ -49,6 +55,7 @@ class FakeServer : public QObject {
     quint64 revision = 0xfedcba9876543210ULL;
     QList<Call> calls;
     std::function<bool(const Call &)> intercept;
+    quint32 nextTerminalId{1};
 
     FakeServer() {
         if (!server.listen(QHostAddress::LocalHost))
@@ -99,6 +106,13 @@ class FakeServer : public QObject {
                                 + integer(quint16(0)) + payload);
     }
 
+    void terminalEvent(quint16 method, const QByteArray &payload) {
+        if (!calls.isEmpty() && calls.last().peer)
+            calls.last().peer->write(integer(quint32(13 + payload.size())) + char(3)
+                                    + integer(quint64(0)) + integer(method)
+                                    + integer(quint16(0)) + payload);
+    }
+
     int count(quint16 method) const {
         return std::count_if(calls.begin(), calls.end(), [method](const Call &call) {
             return call.method == method;
@@ -107,6 +121,23 @@ class FakeServer : public QObject {
 
     void handle(const Call &call) {
         switch (call.method) {
+        case 0x282: {
+            const auto id = qFromBigEndian<quint32>(reinterpret_cast<const uchar *>(call.payload.constData() + 4));
+            respond(call, 0, terminalState(id ? id : nextTerminalId++));
+            break;
+        }
+        case 0x21: {
+            const auto id = qFromBigEndian<quint32>(reinterpret_cast<const uchar *>(call.payload.constData() + 4));
+            respond(call, 0, terminalPayload(id, "OK"));
+            terminalEvent(0x281, terminalPayload(id, call.payload.mid(8) + "\r\n"));
+            terminalEvent(0x282, terminalState(id));
+            break;
+        }
+        case 0x22: {
+            const auto id = qFromBigEndian<quint32>(reinterpret_cast<const uchar *>(call.payload.constData() + 4));
+            respond(call, 0, terminalPayload(id, call.payload.mid(8) + "pleted"));
+            break;
+        }
         case 1: respond(call, 0, "PONG"); break;
         case 0x11: respond(call, 0, string("demo") + string("other"), true); break;
         case 0x13: {
@@ -170,6 +201,168 @@ QQuickItem *findVisualItem(QQuickItem *root, const QString &name) {
 class WorkspaceTest : public QObject {
     Q_OBJECT
   private slots:
+    void terminalRingAndSplitControlSequences() {
+        TerminalSession terminal(1);
+        const auto unicode = QString::fromUtf8("中文🙂").toUtf8();
+        for (auto byte : unicode)
+            terminal.appendOutput(QByteArray(1, byte));
+        QCOMPARE(terminal.output(), QString::fromUtf8(unicode));
+        terminal.appendOutput("\r\n\x1b[3");
+        terminal.appendOutput("1mred\x1b[0m\x1b]0;ignored");
+        terminal.appendOutput("\x1b\\\r\nprogress 100%");
+        terminal.appendOutput("\rOK\x1b[K\r\n");
+        QVERIFY(terminal.output().endsWith("red\nOK\n"));
+        QVERIFY(!terminal.output().contains("ignored"));
+        terminal.clear();
+        terminal.appendOutput(QByteArray(TerminalSession::BufferCapacity * 3, 'x') + "tail");
+        QCOMPARE(terminal.output().size(), TerminalSession::BufferCapacity);
+        QVERIFY(terminal.output().endsWith("tail"));
+        terminal.appendOutput(QByteArray("\r\nrow").repeated(TerminalSession::MaxLines * 2));
+        QCOMPARE(terminal.output().count('\n'), TerminalSession::MaxLines);
+        QVERIFY(!terminal.output().contains('x'));
+        terminal.clear();
+        QCOMPARE(terminal.output(), QString());
+    }
+
+    void terminalSessionsCompletionAndReconnect() {
+        FakeServer server;
+        FfiClientBridge bridge;
+        bridge.connectToServer("127.0.0.1", server.server.serverPort());
+        QTRY_VERIFY(bridge.activeTerminal() && bridge.activeTerminal()->available());
+        QPointer<TerminalSession> first = bridge.activeTerminal();
+        first->setDraft("first draft");
+        bridge.createTerminal();
+        QTRY_VERIFY(bridge.activeTerminal()->available());
+        auto *second = bridge.activeTerminal();
+        second->setDraft("com");
+        bridge.completeTerminalInput();
+        QTRY_COMPARE(second->draft(), QString("completed"));
+        QCOMPARE(first->draft(), QString("first draft"));
+        QVERIFY(bridge.submitCommand(" echo second "));
+        QTRY_VERIFY(second->output().contains(" echo second \n"));
+        QVERIFY(first->output().isEmpty());
+        bridge.selectTerminal(0);
+        QCOMPARE(bridge.activeTerminal(), first.data());
+        server.terminalEvent(0x281, terminalPayload(second->terminalId(), "background\r\n"));
+        QTRY_VERIFY(second->output().contains("background"));
+        QVERIFY(first->output().isEmpty());
+        // 补全返回之前继续编辑，迟到结果不能覆盖新的草稿。
+        std::optional<Call> completion;
+        server.intercept = [&](const Call &call) {
+            if (call.method == 0x22) { completion = call; return true; }
+            return false;
+        };
+        first->setDraft("old");
+        bridge.completeTerminalInput();
+        QTRY_VERIFY(completion.has_value());
+        first->setDraft("new");
+        server.respond(*completion, 0, terminalPayload(first->terminalId(), "obsolete"));
+        QTRY_VERIFY(!first->completing());
+        QCOMPARE(first->draft(), QString("new"));
+        server.intercept = {};
+        const auto previousId = first->terminalId();
+        const auto inputCalls = server.count(0x21);
+        server.calls.last().peer->abort();
+        QTRY_VERIFY(!bridge.connected());
+        QVERIFY(!first->available());
+        QTRY_VERIFY_WITH_TIMEOUT(first->available(), 5000);
+        QVERIFY(first->terminalId() != previousId);
+        QCOMPARE(first->sessionId(), 1); // 用户编号独立于重连后重新分配的 RPC ID。
+        QCOMPARE(server.count(0x21), inputCalls);
+        QVERIFY(second->output().contains("background"));
+        QCOMPARE(first->draft(), QString("new"));
+        bridge.closeTerminal(0);
+        QTRY_VERIFY(first.isNull());
+        QCOMPARE(bridge.terminals().size(), 1);
+        QCOMPARE(bridge.activeTerminal(), second);
+    }
+
+    void terminalCommandsAndMixedTabs() {
+        FakeServer server;
+        FfiClientBridge bridge;
+        bridge.connectToServer("127.0.0.1", server.server.serverPort());
+        QTRY_VERIFY(bridge.activeTerminal() && bridge.activeTerminal()->available());
+        auto *first = bridge.activeTerminal();
+        bridge.readFile("demo/main.cpp");
+        QTRY_VERIFY(document(bridge)->loaded());
+        auto *file = document(bridge);
+        QCOMPARE(bridge.tabs().size(), 2);
+        QCOMPARE(bridge.activeTabIndex(), 1);
+        QVERIFY(!bridge.terminalActive());
+        QVERIFY(bridge.handleTerminalCommand("  @TeRmInAl   ADD 7  "));
+        auto *seventh = bridge.activeTerminal();
+        QTRY_VERIFY(seventh->available());
+        QCOMPARE(seventh->sessionId(), 7);
+        QCOMPARE(bridge.activeTabIndex(), 2);
+        QVERIFY(bridge.terminalActive());
+        bridge.readFile("demo/other.cpp");
+        QTRY_VERIFY(document(bridge, 1)->loaded());
+        QCOMPARE(qvariant_cast<QObject *>(bridge.tabs()[0]), first);
+        QCOMPARE(qvariant_cast<QObject *>(bridge.tabs()[1]), file);
+        QCOMPARE(qvariant_cast<QObject *>(bridge.tabs()[2]), seventh);
+        QCOMPARE(qvariant_cast<QObject *>(bridge.tabs()[3]), document(bridge, 1));
+        bridge.selectTab(0);
+        QCOMPARE(bridge.activeTerminal(), first);
+        bridge.selectTab(1);
+        QCOMPARE(bridge.activeIndex(), 0);
+        QVERIFY(!bridge.terminalActive());
+        // 相同文件/终端索引也能从另一类标签切回来。
+        bridge.selectTerminal(0);
+        QVERIFY(bridge.terminalActive());
+        bridge.selectDocument(0);
+        QVERIFY(!bridge.terminalActive());
+        const auto shellRequests = server.count(0x282);
+        for (const auto &input : {"@terminal add 7", "@terminal del 42", "@terminal del",
+                                 "@terminal add 0", "@terminal del -1", "@terminal add nope",
+                                 "@terminal add 2147483648", "@terminal add 3 extra"})
+            QVERIFY2(!bridge.handleTerminalCommand(input), input);
+        QCOMPARE(server.count(0x282), shellRequests);
+        QCOMPARE(bridge.tabs().size(), 4);
+        QVERIFY(bridge.handleTerminalCommand("@terminal del 7"));
+        QCOMPARE(bridge.tabs().size(), 3);
+        QCOMPARE(bridge.activeTabIndex(), 1); // 删除后台终端，不切走当前文件。
+        QCOMPARE(document(bridge), file);
+        QVERIFY(bridge.handleTerminalCommand("@terminal add"));
+        QTRY_VERIFY(bridge.activeTerminal()->available());
+        QCOMPARE(bridge.activeTerminal()->sessionId(), 2);
+        QVERIFY(bridge.handleTerminalCommand("@terminal del 2"));
+        QVERIFY(!bridge.terminalActive());
+        QVERIFY(bridge.handleTerminalCommand("@terminal"));
+        QCOMPARE(bridge.activeTerminal(), first);
+        QVERIFY(bridge.terminalActive());
+        QVERIFY(bridge.handleTerminalCommand("@terminal del 1"));
+        QVERIFY(bridge.terminals().isEmpty());
+        QVERIFY(!bridge.terminalActive());
+        QVERIFY(bridge.handleTerminalCommand("@terminal add 5"));
+        QTRY_VERIFY(bridge.activeTerminal()->available());
+        QCOMPARE(bridge.activeTerminal()->sessionId(), 5);
+    }
+
+    void terminalEarlyEventsAndNoInputReplay() {
+        FakeServer server;
+        server.intercept = [&](const Call &call) {
+            if (call.method == 0x282) {
+                server.terminalEvent(0x281, terminalPayload(42, "early\r\n"));
+                server.respond(call, 0, terminalState(42), true);
+                return true;
+            }
+            if (call.method == 0x21) {
+                server.respond(call, 11, terminalPayload(42, "busy"));
+                return true;
+            }
+            return false;
+        };
+        FfiClientBridge bridge;
+        bridge.connectToServer("127.0.0.1", server.server.serverPort());
+        QTRY_VERIFY(bridge.activeTerminal() && bridge.activeTerminal()->available());
+        QCOMPARE(bridge.activeTerminal()->output(), QString("early\n"));
+        QVERIFY(bridge.submitCommand("one-shot"));
+        QTRY_VERIFY(!bridge.activeTerminal()->submitting());
+        QTest::qWait(800); // 超过首个读请求的重试间隔。
+        QCOMPARE(server.count(0x21), 1);
+        QVERIFY(bridge.activeTerminal()->output().contains("busy"));
+    }
+
     void browserRetryEventsAndOutOfOrder() {
         FakeServer server;
         FfiClientBridge bridge;
@@ -421,7 +614,7 @@ class WorkspaceTest : public QObject {
         QTRY_COMPARE(coloredPixels(true), 0);
         // 每一种菜单、文件树和模型图标都必须有实际绘制内容。
         for (const auto *name : {"folder", "file", "link", "arrow-up", "sparkle",
-                                 "diamond", "cluster", "branch", "more"}) {
+                                 "diamond", "cluster", "branch", "more", "terminal"}) {
             icon->setProperty("name", "");
             QTRY_COMPARE(coloredPixels(false), 0);
             icon->setProperty("name", name);
@@ -433,6 +626,7 @@ class WorkspaceTest : public QObject {
         FakeServer server;
         qmlRegisterType<FfiClientBridge>("TinaIde", 1, 0, "FfiClientBridge");
         qmlRegisterUncreatableType<WorkspaceDocument>("TinaIde", 1, 0, "WorkspaceDocument", "test");
+        qmlRegisterUncreatableType<TerminalSession>("TinaIde", 1, 0, "TerminalSession", "test");
         QQmlApplicationEngine engine;
         QList<QQmlError> warnings;
         connect(&engine, &QQmlEngine::warnings, &engine, [&](const QList<QQmlError> &errors) {
@@ -456,17 +650,92 @@ class WorkspaceTest : public QObject {
         auto *folderButton = findVisualItem(window->contentItem(), "folderButton");
         auto *submitButton = findVisualItem(window->contentItem(), "submitButton");
         QVERIFY(bar && codeArea && folderButton && submitButton);
+        QCOMPARE(bar->height(), 43.0);
+        QVERIFY(!findVisualItem(window->contentItem(), "newTerminalButton"));
+        QVERIFY(!findVisualItem(window->contentItem(), "closeTerminal:0"));
         // 悬浮输入框与代码区等宽，代码区本身仍延伸到窗口底边。
         QCOMPARE(bar->mapToItem(codeArea, QPointF()).x(), 0.0);
         QCOMPARE(bar->width(), codeArea->width());
         QCOMPARE(codeArea->mapToScene(QPointF(0, codeArea->height())).y(), qreal(window->height()));
-        QCOMPARE(folderButton->mapToItem(bar, QPointF()), QPointF());
-        QCOMPARE(folderButton->width(), bar->height());
-        QCOMPARE(folderButton->height(), bar->height());
+        QCOMPARE(folderButton->mapToItem(bar, QPointF()), QPointF(0, bar->height() - 43));
+        QCOMPARE(folderButton->width(), 43.0);
+        QCOMPARE(folderButton->height(), 43.0);
         QCOMPARE(submitButton->mapToItem(bar, QPointF(submitButton->width(), submitButton->height())),
                  QPointF(bar->width(), bar->height()));
-        QCOMPARE(submitButton->width(), bar->height());
-        QCOMPARE(submitButton->height(), bar->height());
+        QCOMPARE(submitButton->width(), 43.0);
+        QCOMPARE(submitButton->height(), 43.0);
+        auto *resizeHandle = findVisualItem(window->contentItem(), "terminalResizeHandle");
+        QVERIFY(resizeHandle);
+        const auto handleCenter = resizeHandle->mapToScene(QPointF(resizeHandle->width() / 2, 8)).toPoint();
+        const auto originalHeight = bar->height();
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, handleCenter);
+        QTest::mouseMove(window, handleCenter - QPoint(0, 200), 30);
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, handleCenter - QPoint(0, 200));
+        QTRY_COMPARE(bar->height(), originalHeight + 200);
+        const auto newHandleCenter = resizeHandle->mapToScene(QPointF(resizeHandle->width() / 2, 8)).toPoint();
+        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, newHandleCenter);
+        QTest::mouseMove(window, newHandleCenter + QPoint(0, 300), 30);
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, newHandleCenter + QPoint(0, 300));
+        QTRY_COMPARE(bar->height(), originalHeight);
+        bar->setProperty("requestedHeight", originalHeight);
+        QTRY_VERIFY(bridge->activeTerminal() && bridge->activeTerminal()->available());
+        command->forceActiveFocus();
+        command->setProperty("text", "echo terminal");
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(bridge->activeTerminal()->output().contains("echo terminal\n"));
+        QTRY_COMPARE(command->property("text").toString(), QString());
+        const auto outputLines = QString::fromUtf8("构建终端测试 · 中文和 emoji 🙂\r\n")
+                                     + "[1/3] Connecting to shell...\r\n"
+                                       "[2/3] Per-terminal ring buffer ready\r\n"
+                                       "[3/3] Build finished\r\n";
+        server.terminalEvent(0x281, terminalPayload(bridge->activeTerminal()->terminalId(), outputLines.toUtf8()));
+        QTRY_VERIFY(bridge->activeTerminal()->output().contains("Build finished"));
+        bar->setProperty("requestedHeight", 360);
+        QTest::qWait(100);
+        window->grabWindow().save(QStringLiteral("terminal-preview.png"));
+        bar->setProperty("requestedHeight", originalHeight);
+        command->setProperty("text", "com");
+        QTest::keyClick(window, Qt::Key_Tab);
+        QTRY_COMPARE(command->property("text").toString(), QString("completed"));
+        auto *firstTerminal = bridge->activeTerminal();
+        bridge->createTerminal();
+        QTRY_VERIFY(bridge->activeTerminal()->available());
+        QTRY_COMPARE(command->property("text").toString(), QString());
+        bridge->selectTerminal(0);
+        QCOMPARE(bridge->activeTerminal(), firstTerminal);
+        QTRY_COMPARE(command->property("text").toString(), QString("completed"));
+        command->setProperty("text", "@");
+        auto *terminalMenu = findVisualItem(window->contentItem(), "commandMenu:TERMINAL");
+        QVERIFY(terminalMenu);
+        QTRY_VERIFY(terminalMenu->isVisible());
+        QTest::qWait(160);
+        window->grabWindow().save(QStringLiteral("terminal-menu-preview.png"));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          terminalMenu->mapToScene(QPointF(terminalMenu->width() / 2, terminalMenu->height() / 2)).toPoint());
+        QTRY_COMPARE(command->property("text").toString(), QString("@terminal "));
+        command->setProperty("text", "@terminal add 7");
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(bridge->activeTerminal()->available());
+        QCOMPARE(bridge->activeTerminal()->sessionId(), 7);
+        QTRY_COMPARE(command->property("text").toString(), QString());
+        command->setProperty("text", "@terminal del 7");
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_COMPARE(bridge->terminals().size(), 2);
+        auto *remainingTerminal = bridge->activeTerminal();
+        remainingTerminal->setDraft("keep me");
+        command->setProperty("text", "@terminal add 7");
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_VERIFY(bridge->activeTerminal()->available());
+        QCOMPARE(remainingTerminal->draft(), QString());
+        remainingTerminal->setDraft("keep me");
+        command->setProperty("text", "@terminal del 7");
+        QTest::keyClick(window, Qt::Key_Return);
+        QTRY_COMPARE(bridge->activeTerminal(), remainingTerminal);
+        QCOMPARE(command->property("text").toString(), QString("keep me"));
+        command->setProperty("text", "@terminal del 999");
+        QTest::keyClick(window, Qt::Key_Return);
+        QCOMPARE(command->property("text").toString(), QString("@terminal del 999"));
+        QVERIFY(bar->property("commandError").toString().contains("999"));
         command->forceActiveFocus();
         command->setProperty("text", "@FILE");
         QTest::keyClick(window, Qt::Key_Return);
@@ -497,6 +766,12 @@ class WorkspaceTest : public QObject {
         QTRY_COMPARE(bridge->documents().size(), 1);
         QTRY_VERIFY(document(*bridge)->loaded());
         QCOMPARE(document(*bridge)->path(), QString("demo/main.cpp"));
+        QTRY_COMPARE(bar->height(), originalHeight);
+        auto *terminalTab = findVisualItem(window->contentItem(), "terminalTab:1");
+        auto *fileTab = findVisualItem(window->contentItem(), "fileTab:demo/main.cpp");
+        QVERIFY(terminalTab && fileTab);
+        QCOMPARE(terminalTab->parentItem(), fileTab->parentItem());
+        QCOMPARE(terminalTab->height(), fileTab->height());
         auto *editor = findVisualItem(window->contentItem(), "editor:demo/main.cpp");
         QVERIFY(editor);
         auto *viewport = findVisualItem(window->contentItem(), "codeViewport:demo/main.cpp");
@@ -512,7 +787,7 @@ class WorkspaceTest : public QObject {
         QTRY_VERIFY(!document(*bridge)->dirty());
         bridge->readFile("demo/other.cpp");
         QTRY_VERIFY(document(*bridge, 1)->loaded());
-        QTest::keyClick(window, Qt::Key_Tab, Qt::ControlModifier);
+        QTest::keyClick(window, Qt::Key_Tab, Qt::ControlModifier | Qt::ShiftModifier);
         QTRY_COMPARE(bridge->activeIndex(), 0);
         QCOMPARE(findVisualItem(window->contentItem(), "editor:demo/main.cpp"), editor);
         QTRY_VERIFY(editor->hasActiveFocus());

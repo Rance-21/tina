@@ -38,6 +38,9 @@ qt_add_executable(tina_ide_client
     src/main.cpp
     src/ffi_client_bridge.hpp
     src/ffi_client_bridge.cpp
+    src/terminal_session.hpp
+    src/terminal_session.cpp
+    src/terminal_bridge.cpp
     src/workspace_document.hpp
     src/workspace_document.cpp
     src/code_highlighter.hpp
@@ -61,6 +64,7 @@ qt_add_qml_module(tina_ide_client
         qml/GlassPanel.qml
         qml/CodePane.qml
         qml/UiIcon.qml
+        qml/TerminalPanel.qml
     RESOURCES
         "${wallpaper}"
 )
@@ -125,6 +129,8 @@ if(TINA_BUILD_TESTS AND NOT ANDROID)
     qt_add_executable(tina_workspace_test
         tests/workspace_test.cpp
         src/ffi_client_bridge.cpp src/ffi_client_bridge.hpp
+        src/terminal_session.cpp src/terminal_session.hpp
+        src/terminal_bridge.cpp
         src/workspace_document.cpp src/workspace_document.hpp
         src/code_highlighter.cpp src/code_highlighter.hpp
     )
@@ -135,7 +141,7 @@ if(TINA_BUILD_TESTS AND NOT ANDROID)
         Qt6::Core Qt6::Gui Qt6::Qml Qt6::Quick Qt6::QuickControls2 Qt6::Network Qt6::Test)
     qt_add_resources(tina_workspace_test test_wallpaper
         PREFIX "/qt/qml/TinaIde" FILES "${wallpaper}"
-        qml/Main.qml qml/CodePane.qml qml/GlassPanel.qml qml/UiIcon.qml)
+        qml/Main.qml qml/CodePane.qml qml/GlassPanel.qml qml/UiIcon.qml qml/TerminalPanel.qml)
     add_test(NAME workspace COMMAND tina_workspace_test)
     set_tests_properties(workspace PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=software")
 endif()

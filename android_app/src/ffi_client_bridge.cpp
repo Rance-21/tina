@@ -98,10 +98,16 @@ FfiClientBridge::FfiClientBridge(QObject *parent) : QObject(parent) {
         // 重连后读回最新版本；包括写入已成功但响应丢失的情况。
         for (auto *document : documents_)
             refreshDocument(document);
+        if (terminals_.isEmpty())
+            createTerminal();
+        else
+            for (auto *terminal : std::as_const(terminals_))
+                startTerminal(terminal); // 新 Shell，不重放断线前的命令。
     });
     connect(&socket_, &QTcpSocket::disconnected, this, [this] {
         input_.clear();
         failRequests(QStringLiteral("连接断开").toUtf8());
+        invalidateTerminals();
         for (auto *document : documents_) {
             document->stale_ = true;
             emit document->stateChanged();
@@ -194,9 +200,11 @@ void FfiClientBridge::completeRequest(quint64 token, quint16 status, const QByte
     auto it = requests_.find(token);
     if (it == requests_.end())
         return;
-    // 只重试读操作和临时错误。写操作结果不明时先 readFile，禁止盲目重放写请求。
+    // 只有无副作用的读操作可以重试；Shell 创建、输入、补全不可重放。
     const bool transient = status == 6 || status == 7 || status >= 10;
-    if (status && transient && it->method != WriteFile && it->attempts < 3 && connected()) {
+    const bool retryable = it->method == Ping || it->method == ListProjects
+                           || it->method == ListDir || it->method == ReadFile;
+    if (status && transient && retryable && it->attempts < 3 && connected()) {
         it->waiting = false;
         it->wireId = 0;
         it->deadline = clock_.elapsed() + 250 * it->attempts;
@@ -264,6 +272,10 @@ void FfiClientBridge::onReadyRead() {
                 else
                     applyDirectoryEntries(path, std::move(entries));
             }
+            continue;
+        }
+        if (kind == 3) {
+            handleTerminalEvent(method, payload);
             continue;
         }
         // 按请求 ID 和方法匹配，允许多个文件同时读取、响应乱序及迟到响应。
@@ -488,10 +500,13 @@ WorkspaceDocument *FfiClientBridge::currentDocument() const {
 }
 
 void FfiClientBridge::selectDocument(int index) {
-    if (index < 0 || index >= documents_.size() || index == activeIndex_)
+    if (index < 0 || index >= documents_.size())
         return;
-    activeIndex_ = index;
-    emit activeIndexChanged();
+    if (index != activeIndex_) {
+        activeIndex_ = index;
+        emit activeIndexChanged();
+    }
+    setActiveTab(documents_[index]);
 }
 
 void FfiClientBridge::readFile(const QString &path) {
@@ -510,7 +525,9 @@ void FfiClientBridge::readFile(const QString &path) {
     }
     auto *document = new WorkspaceDocument(path, this);
     documents_.append(document);
+    tabs_.append(document);
     emit documentsChanged();
+    emit tabsChanged();
     selectDocument(documents_.size() - 1);
     refreshDocument(document);
     emit fileOpened();
@@ -660,8 +677,26 @@ void FfiClientBridge::saveLocalVersion() {
     }
 }
 
-void FfiClientBridge::submitCommand(const QString &command) {
-    emit commandSubmitted(command);
+QVariantList FfiClientBridge::tabs() const {
+    QVariantList result;
+    for (auto *tab : tabs_)
+        result.append(QVariant::fromValue(tab));
+    return result;
+}
+
+void FfiClientBridge::setActiveTab(QObject *tab) {
+    if (activeTab_ == tab)
+        return;
+    activeTab_ = tab;
+    emit activeTabChanged();
+}
+
+void FfiClientBridge::selectTab(int index) {
+    auto *tab = tabs_.value(index, nullptr);
+    if (auto *document = qobject_cast<WorkspaceDocument *>(tab))
+        selectDocument(documents_.indexOf(document));
+    else if (auto *terminal = qobject_cast<TerminalSession *>(tab))
+        selectTerminal(terminals_.indexOf(terminal));
 }
 
 void FfiClientBridge::submitAgentInput(const QString &input) {

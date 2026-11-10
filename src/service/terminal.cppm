@@ -232,13 +232,13 @@ inline std::string parse_pty_tab_completion(std::string_view user_input, std::st
 //   2. 向 PTY Master 写入“Android 发来的字符串 + \t”；
 //   3. 用 poll() 读取 Bash Readline 返回的补全字节流，通过光标模拟器解析出纯净的补全命令；
 //   4. 再次发送 "\x05\x15" 清空 Readline 行缓冲，防止后续发送完整命令时内容重复叠加。
-inline std::optional<std::string> complete_tab_on_pty(int fd, std::string_view input) noexcept {
+std::optional<std::string> complete_tab_on_pty(int fd, std::string_view input) noexcept {
     // 第一步：发送 Ctrl+E (\x05) + Ctrl+U (\x15) 清除当前 PTY Readline 缓冲，并排空回显。
     if (!write_all_timed(fd, "\x05\x15"))
         return std::nullopt;
     drain_pty_input(fd, 15);
 
-    // 第二步：直接把 string_view 切片与 '\t' 写入 PTY，无需额外拷贝构造新 std::string。
+    // 第二步：直接把 string_view 切片与 '\t' 写入 PTY。
     if (!write_all_timed(fd, input) || !write_all_timed(fd, "\t"))
         return std::nullopt;
 

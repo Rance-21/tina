@@ -1,6 +1,7 @@
 #pragma once
 
 #include "workspace_document.hpp"
+#include "terminal_session.hpp"
 
 #include <QElapsedTimer>
 #include <QHash>
@@ -14,7 +15,7 @@
 
 namespace tina::ui {
 
-// Qt 异步套接字实现 ide.client 的四个 Workspace 操作。
+// Qt 异步套接字实现 ide.client 的 Workspace 和 Terminal 操作。
 // Android 不依赖服务端 Linux epoll / C++ 模块构建链，线上格式保持完全一致。
 class FfiClientBridge : public QObject {
     Q_OBJECT
@@ -26,6 +27,12 @@ class FfiClientBridge : public QObject {
     Q_PROPERTY(QVariantList documents READ documents NOTIFY documentsChanged)
     Q_PROPERTY(int activeIndex READ activeIndex WRITE selectDocument NOTIFY activeIndexChanged)
     Q_PROPERTY(QString message READ message NOTIFY messageChanged)
+    Q_PROPERTY(QVariantList terminals READ terminals NOTIFY terminalsChanged)
+    Q_PROPERTY(int activeTerminalIndex READ activeTerminalIndex WRITE selectTerminal NOTIFY activeTerminalChanged)
+    Q_PROPERTY(tina::ui::TerminalSession *activeTerminal READ activeTerminal NOTIFY activeTerminalChanged)
+    Q_PROPERTY(QVariantList tabs READ tabs NOTIFY tabsChanged)
+    Q_PROPERTY(int activeTabIndex READ activeTabIndex WRITE selectTab NOTIFY activeTabChanged)
+    Q_PROPERTY(bool terminalActive READ terminalActive NOTIFY activeTabChanged)
 
   public:
     explicit FfiClientBridge(QObject *parent = nullptr);
@@ -37,6 +44,12 @@ class FfiClientBridge : public QObject {
     QVariantList documents() const;
     int activeIndex() const { return activeIndex_; }
     QString message() const { return message_; }
+    QVariantList terminals() const;
+    int activeTerminalIndex() const { return activeTerminalIndex_; }
+    TerminalSession *activeTerminal() const;
+    QVariantList tabs() const;
+    int activeTabIndex() const { return tabs_.indexOf(activeTab_); }
+    bool terminalActive() const { return qobject_cast<TerminalSession *>(activeTab_) != nullptr; }
 
     Q_INVOKABLE void connectToServer(const QString &host, int port = 3490);
     Q_INVOKABLE void ping();
@@ -52,7 +65,14 @@ class FfiClientBridge : public QObject {
     Q_INVOKABLE void refreshCurrent();
     Q_INVOKABLE void useServerVersion();
     Q_INVOKABLE void saveLocalVersion();
-    Q_INVOKABLE void submitCommand(const QString &command);
+    Q_INVOKABLE void selectTab(int index);
+    Q_INVOKABLE bool createTerminal(int id = 0);
+    Q_INVOKABLE void selectTerminal(int index);
+    Q_INVOKABLE bool closeTerminal(int index);
+    Q_INVOKABLE bool handleTerminalCommand(const QString &input);
+    Q_INVOKABLE bool submitCommand(const QString &command);
+    Q_INVOKABLE void completeTerminalInput();
+    Q_INVOKABLE void interruptTerminal();
     Q_INVOKABLE void submitAgentInput(const QString &input);
 
   signals:
@@ -66,6 +86,10 @@ class FfiClientBridge : public QObject {
     void fileOpened();
     void commandSubmitted(const QString &command);
     void openAgentWindowRequested();
+    void terminalsChanged();
+    void activeTerminalChanged();
+    void tabsChanged();
+    void activeTabChanged();
 
   private:
     using Reply = std::function<void(quint16, const QByteArray &)>;
@@ -108,6 +132,12 @@ class FfiClientBridge : public QObject {
     void readChunk(WorkspaceDocument *document, std::shared_ptr<ReadTransfer> transfer);
     WorkspaceDocument *currentDocument() const;
     void setMessage(const QString &message);
+    void setActiveTab(QObject *tab);
+    void startTerminal(TerminalSession *terminal);
+    TerminalSession *findTerminal(quint32 id) const;
+    void handleTerminalEvent(quint16 method, const QByteArray &payload);
+    void invalidateTerminals();
+    void terminalError(TerminalSession *terminal, const QString &message);
 
     QTcpSocket socket_;
     QTimer pollTimer_;
@@ -126,6 +156,12 @@ class FfiClientBridge : public QObject {
     QList<WorkspaceDocument *> documents_;
     int activeIndex_{-1};
     QString message_;
+    QList<TerminalSession *> terminals_;
+    int activeTerminalIndex_{-1};
+    QList<QObject *> tabs_;
+    QObject *activeTab_{};
+    // start 的响应可能晚于首条输出；暂存同样有容量和会话数量上限。
+    QHash<quint32, QByteArray> earlyTerminalOutput_;
 };
 
 } // namespace tina::ui

@@ -25,6 +25,13 @@ Canvas {
         ctx.lineJoin = "round"
         ctx.beginPath()
         switch (icon.name) {
+        case "terminal":
+            ctx.moveTo(4, 6)
+            ctx.lineTo(10, 12)
+            ctx.lineTo(4, 18)
+            ctx.moveTo(13, 18)
+            ctx.lineTo(21, 18)
+            break
         case "folder":
             ctx.moveTo(2, 5)
             ctx.lineTo(9, 5)
