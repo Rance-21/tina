@@ -59,7 +59,7 @@ std::optional<Frame> build_workspace_list_dir_event(std::string_view rel_path) {
 // Workspace 模块服务端业务处理函数
 // ============================================================================
 
-// 处理 0x0011 (workspace_list_projects)：
+// 处理 0x0201 (workspace_list_projects)：
 // 列出 ~/projects 下的所有一级文件夹，响应格式为流式拼接的 [u16 nameLen][name bytes]。
 void handle_workspace_list_projects(Frame &frame) {
     if (!decode_workspace_list_projects(frame.payload)) {
@@ -118,7 +118,7 @@ void handle_workspace_list_projects(Frame &frame) {
     frame.payload = encode_workspace_list_projects(projects);
 }
 
-// 处理 0x0013 (workspace_list_dir)：
+// 处理 0x0202 (workspace_list_dir)：
 // 枚举 ~/projects/<path> 下的一级文件与文件夹（深度为 1，不递归展开子目录）。
 // 响应头部为 [u16 dirPathLen][dirPath bytes]，随后每个条目编码为 [u8 type][u16 nameLen][name bytes]，
 // 其中：type = 0（普通文件）、type = 1（目录）、type = 2（符号链接）。
@@ -155,7 +155,7 @@ void handle_workspace_list_dir(Frame &frame, std::string *watched_dir = nullptr)
         *watched_dir = std::move(req->path);
 }
 
-// 处理 0x0014 (workspace_read_file)：
+// 处理 0x0203 (workspace_read_file)：
 // 按 [offset, maxBytes] 分段读取 UTF-8 文件内容。
 // 采用乐观并发控制：每次 pread 读取前后各做一次 fstat 计算 revision，
 // 若前后 revision 一致则返回 [u64 fileSize][u64 revision][bytes...]；若不一致则自动重试。
@@ -239,7 +239,7 @@ void handle_workspace_read_file(Frame &frame) {
     }
 }
 
-// 处理 0x0015 (workspace_write_file)：
+// 处理 0x0204 (workspace_write_file)：
 // 带版本校验与临时文件原子替换的文件保存流程：
 //   1. 获取该文件路径的路径锁（防止多个 Worker 并发写同一文件）。
 //   2. 读取原文件当前 revision，与客户端期望的 revision 比对：
@@ -345,7 +345,7 @@ void handle_workspace_write_file(Frame &frame) {
     frame.payload = encode_workspace_write_file(new_rev);
 }
 
-// Workspace 模块请求统一分发入口（对应 Method 掩码分组 0x0010）。
+// Workspace 模块请求统一分发入口（对应 MethodGroup::workspace 0x0200）。
 void handle_workspace_request(Frame &frame, std::string *watched_dir = nullptr) {
     switch (frame.method) {
     case Method::workspace_list_projects:

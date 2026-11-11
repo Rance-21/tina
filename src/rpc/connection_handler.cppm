@@ -121,57 +121,49 @@ void complete_response(const std::weak_ptr<Connection> &weak, net::EventLoop &lo
     }
 }
 
-// Method 编号采用 16 位分组编码（如 0x0001、0x0011、0x0021）：
-// 用掩码 0xFFF0 提取高 12 位即可判断该请求所属的业务模块分组，低 4 位表示模块内具体方法。
-constexpr std::uint16_t method_group_mask = 0xfff0;
-constexpr std::uint16_t system_kv_group = 0x0000;      // 0x0001 (ping) 及 0x0002~0x0004 (KV)
-constexpr std::uint16_t workspace_group = 0x0010;      // 0x0011~0x0015 (Workspace 工作区操作)
-constexpr std::uint16_t terminal_group = 0x0020;       // 0x0021~0x0022 (Terminal 输入与 Tab 补全)
-constexpr std::uint16_t terminal_state_group = 0x0280; // 0x0282 (Terminal 启动/关闭请求)
-
-// 根据 Method 的掩码分组将请求路由到对应的业务模块。
-// 分支逻辑：
-//   1. 0x0000 分组（系统与 KV）：system_ping 直接无锁返回 PONG；其余交给加锁的 KV 服务处理。
-//   2. 0x0010 分组（Workspace）：交由 ide.server 中的 server::handle_workspace_request() 解码并处理。
-//   3. 0x0020 / 0x0280 分组（Terminal）：交由 ide.server_terminal 中的 server::TerminalManager 处理。
-//   4. 其他未知分组：统一返回 Status::unsupported。
+// Method 编号采用 16 位位域编码（[15:8] MethodGroup | [7] event_only | [6:0] op）：
+//   1. 先通过 is_event_only_method() 单指令位测试拦截仅限服务端推送的 Event 方法（Bit 7 == 1）。
+//   2. 再通过 method_group() 单指令位与（& 0xFF00）提取高 8 位业务分组，直接由紧凑跳转表路由到对应模块。
 void dispatch_request(Frame &request, KvState &kv, std::string &watched_dir,
                       server::TerminalManager *terminal_mgr, int conn_fd) {
-    const auto group =
-        static_cast<std::uint16_t>(std::to_underlying(request.method) & method_group_mask);
-
-    switch (group) {
-    case system_kv_group:
-        if (request.method == Method::system_ping) {
-            handle_ping(request);
-        } else {
-            std::lock_guard lock(kv.mutex);
-            kv.service.handle(request);
-        }
-        return;
-
-    case workspace_group:
-        server::handle_workspace_request(request, &watched_dir);
-        return;
-
-    case terminal_group:
-    case terminal_state_group:
-        if (terminal_mgr != nullptr &&
-            (request.method == Method::terminal_input ||
-             request.method == Method::terminal_on_tab ||
-             request.method == Method::terminal_state)) {
-            terminal_mgr->handle_request(request, conn_fd);
-            return;
-        }
-        request.status = Status::unsupported;
-        request.payload = "unsupported method";
-        return;
-
-    default:
+    if (is_event_only_method(request.method)) {
         request.status = Status::unsupported;
         request.payload = "unsupported method";
         return;
     }
+
+    switch (method_group(request.method)) {
+    case MethodGroup::system:
+        if (request.method == Method::system_ping) {
+            handle_ping(request);
+            return;
+        }
+        break;
+
+    case MethodGroup::kv: {
+        std::lock_guard lock(kv.mutex);
+        kv.service.handle(request);
+        return;
+    }
+
+    case MethodGroup::workspace:
+        server::handle_workspace_request(request, &watched_dir);
+        return;
+
+    case MethodGroup::terminal:
+        if (terminal_mgr != nullptr) {
+            terminal_mgr->handle_request(request, conn_fd);
+            return;
+        }
+        break;
+
+    case MethodGroup::git:
+    case MethodGroup::agent:
+        break;
+    }
+
+    request.status = Status::unsupported;
+    request.payload = "unsupported method";
 }
 
 // Worker 线程实际执行的单次请求处理函数。

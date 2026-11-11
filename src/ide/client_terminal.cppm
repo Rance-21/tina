@@ -11,9 +11,9 @@ export namespace client {
 // ============================================================================
 class TerminalClient {
   public:
-    // 收到 0x0281 (terminal_output) 终端输出事件时的回调：(terminal_id, output_text)
+    // 收到 0x0381 (terminal_output) 终端输出事件时的回调：(terminal_id, output_text)
     using OutputCallback = std::function<void(std::uint32_t, std::string_view)>;
-    // 收到 0x0282 (terminal_state) 命令执行完毕或退出事件时的回调：(terminal_id)
+    // 收到 0x0303 (terminal_state) 命令执行完毕或退出事件时的回调：(terminal_id)
     using StateCallback = std::function<void(std::uint32_t)>;
 
     explicit TerminalClient(std::string_view host = "127.0.0.1", std::string_view port = "3490")
@@ -23,19 +23,19 @@ class TerminalClient {
         });
     }
 
-    // 注册终端输出事件（0x0281）回调。
+    // 注册终端输出事件（0x0381）回调。
     void set_output_callback(OutputCallback callback) {
         std::lock_guard lock(mutex_);
         output_callback_ = std::move(callback);
     }
 
-    // 注册终端状态事件（0x0282，如 PROMPT_COMMAND 通知命令执行完毕）回调。
+    // 注册终端状态事件（0x0303，如 PROMPT_COMMAND 通知命令执行完毕）回调。
     void set_state_callback(StateCallback callback) {
         std::lock_guard lock(mutex_);
         state_callback_ = std::move(callback);
     }
 
-    // 0x0282 (terminal_state) 请求：启动一个新 Shell，返回服务端分配的 terminal_id。
+    // 0x0303 (terminal_state) 请求：启动一个新 Shell，返回服务端分配的 terminal_id。
     std::uint32_t start_terminal() {
         auto frame =
             rpc_.async_call(Method::terminal_state, encode_terminal_state_id(0)).get();
@@ -53,7 +53,7 @@ class TerminalClient {
         return *terminal_id;
     }
 
-    // 0x0282 (terminal_state) 请求：关闭指定 terminal_id 的 Shell。
+    // 0x0303 (terminal_state) 请求：关闭指定 terminal_id 的 Shell。
     void close_terminal(std::uint32_t terminal_id) {
         auto frame =
             rpc_.async_call(Method::terminal_state, encode_terminal_state_id(terminal_id)).get();
@@ -67,8 +67,8 @@ class TerminalClient {
         cv_.notify_all();
     }
 
-    // 0x0021 (terminal_input) 请求：向指定终端发送完整命令（服务端自动追加 '\r' 并通过 EPOLLOUT 写入）。
-    // 后续命令输出通过 0x0281 (terminal_output) 事件推送，执行完毕通过 0x0282 (terminal_state) 事件通知。
+    // 0x0301 (terminal_input) 请求：向指定终端发送完整命令（服务端自动追加 '\r' 并通过 EPOLLOUT 写入）。
+    // 后续命令输出通过 0x0381 (terminal_output) 事件推送，执行完毕通过 0x0303 (terminal_state) 事件通知。
     void send_input(std::uint32_t terminal_id, std::string_view command) {
         {
             std::lock_guard lock(mutex_);
@@ -88,7 +88,7 @@ class TerminalClient {
         }
     }
 
-    // 0x0022 (terminal_on_tab) 请求：发送当前输入行触发 Tab 补全，直接返回服务端解析后的补全字符串。
+    // 0x0302 (terminal_on_tab) 请求：发送当前输入行触发 Tab 补全，直接返回服务端解析后的补全字符串。
     std::string on_tab(std::uint32_t terminal_id, std::string_view input) {
         auto frame =
             rpc_.async_call(Method::terminal_on_tab, encode_terminal_on_tab(terminal_id, input))

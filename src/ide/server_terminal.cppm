@@ -70,7 +70,7 @@ class TerminalManager : public std::enable_shared_from_this<TerminalManager> {
     }
 
     // ========================================================================
-    // 1. 处理 0x0282 (terminal_state) 请求：启动或关闭 Shell（在 Worker 线程调用）
+    // 1. 处理 0x0303 (terminal_state) 请求：启动或关闭 Shell（在 Worker 线程调用）
     // ========================================================================
     // Payload 约定（[u32 len][data]）：
     //   - 启动 Shell：data 为空、"start" 或 4 字节 0；
@@ -92,14 +92,14 @@ class TerminalManager : public std::enable_shared_from_this<TerminalManager> {
     }
 
     // ========================================================================
-    // 2. 处理 0x0021 (terminal_input) 请求：发送完整命令（Worker 解码 + IO 线程 EPOLLOUT 写入）
+    // 2. 处理 0x0301 (terminal_input) 请求：发送完整命令（Worker 解码 + IO 线程 EPOLLOUT 写入）
     // ========================================================================
     // 流程：
     //   1. Worker 解码出 terminal_id 和命令文本，在末尾追加 '\r'；
     //   2. 投递到所属 I/O 线程，写入 session->write_buffer，并调用 loop_.modify_event() 注册 EPOLLOUT；
     //   3. 当 master_fd 触发 EPOLLOUT 时写入内核 PTY 缓冲区，写完后立即撤销 EPOLLOUT（只保留 EPOLLIN）；
-    //   4. 命令执行期间的输出由 EPOLLIN 触发并通过 terminal_output (0x0281) 推送，
-    //      命令执行完毕由 PROMPT_COMMAND 触发并通过 terminal_state (0x0282) 事件推送。
+    //   4. 命令执行期间的输出由 EPOLLIN 触发并通过 terminal_output (0x0381) 推送，
+    //      命令执行完毕由 PROMPT_COMMAND 触发并通过 terminal_state (0x0303) 事件推送。
     void handle_terminal_input(Frame &frame, int conn_fd) {
         // 零拷贝校验并解析出 terminal_id 与指向 frame.payload 内部的命令视图
         auto req = decode_terminal_payload_view(frame.payload);
@@ -148,7 +148,7 @@ class TerminalManager : public std::enable_shared_from_this<TerminalManager> {
     }
 
     // ========================================================================
-    // 3. 处理 0x0022 (terminal_on_tab) 请求：Tab 命令补全（在 Worker 线程执行）
+    // 3. 处理 0x0302 (terminal_on_tab) 请求：Tab 命令补全（在 Worker 线程执行）
     // ========================================================================
     // 流程：
     //   1. 标记 tab_completing = true，暂停 I/O 线程对该终端的常规输出转发；
@@ -192,21 +192,21 @@ class TerminalManager : public std::enable_shared_from_this<TerminalManager> {
         frame.payload = encode_terminal_on_tab(terminal_id, *completed);
     }
 
-    // 统一分发终端相关的 RPC 请求（0x0021、0x0022、0x0282）。
+    // 统一分发终端相关的 RPC 请求（0x0301、0x0302、0x0303 连续操作序号）。
     void handle_request(Frame &frame, int conn_fd) {
         switch (frame.method) {
-        case Method::terminal_state:
-            handle_terminal_state(frame, conn_fd);
-            return;
         case Method::terminal_input:
             handle_terminal_input(frame, conn_fd);
             return;
         case Method::terminal_on_tab:
             handle_terminal_on_tab(frame, conn_fd);
             return;
+        case Method::terminal_state:
+            handle_terminal_state(frame, conn_fd);
+            return;
         default:
             frame.status = Status::unsupported;
-            frame.payload = "unsupported terminal method";
+            frame.payload = "unsupported method";
             return;
         }
     }
@@ -431,8 +431,8 @@ class TerminalManager : public std::enable_shared_from_this<TerminalManager> {
     }
 
     // 从 read_carry 中识别并剥离 PROMPT_COMMAND 结束标记（\033]777;__TINA_DONE__\007）：
-    //   - 普通输出通过 terminal_output (0x0281) 事件推送；
-    //   - 遇到结束标记说明命令已执行完毕，通过 terminal_state (0x0282) 事件推送通知客户端。
+    //   - 普通输出通过 terminal_output (0x0381) 事件推送；
+    //   - 遇到结束标记说明命令已执行完毕，通过 terminal_state (0x0303) 事件推送通知客户端。
     void process_pty_output(Session &session, bool flush_all) {
         using service::terminal::prompt_done_marker;
         while (!session.read_carry.empty()) {
@@ -466,7 +466,7 @@ class TerminalManager : public std::enable_shared_from_this<TerminalManager> {
         }
     }
 
-    // 按 max_terminal_output_bytes 分块推送 0x0281 (terminal_output) 事件。
+    // 按 max_terminal_output_bytes 分块推送 0x0381 (terminal_output) 事件。
     void send_output_chunks(int conn_fd, std::uint32_t terminal_id, std::string_view text) {
         if (!sender_ || text.empty())
             return;
@@ -480,7 +480,7 @@ class TerminalManager : public std::enable_shared_from_this<TerminalManager> {
         }
     }
 
-    // 推送 0x0282 (terminal_state) 事件（通知客户端命令执行完毕或 Shell 退出）。
+    // 推送 0x0303 (terminal_state) 事件（通知客户端命令执行完毕或 Shell 退出）。
     void send_state_event(int conn_fd, std::uint32_t terminal_id) {
         if (sender_)
             sender_(conn_fd, make_terminal_state_event(terminal_id));

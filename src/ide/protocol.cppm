@@ -4,30 +4,42 @@ import std;
 import net.buffer;
 export import rpc.protocol;
 
-// 从高字节到低字节逐项读写，帧头与负载整数不依赖机器的字节序或结构体对齐。
-export template <typename T> T read_be(const char *bytes) {
-    T value{};
-    for (std::size_t i = 0; i < sizeof(T); ++i) {
-        if constexpr (sizeof(T) > 1)
-            value = static_cast<T>(value << 8);
-        value = static_cast<T>(value | static_cast<unsigned char>(bytes[i]));
+// 使用 memcpy + std::byteswap 实现单指令大端序整数字节序转换，消除逐字节循环移位开销，
+// 同时保证不依赖机器原生字节序或非对齐指针强转。
+export template <std::unsigned_integral T>
+[[nodiscard]] inline T read_be(const char *bytes) noexcept {
+    if constexpr (sizeof(T) == 1) {
+        return static_cast<T>(static_cast<unsigned char>(bytes[0]));
+    } else {
+        T value{};
+        std::memcpy(&value, bytes, sizeof(T));
+        if constexpr (std::endian::native == std::endian::little)
+            value = std::byteswap(value);
+        return value;
     }
-    return value;
 }
 
-export template <typename T> void write_be(char *bytes, T value) {
-    for (std::size_t i = sizeof(T); i > 0; --i) {
-        bytes[i - 1] = static_cast<char>(value & 0xff);
-        if constexpr (sizeof(T) > 1)
-            value >>= 8;
+export template <std::unsigned_integral T>
+inline void write_be(char *bytes, T value) noexcept {
+    if constexpr (sizeof(T) == 1) {
+        bytes[0] = static_cast<char>(value);
+    } else {
+        if constexpr (std::endian::native == std::endian::little)
+            value = std::byteswap(value);
+        std::memcpy(bytes, &value, sizeof(T));
     }
 }
 
 // 向字符串末尾追加大端序无符号整数（支持 u8 / u16 / u32 / u64）。
-export template <typename T> void append_be(std::string &out, T value) {
-    std::array<char, sizeof(T)> bytes{};
-    write_be(bytes.data(), value);
-    out.append(bytes.data(), bytes.size());
+export template <std::unsigned_integral T>
+inline void append_be(std::string &out, T value) {
+    if constexpr (sizeof(T) == 1) {
+        out.push_back(static_cast<char>(value));
+    } else {
+        if constexpr (std::endian::native == std::endian::little)
+            value = std::byteswap(value);
+        out.append(reinterpret_cast<const char *>(&value), sizeof(T));
+    }
 }
 
 // 按大端序顺序切片解析二进制 Payload 的辅助读取器。
@@ -160,32 +172,32 @@ export struct DirEntry {
     std::string name;
 };
 
-// 0x0013 (workspace_list_dir) 请求参数。
+// 0x0202 (workspace_list_dir) 请求参数。
 export struct ListDirRequest {
     std::string path; // 相对于 ~/projects 的路径（如 "tina" 或 "tina/src"）
 };
 
-// 0x0013 (workspace_list_dir) 响应与目录变化 Event 的解码结果。
+// 0x0202 (workspace_list_dir) 响应与目录变化 Event 的解码结果。
 export struct ListDirResponse {
     std::string path;              // 所属目录相对路径（如 "tina" 或 "tina/src"）
     std::vector<DirEntry> entries; // 当前目录下的一级子项列表（深度为 1）
 };
 
-// 0x0014 (workspace_read_file) 请求参数。
+// 0x0203 (workspace_read_file) 请求参数。
 export struct ReadFileRequest {
     std::string path;         // 相对于 ~/projects 的文件路径
     std::uint64_t offset{};   // 读取起始字节偏移
     std::uint32_t max_bytes{}; // 本次最多读取的字节数
 };
 
-// 0x0014 (workspace_read_file) 响应结果。
+// 0x0203 (workspace_read_file) 响应结果。
 export struct ReadFileResponse {
     std::uint64_t file_size{}; // 文件当前总字节数
     std::uint64_t revision{};  // 文件当前 64 位版本指纹
     std::string content;       // 本次读取到的 UTF-8 字节内容
 };
 
-// 0x0015 (workspace_write_file) 请求参数。
+// 0x0204 (workspace_write_file) 请求参数。
 export struct WriteFileRequest {
     std::string path;                  // 相对于 ~/projects 的文件路径
     std::uint64_t expected_revision{}; // 客户端期望的原文件版本指纹
@@ -196,7 +208,7 @@ export struct WriteFileRequest {
 // Terminal 模块协议公共数据结构与编解码函数
 // ============================================================================
 // 帧内 Payload 编码规则：
-//   1. terminal_state (0x0282)               : [u32 len][data (len bytes)]
+//   1. terminal_state (0x0303)               : [u32 len][data (len bytes)]
 //   2. terminal_input / on_tab / output (其余): [u32 len][u32 terminal_id][data (len bytes)]
 
 // 携带 terminal_id 与文本/字节数据的通用终端消息结构（用于 input / on_tab / output）。
@@ -260,7 +272,7 @@ export inline std::optional<TerminalMessage> decode_terminal_payload(std::string
     };
 }
 
-// 0x0021 (terminal_input)：[u32 len][u32 terminal_id][data]
+// 0x0301 (terminal_input)：[u32 len][u32 terminal_id][data]
 export inline std::string encode_terminal_input(std::uint32_t terminal_id,
                                                 std::string_view command) {
     return encode_terminal_payload(terminal_id, command);
@@ -270,7 +282,7 @@ export inline std::optional<TerminalMessage> decode_terminal_input(std::string_v
     return decode_terminal_payload(payload);
 }
 
-// 0x0022 (terminal_on_tab)：[u32 len][u32 terminal_id][data]
+// 0x0302 (terminal_on_tab)：[u32 len][u32 terminal_id][data]
 export inline std::string encode_terminal_on_tab(std::uint32_t terminal_id,
                                                  std::string_view input) {
     return encode_terminal_payload(terminal_id, input);
@@ -280,7 +292,7 @@ export inline std::optional<TerminalMessage> decode_terminal_on_tab(std::string_
     return decode_terminal_payload(payload);
 }
 
-// 0x0281 (terminal_output)：[u32 len][u32 terminal_id][data]
+// 0x0381 (terminal_output)：[u32 len][u32 terminal_id][data]
 export inline std::string encode_terminal_output(std::uint32_t terminal_id,
                                                  std::string_view output) {
     return encode_terminal_payload(terminal_id, output);
@@ -290,7 +302,7 @@ export inline std::optional<TerminalMessage> decode_terminal_output(std::string_
     return decode_terminal_payload(payload);
 }
 
-// 0x0282 (terminal_state)：[u32 len][data]
+// 0x0303 (terminal_state)：[u32 len][data]
 export inline std::string encode_terminal_state(std::string_view data) {
     if (data.size() > max_frame_length - min_frame_length - 4)
         throw std::invalid_argument("terminal_state payload exceeds maximum frame length");
@@ -302,7 +314,7 @@ export inline std::string encode_terminal_state(std::string_view data) {
     return out;
 }
 
-// 零拷贝解码 0x0282 (terminal_state)：[u32 len][data]
+// 零拷贝解码 0x0303 (terminal_state)：[u32 len][data]
 export inline std::optional<std::string_view>
 decode_terminal_state_view(std::string_view payload) noexcept {
     PayloadReader reader(payload);
@@ -317,7 +329,7 @@ decode_terminal_state_view(std::string_view payload) noexcept {
     return *data;
 }
 
-// 解码 0x0282 (terminal_state)：[u32 len][data]
+// 解码 0x0303 (terminal_state)：[u32 len][data]
 export inline std::optional<std::string> decode_terminal_state(std::string_view payload) {
     auto view = decode_terminal_state_view(payload);
     if (!view)

@@ -9,11 +9,12 @@
 namespace tina::ui {
 namespace {
 constexpr quint16 Ping = 0x0001;
-constexpr quint16 ListProjects = 0x0011;
-constexpr quint16 ListDir = 0x0013;
-constexpr quint16 ReadFile = 0x0014;
-constexpr quint16 WriteFile = 0x0015;
+constexpr quint16 ListProjects = 0x0201;
+constexpr quint16 ListDir = 0x0202;
+constexpr quint16 ReadFile = 0x0203;
+constexpr quint16 WriteFile = 0x0204;
 constexpr quint16 Unavailable = 11;
+constexpr quint32 TransientStatusMask = (1u << 6) | (1u << 7) | (1u << 10) | (1u << 11) | (1u << 12);
 constexpr quint32 MaxFrame = 1024 * 1024;
 constexpr quint32 ReadChunk = 256 * 1024;
 constexpr quint64 MaxEditableRead = 8 * 1024 * 1024;
@@ -201,7 +202,7 @@ void FfiClientBridge::completeRequest(quint64 token, quint16 status, const QByte
     if (it == requests_.end())
         return;
     // 只有无副作用的读操作可以重试；Shell 创建、输入、补全不可重放。
-    const bool transient = status == 6 || status == 7 || status >= 10;
+    const bool transient = status <= 12 && ((TransientStatusMask >> status) & 1u) != 0;
     const bool retryable = it->method == Ping || it->method == ListProjects
                            || it->method == ListDir || it->method == ReadFile;
     if (status && transient && retryable && it->attempts < 3 && connected()) {

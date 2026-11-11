@@ -85,64 +85,64 @@ Status 只在 RESPONSE 中有意义。第一版保留统一状态码：
 
 **范围限制：** 第一版只支持 UTF-8 文本文件和文本输出，不支持图片、压缩包等二进制文件。文件内容过大时通过 workspace.readFile 的范围参数分段读取。
 
-## 4. Method 编号
+## 4. Method 编号与位域设计
 
-Method 是 16 位无符号整数。下面统一写成 4 位十六进制；例如 0x0011 与 0x011 是同一个数值。
+Method 是 16 位无符号整数（`uint16_t`），采用位域编码设计以优化位运算路由与跳转表分发：
 
-### 4.1 系统与 KV
+- **Bits `[15:8]`（`0xFF00`）**：业务模块分组（`MethodGroup`），右移 8 位即可得到连续分组索引 `0..5`。
+- **Bit `[7]`（`0x0080`）**：纯服务端推送事件标志位（`method_event_flag`），为 `1` 时表示仅用于服务端推送 Event，不可作为客户端 Request 调用。
+- **Bits `[6:0]`（`0x007F`）**：模块内操作序号（从 `1` 开始连续编号）。
+
+### 4.1 系统（`0x00xx`）与 KV（`0x01xx`）
 
 | 编号 | Method | 类型 | 用途 |
 |---:|---|---|---|
 | 0x0001 | system.ping | Request | 连通性检查 |
-| 0x0002 | kv.set | Request | 写入键值 |
-| 0x0003 | kv.get | Request | 读取值 |
-| 0x0004 | kv.del | Request | 删除键 |
+| 0x0101 | kv.set | Request | 写入键值 |
+| 0x0102 | kv.get | Request | 读取值 |
+| 0x0103 | kv.del | Request | 删除键 |
 
-### 4.2 Workspace
-
-| 编号 | Method | 类型 | 用途 |
-|---:|---|---|---|
-| 0x0011 | workspace.listProjects | Request | 列出已登记项目 |
-| 0x0012 | workspace.open | Request | 打开项目 |
-| 0x0013 | workspace.listDir | Request | 枚举指定目录 |
-| 0x0014 | workspace.readFile | Request | 读取 UTF-8 文本文件或指定范围 |
-| 0x0015 | workspace.writeFile | Request | 保存 UTF-8 文本文件 |
-
-### 4.3 Terminal
-
-第一版只有一个默认 Terminal，由 Server 管理，不提供创建和关闭接口。
+### 4.2 Workspace（`0x02xx`）
 
 | 编号 | Method | 类型 | 用途 |
 |---:|---|---|---|
-| 0x0021 | terminal.input | Request | 向默认 Shell 发送输入 |
-| 0x0022 | terminal.resize | Request | 设置终端行数和列数 |
-| 0x0281 | terminal.output | Event | 推送终端输出 |
-| 0x0282 | terminal.state | Event | 推送 Shell 启动、退出和重启状态 |
+| 0x0201 | workspace.listProjects | Request | 列出已登记项目 |
+| 0x0202 | workspace.listDir | Request / Event | 枚举指定目录或推送目录变更 |
+| 0x0203 | workspace.readFile | Request | 读取 UTF-8 文本文件或指定范围 |
+| 0x0204 | workspace.writeFile | Request | 保存 UTF-8 文本文件 |
 
-不提供 terminal.create、terminal.close。Android 断开连接、切换界面或进入后台都不会关闭 Shell。Shell 退出后由 Server 按默认策略重新启动。
-
-### 4.4 Git
+### 4.3 Terminal（`0x03xx`）
 
 | 编号 | Method | 类型 | 用途 |
 |---:|---|---|---|
-| 0x0031 | git.status | Request | 查询仓库状态 |
-| 0x0032 | git.diff | Request | 获取指定文件的代码差异 |
+| 0x0301 | terminal.input | Request | 向终端发送命令输入 |
+| 0x0302 | terminal.onTab | Request | 触发终端 Tab 命令补全 |
+| 0x0303 | terminal.state | Request / Event | 启动或关闭 Shell；通知命令结束或 Shell 退出 |
+| 0x0381 | terminal.output | Event | 推送终端输出 |
+
+### 4.4 Git（`0x04xx`）
+
+| 编号 | Method | 类型 | 用途 |
+|---:|---|---|---|
+| 0x0401 | git.status | Request | 查询仓库状态 |
+| 0x0402 | git.diff | Request | 获取指定文件的代码差异 |
+| 0x0403 | git.log | Request | 查询提交历史记录（Git Log） |
 
 workspace.listDir 负责提供目录树数据；git.status 返回文件状态，客户端将状态标记叠加到目录树上。
 
-git.diff 返回 Unified Diff，客户端将其绘制为逐行增加/删除的代码差异视图。第一版不实现提交历史关系图。
+git.diff 返回 Unified Diff，客户端将其绘制为逐行增加/删除的代码差异视图；git.log 查询提交历史记录。
 
-### 4.5 Agent
+### 4.5 Agent（`0x05xx`）
 
 | 编号 | Method | 类型 | 用途 |
 |---:|---|---|---|
-| 0x0401 | agent.list | Request | 列出 Agent 会话 |
-| 0x0402 | agent.start | Request | 启动 Agent 会话 |
-| 0x0403 | agent.input | Request | 向 Agent 发送输入 |
-| 0x0404 | agent.cancel | Request | 中断当前 Agent 任务 |
-| 0x0405 | agent.close | Request | 终止 Agent 会话并释放进程 |
-| 0x0481 | agent.output | Event | 推送 Agent 输出 |
-| 0x0482 | agent.state | Event | 推送 Agent 状态变化 |
+| 0x0501 | agent.list | Request | 列出 Agent 会话 |
+| 0x0502 | agent.start | Request | 启动 Agent 会话 |
+| 0x0503 | agent.input | Request | 向 Agent 发送输入 |
+| 0x0504 | agent.cancel | Request | 中断当前 Agent 任务 |
+| 0x0505 | agent.close | Request | 终止 Agent 会话并释放进程 |
+| 0x0581 | agent.output | Event | 推送 Agent 输出 |
+| 0x0582 | agent.state | Event | 推送 Agent 状态变化 |
 
 agent.cancel 和 agent.close 不能混为一谈：
 

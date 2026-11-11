@@ -197,7 +197,7 @@ class WorkspaceClient {
         return std::forward<Fn>(fn)(root_.get());
     }
 
-    // 0x0011: 列出 ~/projects 下的所有项目名称。
+    // 0x0201: 列出 ~/projects 下的所有项目名称。
     std::vector<std::string> list_projects() {
         auto frame =
             rpc_.async_call(Method::workspace_list_projects, encode_workspace_list_projects())
@@ -212,7 +212,7 @@ class WorkspaceClient {
         return std::move(*projects);
     }
 
-    // 0x0013: 请求指定目录的一级子项，自动维护 FileNode 的 Loading -> Loaded 状态转换。
+    // 0x0202: 请求指定目录的一级子项，自动维护 FileNode 的 Loading -> Loaded 状态转换。
     ListDirResponse list_dir(std::string_view path) {
         {
             std::lock_guard lock(mutex_);
@@ -249,7 +249,7 @@ class WorkspaceClient {
         return std::move(*response);
     }
 
-    // 0x0014: 分段读取 UTF-8 文件内容及其 fileSize 与 revision。
+    // 0x0203: 分段读取 UTF-8 文件内容及其 fileSize 与 revision。
     ReadFileResponse read_file(std::string_view path, std::uint64_t offset = 0,
                                std::uint32_t max_bytes = max_file_read_bytes) {
         auto frame = rpc_.async_call(Method::workspace_read_file,
@@ -265,7 +265,7 @@ class WorkspaceClient {
         return std::move(*response);
     }
 
-    // 0x0015: 带期望 revision 的原子文件写入。
+    // 0x0204: 带期望 revision 的原子文件写入。
     // 若服务端返回 Status::conflict，不抛异常，返回 WriteFileResult{.conflict = true, .revision = latest}
     // 供客户端重新调用 read_file。
     WriteFileResult write_file(std::string_view path, std::uint64_t expected_revision,

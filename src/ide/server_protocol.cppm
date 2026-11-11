@@ -9,13 +9,13 @@ export namespace server {
 // Workspace 模块服务端 Decode 函数（解析客户端发来的 Request Payload）
 // ============================================================================
 
-// 解码 0x0011 (workspace_list_projects) 请求负载：
+// 解码 0x0201 (workspace_list_projects) 请求负载：
 // 协议规定请求负载为空，若非空则视为非法参数。
 bool decode_workspace_list_projects(std::string_view payload) {
     return payload.empty();
 }
 
-// 解码 0x0013 (workspace_list_dir) 请求负载：
+// 解码 0x0202 (workspace_list_dir) 请求负载：
 // 格式：[u16 pathLength][path bytes]
 std::optional<ListDirRequest> decode_workspace_list_dir(std::string_view payload) {
     PayloadReader reader(payload);
@@ -30,7 +30,7 @@ std::optional<ListDirRequest> decode_workspace_list_dir(std::string_view payload
     return ListDirRequest{.path = std::string(*path)};
 }
 
-// 解码 0x0014 (workspace_read_file) 请求负载：
+// 解码 0x0203 (workspace_read_file) 请求负载：
 // 格式：[u16 pathLength][path bytes][u64 offset][u32 maxBytes]
 std::optional<ReadFileRequest> decode_workspace_read_file(std::string_view payload) {
     PayloadReader reader(payload);
@@ -56,7 +56,7 @@ std::optional<ReadFileRequest> decode_workspace_read_file(std::string_view paylo
     };
 }
 
-// 解码 0x0015 (workspace_write_file) 请求负载：
+// 解码 0x0204 (workspace_write_file) 请求负载：
 // 格式：[u16 pathLen][path bytes][u64 revision][content bytes...]
 std::optional<WriteFileRequest> decode_workspace_write_file(std::string_view payload) {
     PayloadReader reader(payload);
@@ -81,7 +81,7 @@ std::optional<WriteFileRequest> decode_workspace_write_file(std::string_view pay
 // Workspace 模块服务端 Encode 函数（构造返回给客户端的 Response / Event Payload）
 // ============================================================================
 
-// 编码 0x0011 (workspace_list_projects) 响应负载：
+// 编码 0x0201 (workspace_list_projects) 响应负载：
 // 每个项目编码为 [u16 nameLen][name bytes]，多个项目直接顺序流式拼接，不设数量头。
 std::string encode_workspace_list_projects(const std::vector<std::string> &projects) {
     std::size_t total_size = 0;
@@ -100,7 +100,7 @@ std::string encode_workspace_list_projects(const std::vector<std::string> &proje
     return out;
 }
 
-// 编码 0x0013 (workspace_list_dir) 响应与目录变化 Event 负载：
+// 编码 0x0202 (workspace_list_dir) 响应与目录变化 Event 负载：
 // 头部为所属目录相对路径 [u16 dirPathLen][dirPath bytes]，
 // 随后每个文件/文件夹编码为 [u8 type][u16 nameLen][name bytes]，流式紧密拼接。
 std::string encode_workspace_list_dir(std::string_view dir_path,
@@ -132,7 +132,7 @@ std::string encode_workspace_list_dir(const ListDirResponse &response) {
     return encode_workspace_list_dir(response.path, response.entries);
 }
 
-// 编码 0x0014 (workspace_read_file) 响应负载：
+// 编码 0x0203 (workspace_read_file) 响应负载：
 // 格式：[u64 fileSize][u64 revision][content bytes...]
 std::string encode_workspace_read_file(const ReadFileResponse &response) {
     std::string out;
@@ -143,7 +143,7 @@ std::string encode_workspace_read_file(const ReadFileResponse &response) {
     return out;
 }
 
-// 编码 0x0015 (workspace_write_file) 响应负载：
+// 编码 0x0204 (workspace_write_file) 响应负载：
 // 格式：[u64 revision]（写入成功时为 newRevision；版本冲突时为当前实际的 currentRevision）。
 std::string encode_workspace_write_file(std::uint64_t revision) {
     std::string out;
@@ -167,7 +167,7 @@ using ::encode_terminal_payload;
 using ::encode_terminal_state;
 using ::encode_terminal_state_id;
 
-// 构造 0x0281 (terminal_output) 服务端推送 Event 帧。
+// 构造 0x0381 (terminal_output) 服务端推送 Event 帧。
 inline Frame make_terminal_output_event(std::uint32_t terminal_id, std::string_view text) {
     return Frame{
         .length = 0,
@@ -179,7 +179,7 @@ inline Frame make_terminal_output_event(std::uint32_t terminal_id, std::string_v
     };
 }
 
-// 构造 0x0282 (terminal_state) 服务端推送 Event 帧（通知命令执行完毕或 Shell 退出）。
+// 构造 0x0303 (terminal_state) 服务端推送 Event 帧（通知命令执行完毕或 Shell 退出）。
 inline Frame make_terminal_state_event(std::uint32_t terminal_id) {
     return Frame{
         .length = 0,

@@ -8,10 +8,10 @@
 
 namespace tina::ui {
 namespace {
-constexpr quint16 TerminalInput = 0x0021;
-constexpr quint16 TerminalTab = 0x0022;
-constexpr quint16 TerminalOutput = 0x0281;
-constexpr quint16 TerminalState = 0x0282;
+constexpr quint16 TerminalInput = 0x0301;
+constexpr quint16 TerminalTab = 0x0302;
+constexpr quint16 TerminalState = 0x0303;
+constexpr quint16 TerminalOutput = 0x0381;
 constexpr qsizetype MaxInputBytes = 1024 * 1024 - 21; // 帧头 13 字节 + 终端负载头 8 字节。
 
 template<typename T> void appendInteger(QByteArray &bytes, T value) {

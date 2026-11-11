@@ -102,7 +102,7 @@ class FakeServer : public QObject {
             return;
         const auto payload = string(path.toUtf8()) + entries;
         calls.last().peer->write(integer(quint32(13 + payload.size())) + char(3)
-                                + integer(quint64(0)) + integer(quint16(0x13))
+                                + integer(quint64(0)) + integer(quint16(0x0202))
                                 + integer(quint16(0)) + payload);
     }
 
@@ -121,26 +121,26 @@ class FakeServer : public QObject {
 
     void handle(const Call &call) {
         switch (call.method) {
-        case 0x282: {
+        case 0x0303: {
             const auto id = qFromBigEndian<quint32>(reinterpret_cast<const uchar *>(call.payload.constData() + 4));
             respond(call, 0, terminalState(id ? id : nextTerminalId++));
             break;
         }
-        case 0x21: {
+        case 0x0301: {
             const auto id = qFromBigEndian<quint32>(reinterpret_cast<const uchar *>(call.payload.constData() + 4));
             respond(call, 0, terminalPayload(id, "OK"));
-            terminalEvent(0x281, terminalPayload(id, call.payload.mid(8) + "\r\n"));
-            terminalEvent(0x282, terminalState(id));
+            terminalEvent(0x0381, terminalPayload(id, call.payload.mid(8) + "\r\n"));
+            terminalEvent(0x0303, terminalState(id));
             break;
         }
-        case 0x22: {
+        case 0x0302: {
             const auto id = qFromBigEndian<quint32>(reinterpret_cast<const uchar *>(call.payload.constData() + 4));
             respond(call, 0, terminalPayload(id, call.payload.mid(8) + "pleted"));
             break;
         }
-        case 1: respond(call, 0, "PONG"); break;
-        case 0x11: respond(call, 0, string("demo") + string("other"), true); break;
-        case 0x13: {
+        case 0x0001: respond(call, 0, "PONG"); break;
+        case 0x0201: respond(call, 0, string("demo") + string("other"), true); break;
+        case 0x0202: {
             const auto path = pathOf(call.payload);
             const auto entries = path == "demo" ? QByteArray(1, char(0)) + string("main.cpp")
                                                    + char(1) + string("src")
@@ -148,7 +148,7 @@ class FakeServer : public QObject {
             respond(call, 0, string(path.toUtf8()) + entries);
             break;
         }
-        case 0x14: {
+        case 0x0203: {
             const auto path = pathOf(call.payload);
             if (!files.contains(path)) {
                 respond(call, 4, "missing");
@@ -164,7 +164,7 @@ class FakeServer : public QObject {
                              + bytes.mid(offset, maxBytes));
             break;
         }
-        case 0x15: {
+        case 0x0204: {
             const auto path = pathOf(call.payload);
             const auto start = 2 + path.toUtf8().size();
             const auto expected = qFromBigEndian<quint64>(
@@ -243,13 +243,13 @@ class WorkspaceTest : public QObject {
         QVERIFY(first->output().isEmpty());
         bridge.selectTerminal(0);
         QCOMPARE(bridge.activeTerminal(), first.data());
-        server.terminalEvent(0x281, terminalPayload(second->terminalId(), "background\r\n"));
+        server.terminalEvent(0x0381, terminalPayload(second->terminalId(), "background\r\n"));
         QTRY_VERIFY(second->output().contains("background"));
         QVERIFY(first->output().isEmpty());
         // 补全返回之前继续编辑，迟到结果不能覆盖新的草稿。
         std::optional<Call> completion;
         server.intercept = [&](const Call &call) {
-            if (call.method == 0x22) { completion = call; return true; }
+            if (call.method == 0x0302) { completion = call; return true; }
             return false;
         };
         first->setDraft("old");
@@ -261,14 +261,14 @@ class WorkspaceTest : public QObject {
         QCOMPARE(first->draft(), QString("new"));
         server.intercept = {};
         const auto previousId = first->terminalId();
-        const auto inputCalls = server.count(0x21);
+        const auto inputCalls = server.count(0x0301);
         server.calls.last().peer->abort();
         QTRY_VERIFY(!bridge.connected());
         QVERIFY(!first->available());
         QTRY_VERIFY_WITH_TIMEOUT(first->available(), 5000);
         QVERIFY(first->terminalId() != previousId);
         QCOMPARE(first->sessionId(), 1); // 用户编号独立于重连后重新分配的 RPC ID。
-        QCOMPARE(server.count(0x21), inputCalls);
+        QCOMPARE(server.count(0x0301), inputCalls);
         QVERIFY(second->output().contains("background"));
         QCOMPARE(first->draft(), QString("new"));
         bridge.closeTerminal(0);
@@ -311,12 +311,12 @@ class WorkspaceTest : public QObject {
         QVERIFY(bridge.terminalActive());
         bridge.selectDocument(0);
         QVERIFY(!bridge.terminalActive());
-        const auto shellRequests = server.count(0x282);
+        const auto shellRequests = server.count(0x0303);
         for (const auto &input : {"@terminal add 7", "@terminal del 42", "@terminal del",
                                  "@terminal add 0", "@terminal del -1", "@terminal add nope",
                                  "@terminal add 2147483648", "@terminal add 3 extra"})
             QVERIFY2(!bridge.handleTerminalCommand(input), input);
-        QCOMPARE(server.count(0x282), shellRequests);
+        QCOMPARE(server.count(0x0303), shellRequests);
         QCOMPARE(bridge.tabs().size(), 4);
         QVERIFY(bridge.handleTerminalCommand("@terminal del 7"));
         QCOMPARE(bridge.tabs().size(), 3);
@@ -341,12 +341,12 @@ class WorkspaceTest : public QObject {
     void terminalEarlyEventsAndNoInputReplay() {
         FakeServer server;
         server.intercept = [&](const Call &call) {
-            if (call.method == 0x282) {
-                server.terminalEvent(0x281, terminalPayload(42, "early\r\n"));
+            if (call.method == 0x0303) {
+                server.terminalEvent(0x0381, terminalPayload(42, "early\r\n"));
                 server.respond(call, 0, terminalState(42), true);
                 return true;
             }
-            if (call.method == 0x21) {
+            if (call.method == 0x0301) {
                 server.respond(call, 11, terminalPayload(42, "busy"));
                 return true;
             }
@@ -359,7 +359,7 @@ class WorkspaceTest : public QObject {
         QVERIFY(bridge.submitCommand("one-shot"));
         QTRY_VERIFY(!bridge.activeTerminal()->submitting());
         QTest::qWait(800); // 超过首个读请求的重试间隔。
-        QCOMPARE(server.count(0x21), 1);
+        QCOMPARE(server.count(0x0301), 1);
         QVERIFY(bridge.activeTerminal()->output().contains("busy"));
     }
 
@@ -369,11 +369,11 @@ class WorkspaceTest : public QObject {
         int failures = 0;
         std::optional<Call> delayed;
         server.intercept = [&](const Call &call) {
-            if (call.method == 0x11 && failures++ == 0) {
+            if (call.method == 0x0201 && failures++ == 0) {
                 server.respond(call, 11, "busy");
                 return true;
             }
-            if (call.method == 0x13 && pathOf(call.payload) == "demo/slow") {
+            if (call.method == 0x0202 && pathOf(call.payload) == "demo/slow") {
                 delayed = call;
                 return true;
             }
@@ -383,7 +383,7 @@ class WorkspaceTest : public QObject {
         QTRY_VERIFY(bridge.connected());
         bridge.openFileBrowser();
         QTRY_COMPARE(bridge.entries().size(), 2);
-        QCOMPARE(server.count(0x11), 2);
+        QCOMPARE(server.count(0x0201), 2);
         bridge.activateEntry(0);
         QTRY_COMPARE(bridge.directory(), QString("demo"));
         QTRY_VERIFY(!bridge.browsing());
@@ -400,7 +400,7 @@ class WorkspaceTest : public QObject {
         QCOMPARE(bridge.entries().size(), 2);
 
         bridge.openFileBrowser();
-        QTRY_COMPARE(server.count(0x13), 3);
+        QTRY_COMPARE(server.count(0x0202), 3);
         QTRY_VERIFY(!bridge.browsing());
         server.event("demo", QByteArray(1, char(1)) + string("slow") + char(1) + string("src")
                              + char(0) + string("main.cpp"));
@@ -437,7 +437,7 @@ class WorkspaceTest : public QObject {
         server.files["demo/main.cpp"] = bytes;
         bool changed = false;
         server.intercept = [&](const Call &call) {
-            if (call.method == 0x14 && !changed) {
+            if (call.method == 0x0203 && !changed) {
                 server.handle(call);
                 changed = true;
                 ++server.revision;
@@ -450,13 +450,13 @@ class WorkspaceTest : public QObject {
         QTRY_VERIFY(bridge.connected());
         bridge.readFile("demo/main.cpp");
         QTRY_VERIFY(document(bridge)->loaded());
-        QCOMPARE(server.count(0x14), 4);
+        QCOMPARE(server.count(0x0203), 4);
         QCOMPARE(document(bridge)->text(), QString::fromUtf8(server.files.value("demo/main.cpp")));
         QVERIFY(!document(bridge)->dirty());
         document(bridge)->setText(document(bridge)->text() + "// edited\n");
         bridge.saveCurrent();
         QTRY_VERIFY(!document(bridge)->dirty());
-        QCOMPARE(server.count(0x15), 1); // 高于 JS 安全整数范围的 revision 仍完整往返。
+        QCOMPARE(server.count(0x0204), 1); // 高于 JS 安全整数范围的 revision 仍完整往返。
     }
 
     void saveSnapshotConflictAndRefreshFailure() {
@@ -469,7 +469,7 @@ class WorkspaceTest : public QObject {
         auto *doc = document(bridge);
         std::optional<Call> pending;
         server.intercept = [&](const Call &call) {
-            if (call.method == 0x15) { pending = call; return true; }
+            if (call.method == 0x0204) { pending = call; return true; }
             return false;
         };
         doc->setText("first edit\n");
@@ -488,9 +488,9 @@ class WorkspaceTest : public QObject {
         QTRY_VERIFY(doc->conflict());
         QCOMPARE(doc->text(), QString("newer edit\n"));
         QCOMPARE(doc->remoteText(), QString("external edit\n"));
-        const int writes = server.count(0x15);
+        const int writes = server.count(0x0204);
         bridge.saveCurrent();
-        QCOMPARE(server.count(0x15), writes); // 冲突未决时不自动覆盖。
+        QCOMPARE(server.count(0x0204), writes); // 冲突未决时不自动覆盖。
         bridge.refreshCurrent();
         QTRY_VERIFY(!doc->refreshing());
         QVERIFY(doc->conflict()); // 重复刷新也不能清除待处理的冲突。
@@ -500,7 +500,7 @@ class WorkspaceTest : public QObject {
 
         doc->setText("local retained\n");
         server.intercept = [&](const Call &call) {
-            if (call.method == 0x15 || call.method == 0x14) {
+            if (call.method == 0x0204 || call.method == 0x0203) {
                 server.respond(call, 3, "permission denied");
                 return true;
             }
@@ -523,7 +523,7 @@ class WorkspaceTest : public QObject {
         auto *doc = document(bridge);
         doc->setText("saved before disconnect\n");
         server.intercept = [&](const Call &call) {
-            if (call.method != 0x15) return false;
+            if (call.method != 0x0204) return false;
             server.files["demo/main.cpp"] = "saved before disconnect\n";
             ++server.revision;
             call.peer->abort(); // 已写入，但 ACK 丢失。
@@ -535,7 +535,7 @@ class WorkspaceTest : public QObject {
         QTRY_VERIFY(!doc->stale());
         QVERIFY(!doc->dirty());
         QCOMPARE(doc->text(), QString("saved before disconnect\n"));
-        QCOMPARE(server.count(0x15), 1);
+        QCOMPARE(server.count(0x0204), 1);
     }
 
     void utf8AndFrameLimits() {
@@ -555,7 +555,7 @@ class WorkspaceTest : public QObject {
         doc->setText(QString(1024 * 1024, QChar('x')));
         bridge.saveCurrent();
         QVERIFY(doc->dirty());
-        QCOMPARE(server.count(0x15), 1);
+        QCOMPARE(server.count(0x0204), 1);
         server.files["demo/other.cpp"] = QByteArray("invalid\xe4\xb8");
         bridge.readFile("demo/other.cpp");
         QTRY_VERIFY(!document(bridge, 1)->refreshing());
@@ -688,7 +688,7 @@ class WorkspaceTest : public QObject {
                                      + "[1/3] Connecting to shell...\r\n"
                                        "[2/3] Per-terminal ring buffer ready\r\n"
                                        "[3/3] Build finished\r\n";
-        server.terminalEvent(0x281, terminalPayload(bridge->activeTerminal()->terminalId(), outputLines.toUtf8()));
+        server.terminalEvent(0x0381, terminalPayload(bridge->activeTerminal()->terminalId(), outputLines.toUtf8()));
         QTRY_VERIFY(bridge->activeTerminal()->output().contains("Build finished"));
         bar->setProperty("requestedHeight", 360);
         QTest::qWait(100);
