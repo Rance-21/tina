@@ -183,4 +183,12 @@ using ::encode_terminal_payload;
 using ::encode_terminal_state;
 using ::encode_terminal_state_id;
 
+using ::decode_git_diff_response;
+using ::decode_git_diff_response_view;
+using ::decode_git_log_response;
+using ::decode_git_status_response;
+using ::encode_git_diff_request;
+using ::encode_git_log_request;
+using ::encode_git_status_request;
+
 } // namespace client

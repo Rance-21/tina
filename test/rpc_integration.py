@@ -124,8 +124,8 @@ def test_kv_dispatch(port):
         assert recv_response(sock, 0x0001) == (607, 1, b"ping requires an empty payload")
         sock.sendall(frame(601, 0x0099))
         assert recv_response(sock, 0x0099) == (601, 8, b"unsupported method")
-        sock.sendall(frame(608, 0x0403))  # git_log (0x0403) 尚未接入处理函数，返回 unsupported
-        assert recv_response(sock, 0x0403) == (608, 8, b"unsupported method")
+        sock.sendall(frame(608, 0x0501))  # agent_list (0x0501) 尚未接入处理函数，返回 unsupported
+        assert recv_response(sock, 0x0501) == (608, 8, b"unsupported method")
         sock.sendall(frame(602, 0x0101, b"no-separator"))
         assert recv_response(sock, 0x0101) == (602, 1, b"SET requires key and value")
 
@@ -256,6 +256,123 @@ def test_terminal(port):
         assert payload == struct.pack("!II", 4, term_id)
 
 
+def test_git(port, projects_root):
+    repo_dir = os.path.join(projects_root, "git_demo")
+    os.makedirs(repo_dir, exist_ok=True)
+
+    def git(*args):
+        subprocess.run(["git", *args], cwd=repo_dir, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    git("init", "-b", "main")
+    git("config", "user.name", "Tina")
+    git("config", "user.email", "tina@example.com")
+
+    file_a = os.path.join(repo_dir, "a.txt")
+    with open(file_a, "wb") as f:
+        f.write(b"line1\n")
+    git("add", "a.txt")
+    git("commit", "-m", "initial commit")
+
+    # 创建 dev 分支并提交一次改动
+    git("checkout", "-b", "dev")
+    with open(file_a, "wb") as f:
+        f.write(b"line1\ndev_line\n")
+    git("commit", "-am", "dev branch commit")
+
+    # 切回 main 分支，修改 a.txt 并新增未跟踪文件 untracked.txt
+    git("checkout", "main")
+    with open(file_a, "wb") as f:
+        f.write(b"line1\nworktree_edit\n")
+    with open(os.path.join(repo_dir, "untracked.txt"), "wb") as f:
+        f.write(b"new file\n")
+
+    with connect(port) as sock:
+        # 1. git_status (0x0401): 请求负载为仓库相对路径 b"git_demo"
+        sock.sendall(frame(901, 0x0401, b"git_demo"))
+        req_id, status, payload = recv_response(sock, 0x0401)
+        assert req_id == 901 and status == 0
+
+        entries = []
+        pos = 0
+        while pos < len(payload):
+            x, y, plen = struct.unpack("!BBH", payload[pos:pos + 4])
+            pos += 4
+            path = payload[pos:pos + plen].decode("utf-8")
+            pos += plen
+            entries.append((chr(x), chr(y), path))
+
+        assert (" ", "M", "a.txt") in entries
+        assert ("?", "?", "untracked.txt") in entries
+
+        # 2. git_diff (0x0402):
+        # 情况 A：传两个相同的 branch ("main", "main") -> 比较 worktree 与当前 HEAD
+        diff_head_req = (
+            struct.pack("!H", len(b"git_demo")) + b"git_demo"
+            + struct.pack("!H", len(b"main")) + b"main"
+            + b"main"
+        )
+        sock.sendall(frame(902, 0x0402, diff_head_req))
+        req_id, status, payload = recv_response(sock, 0x0402)
+        assert req_id == 902 and status == 0
+        assert b"+worktree_edit" in payload
+
+        # 情况 B：传两个不同的 branch ("main", "dev") -> 比较两个分支的最新 commit
+        diff_branch_req = (
+            struct.pack("!H", len(b"git_demo")) + b"git_demo"
+            + struct.pack("!H", len(b"main")) + b"main"
+            + b"dev"
+        )
+        sock.sendall(frame(903, 0x0402, diff_branch_req))
+        req_id, status, payload = recv_response(sock, 0x0402)
+        assert req_id == 903 and status == 0
+        assert b"+dev_line" in payload
+
+        # 3. git_log (0x0403): 请求负载为 b"git_demo"
+        sock.sendall(frame(904, 0x0403, b"git_demo"))
+        req_id, status, payload = recv_response(sock, 0x0403)
+        assert req_id == 904 and status == 0
+
+        commits = []
+        pos = 0
+        while pos < len(payload):
+            hlen, = struct.unpack("!B", payload[pos:pos + 1])
+            pos += 1
+            chash = payload[pos:pos + hlen].decode("utf-8")
+            pos += hlen
+
+            pcount, = struct.unpack("!B", payload[pos:pos + 1])
+            pos += 1
+            parents = []
+            for _ in range(pcount):
+                plen, = struct.unpack("!B", payload[pos:pos + 1])
+                pos += 1
+                parents.append(payload[pos:pos + plen].decode("utf-8"))
+                pos += plen
+
+            rlen, = struct.unpack("!H", payload[pos:pos + 2])
+            pos += 2
+            refs = payload[pos:pos + rlen].decode("utf-8")
+            pos += rlen
+
+            alen, = struct.unpack("!H", payload[pos:pos + 2])
+            pos += 2
+            author = payload[pos:pos + alen].decode("utf-8")
+            pos += alen
+
+            ts, slen = struct.unpack("!QH", payload[pos:pos + 10])
+            pos += 10
+            subject = payload[pos:pos + slen].decode("utf-8")
+            pos += slen
+            commits.append((chash, parents, refs, author, ts, subject))
+
+        assert len(commits) == 2
+        assert commits[0][5] == "dev branch commit"
+        assert commits[1][5] == "initial commit"
+        assert commits[0][1] == [commits[1][0]]
+        assert commits[1][1] == []
+
+
 def test_invalid_frames(port):
     for packet in (struct.pack("!I", 12), struct.pack("!I", 1024 * 1024 + 1),
                    frame(0, 1), frame(1, 1, status=1), frame(1, 1, kind=2)):
@@ -343,6 +460,7 @@ def main():
                 ("KV dispatch", test_kv_dispatch),
                 ("workspace & inotify", lambda p: test_workspace_and_inotify(p, projects_root)),
                 ("terminal pty & tab", test_terminal),
+                ("git status, diff & log", lambda p: test_git(p, projects_root)),
                 ("invalid frames", test_invalid_frames),
                 ("half close", test_half_close),
                 ("concurrent clients", test_concurrent_clients),

@@ -83,7 +83,7 @@ export enum class Method : std::uint16_t {
 };
 
 // 单指令位与提取 Method 所属模块分组（保留高 8 位，如 0x0300）。
-export [[nodiscard]] constexpr MethodGroup method_group(Method method) noexcept {
+export [[nodiscard]] constexpr inline MethodGroup method_group(Method method) noexcept {
     return static_cast<MethodGroup>(std::to_underlying(method) & method_group_mask);
 }
 

@@ -14,6 +14,7 @@ import runtime.worker_pool;
 import rpc.connection;
 import ide.protocol;
 import ide.server;
+import ide.server_git;
 import ide.server_terminal;
 import service.dir_watcher;
 import service.kv;
@@ -158,6 +159,9 @@ void dispatch_request(Frame &request, KvState &kv, std::string &watched_dir,
         break;
 
     case MethodGroup::git:
+        server::handle_git_request(request);
+        return;
+
     case MethodGroup::agent:
         break;
     }

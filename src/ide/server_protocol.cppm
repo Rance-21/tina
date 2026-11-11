@@ -191,4 +191,13 @@ inline Frame make_terminal_state_event(std::uint32_t terminal_id) {
     };
 }
 
+using ::decode_git_diff_request;
+using ::decode_git_diff_request_view;
+using ::decode_git_log_request;
+using ::decode_git_path_request_view;
+using ::decode_git_status_request;
+using ::encode_git_diff_response;
+using ::encode_git_log_response;
+using ::encode_git_status_response;
+
 } // namespace server
