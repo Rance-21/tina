@@ -17,6 +17,7 @@ class CodeHighlighter : public QSyntaxHighlighter {
     bool enabled_{};
     bool hashComments_{};
     bool cComments_{};
+    bool diff_{};
     QRegularExpression tokens_;
 };
 

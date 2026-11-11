@@ -8,6 +8,7 @@ namespace tina::ui {
 CodeHighlighter::CodeHighlighter(QTextDocument *document, const QString &path)
     : QSyntaxHighlighter(document) {
     const QString suffix = QFileInfo(path).suffix().toLower();
+    diff_ = suffix == "diff" || suffix == "patch";
     const QSet<QString> cLanguages{"c", "h", "cc", "hh", "cpp", "hpp", "cxx", "cppm",
                                   "ixx", "rs", "qml", "js", "ts", "jsx", "tsx", "java",
                                   "kt", "kts", "css", "json", "jsonc"};
@@ -23,6 +24,18 @@ CodeHighlighter::CodeHighlighter(QTextDocument *document, const QString &path)
 
 void CodeHighlighter::highlightBlock(const QString &text) {
     setCurrentBlockState(0);
+    if (diff_) {
+        // Unified diff 保留原文，仅按整行着色，方便辨认新增、删除和块标题。
+        if (text.startsWith("+++ ") || text.startsWith("--- ") || text.startsWith("diff --git "))
+            setFormat(0, text.size(), QColor("#91bfff"));
+        else if (text.startsWith('+'))
+            setFormat(0, text.size(), QColor("#8cdaa4"));
+        else if (text.startsWith('-'))
+            setFormat(0, text.size(), QColor("#f19494"));
+        else if (text.startsWith("@@"))
+            setFormat(0, text.size(), QColor("#cfabff"));
+        return;
+    }
     if (!enabled_)
         return;
     // 压缩文件的超长单行跳过着色，避免平板主线程卡顿。

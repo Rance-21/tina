@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QPointer>
 #include <QQuickTextDocument>
+#include <QVariantList>
 #include <QtQmlIntegration/qqmlintegration.h>
 
 namespace tina::ui {
@@ -26,11 +27,13 @@ class WorkspaceDocument : public QObject {
     Q_PROPERTY(bool loaded READ loaded NOTIFY stateChanged)
     Q_PROPERTY(bool readOnly READ readOnly NOTIFY stateChanged)
     Q_PROPERTY(QString remoteText READ remoteText NOTIFY stateChanged)
+    Q_PROPERTY(bool preview READ preview CONSTANT)
+    Q_PROPERTY(int layoutRevision READ layoutRevision NOTIFY layoutChanged)
 
   public:
     explicit WorkspaceDocument(QString path, QObject *parent = nullptr);
     QString path() const { return path_; }
-    QString name() const { return path_.section('/', -1); }
+    QString name() const { return displayName_.isEmpty() ? path_.section('/', -1) : displayName_; }
     QString text() const { return text_; }
     QString remoteText() const { return savedText_; }
     bool dirty() const { return loaded_ && text_ != savedText_; }
@@ -40,12 +43,16 @@ class WorkspaceDocument : public QObject {
     bool stale() const { return stale_; }
     bool loaded() const { return loaded_; }
     bool readOnly() const { return readOnly_ || !loaded_; }
+    bool preview() const { return preview_; }
+    int layoutRevision() const { return layoutRevision_; }
     void setText(const QString &text);
     Q_INVOKABLE void attach(QQuickTextDocument *document);
+    Q_INVOKABLE QVariantList visibleLines(qreal top, qreal height) const;
 
   signals:
     void textChanged();
     void stateChanged();
+    void layoutChanged();
 
   private:
     friend class FfiClientBridge;
@@ -54,6 +61,10 @@ class WorkspaceDocument : public QObject {
     QString path_;
     QString text_;
     QString savedText_;
+    // Diff 复用只读代码标签，但不参与远程文件读写及断线重读。
+    QString displayName_, gitRepository_, gitBase_, gitTarget_, gitFile_;
+    bool preview_{};
+    int layoutRevision_{};
     quint64 revision_{}; // 留在 C++，避免 QML double 丢失 64 位 revision 精度。
     quint64 loadGeneration_{};
     bool loaded_{};

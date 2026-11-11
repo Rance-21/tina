@@ -61,20 +61,23 @@ Item {
         id: gutter
         anchors.top: conflictBar.bottom
         anchors.bottom: parent.bottom
-        width: 48
+        width: Math.max(48, metrics.advanceWidth(String(editor.lineCount)) + 20)
         clip: true
-        readonly property int firstLine: Math.max(0, Math.floor(flick.contentY / metrics.height))
+        readonly property var lines: {
+            // 显式依赖排版版本；字号、文本或文档高度变化时重新取可见行的真实基线。
+            const revision = pane.document.layoutRevision
+            return pane.document.visibleLines(flick.contentY - editor.topPadding, height)
+        }
         // 只创建屏幕附近的行号，长文件不生成成千上万个 QML 对象。
         Repeater {
-            model: Math.max(0, Math.min(editor.lineCount - gutter.firstLine,
-                                        Math.ceil(gutter.height / metrics.height) + 2))
+            model: gutter.lines
             delegate: Text {
-                required property int index
+                required property var modelData
+                objectName: "lineNumber:" + pane.document.path + ":" + modelData.number
                 x: 0
-                y: 8 + (gutter.firstLine + index) * metrics.height - flick.contentY
+                y: editor.topPadding + modelData.baseline - baselineOffset - flick.contentY
                 width: gutter.width - 10
-                height: metrics.height
-                text: gutter.firstLine + index + 1
+                text: modelData.number
                 font: editor.font
                 color: "#6983a5"
                 horizontalAlignment: Text.AlignRight
@@ -156,6 +159,7 @@ Item {
         anchors.right: parent.right
         anchors.margins: 8
         text: pane.document.saving ? "保存中…" : pane.document.refreshing ? "获取中…"
+              : pane.document.preview ? pane.document.name + " · 只读"
               : pane.document.readOnly ? "只读" : ""
         visible: text.length > 0
         color: "#b6c8e4"

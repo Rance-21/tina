@@ -98,7 +98,8 @@ FfiClientBridge::FfiClientBridge(QObject *parent) : QObject(parent) {
             openFileBrowser();
         // 重连后读回最新版本；包括写入已成功但响应丢失的情况。
         for (auto *document : documents_)
-            refreshDocument(document);
+            if (!document->preview_)
+                refreshDocument(document);
         if (terminals_.isEmpty())
             createTerminal();
         else
@@ -110,6 +111,8 @@ FfiClientBridge::FfiClientBridge(QObject *parent) : QObject(parent) {
         failRequests(QStringLiteral("连接断开").toUtf8());
         invalidateTerminals();
         for (auto *document : documents_) {
+            if (document->preview_)
+                continue;
             document->stale_ = true;
             emit document->stateChanged();
         }
@@ -204,7 +207,8 @@ void FfiClientBridge::completeRequest(quint64 token, quint16 status, const QByte
     // 只有无副作用的读操作可以重试；Shell 创建、输入、补全不可重放。
     const bool transient = status <= 12 && ((TransientStatusMask >> status) & 1u) != 0;
     const bool retryable = it->method == Ping || it->method == ListProjects
-                           || it->method == ListDir || it->method == ReadFile;
+                           || it->method == ListDir || it->method == ReadFile
+                           || (it->method >= 0x0401 && it->method <= 0x0403);
     if (status && transient && retryable && it->attempts < 3 && connected()) {
         it->waiting = false;
         it->wireId = 0;
@@ -535,6 +539,10 @@ void FfiClientBridge::readFile(const QString &path) {
 }
 
 void FfiClientBridge::refreshDocument(WorkspaceDocument *document) {
+    if (document->preview_) {
+        fetchGitDiff(document);
+        return;
+    }
     if (document->saving_)
         return;
     document->refreshing_ = true;
@@ -614,7 +622,8 @@ void FfiClientBridge::saveCurrent() {
 }
 
 void FfiClientBridge::writeFile(WorkspaceDocument *document) {
-    if (!document || !documents_.contains(document) || document->saving_ || document->refreshing_)
+    if (!document || !documents_.contains(document) || document->preview_
+        || document->saving_ || document->refreshing_)
         return;
     if (document->stale_) {
         refreshDocument(document);

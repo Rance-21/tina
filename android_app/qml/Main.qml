@@ -71,7 +71,7 @@ Window {
         // 对齐底部对话框弹出的窗口状态：
         // "none"   -> 不显示
         // "menu"   -> 首字母输入 '@' 时展示的四行菜单 (AI / GIT / FILE / TERMINAL)
-        // "git"    -> 输入 @GIT 回车后，把当前窗口变成横向可滑动的 Git 树
+        // "git"    -> @GIT tree / worktree 在同一个弹窗显示 Git 数据
         // "folder" -> 点击左侧 Folder 按钮，或输入 @FILE 回车后弹出的文件窗口
         property string popupMode: "none"
 
@@ -125,46 +125,6 @@ Window {
                 cmdKey: "TERMINAL"
                 iconName: "terminal"
                 iconColor: "#a5b4fc"
-            }
-        }
-
-        // 横向 Git 树占位数据
-        ListModel {
-            id: gitTreeCommitsModel
-            ListElement {
-                hash: "a1b2c3d"
-                branch: "HEAD -> main"
-                msg: "feat(ui): 16:10 glass shell & @ popup"
-                author: "rance"
-                isHead: true
-            }
-            ListElement {
-                hash: "8f9e0d1"
-                branch: "origin/main"
-                msg: "feat(rpc): ide frame encode/decode"
-                author: "rance"
-                isHead: false
-            }
-            ListElement {
-                hash: "5c4b3a2"
-                branch: ""
-                msg: "perf(net): epoll event loop thread pool"
-                author: "rance"
-                isHead: false
-            }
-            ListElement {
-                hash: "2d1e0f9"
-                branch: "tag: v0.1"
-                msg: "init: tina C++23 server skeleton"
-                author: "rance"
-                isHead: false
-            }
-            ListElement {
-                hash: "0a9b8c7"
-                branch: ""
-                msg: "docs(workbench): architecture & protocol"
-                author: "rance"
-                isHead: false
             }
         }
 
@@ -539,7 +499,7 @@ Window {
         // 3. 与底部输入框对齐的毛玻璃弹窗。
         //    支持三种状态：
         //    - "menu"   : 首字母输入 '@' 时出现的四行选项（AI / GIT / FILE / TERMINAL）
-        //    - "git"    : 输入 @GIT 回车后，把当前菜单窗口变成横向可滑动（<- / ->）的 Git 树
+        //    - "git"    : 显示 Git 提交图或工作区修改，均由显式命令请求服务端
         //    - "folder" : 点击 Folder 按钮或输入 @FILE 回车后弹出的文件列表
         //    以上弹窗均在点击别处时关闭。
         // ====================================================================
@@ -550,7 +510,7 @@ Window {
             x: bottomDialogBar.x
             width: bottomDialogBar.width
             height: rootCanvas.popupMode === "menu" ? 12 * 2 + atMenuModel.count * 48 + (atMenuModel.count - 1) * 6
-                    : rootCanvas.popupMode === "folder" ? Math.min(380, bottomDialogBar.y - 24) : 190
+                    : Math.min(420, bottomDialogBar.y - 24)
             y: bottomDialogBar.y - height - 10
             visible: rootCanvas.popupMode !== "none"
             opacity: visible ? 1.0 : 0.0
@@ -658,217 +618,12 @@ Window {
             }
 
             // ----------------------------------------------------------------
-            // 状态 B ("git")：把当前窗口变成横向 Git 树（支持 <- / -> 按钮及拖拽滑动）
-            // ----------------------------------------------------------------
-            RowLayout {
+            // Git 仍使用 @ 菜单弹出的这个窗口，展示真实提交图或工作区状态。
+            GitPanel {
                 anchors.fill: parent
                 anchors.margins: 14
-                spacing: 10
                 visible: rootCanvas.popupMode === "git"
-
-                // 左滑按钮 "<-"
-                Rectangle {
-                    Layout.alignment: Qt.AlignVCenter
-                    implicitWidth: 38
-                    implicitHeight: 38
-                    radius: 19
-                    color: leftSlideMouse.containsMouse ? "#4c2c446e" : "#2e1a2a44"
-                    border.color: "#588cb8ff"
-                    border.width: 1
-
-                    Text {
-                        anchors.centerIn: parent
-                        text: "<-"
-                        color: "#e2ecff"
-                        font.family: "monospace"
-                        font.pixelSize: 13
-                        font.bold: true
-                    }
-
-                    MouseArea {
-                        id: leftSlideMouse
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            gitHorizFlick.contentX = Math.max(0, gitHorizFlick.contentX - 240)
-                        }
-                    }
-                }
-
-                // 中间横向可滑动的 Git 树占位图
-                Flickable {
-                    id: gitHorizFlick
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    contentWidth: gitNodesRow.implicitWidth + 24
-                    contentHeight: height
-                    flickableDirection: Flickable.HorizontalFlick
-                    boundsBehavior: Flickable.StopAtBounds
-                    clip: true
-
-                    Behavior on contentX { NumberAnimation { duration: 180; easing.type: Easing.OutQuad } }
-
-                    Row {
-                        id: gitNodesRow
-                        anchors.verticalCenter: parent.verticalCenter
-                        spacing: 0
-
-                        Repeater {
-                            model: gitTreeCommitsModel
-                            delegate: Item {
-                                id: commitNode
-                                required property var model
-                                required property int index
-                                width: 230
-                                height: 136
-
-                                // 连接主干横线（横着的 Git 树连线）
-                                Rectangle {
-                                    visible: commitNode.index < gitTreeCommitsModel.count - 1
-                                    x: 115
-                                    y: 40
-                                    width: 230
-                                    height: 3
-                                    color: "#6858a6ff"
-                                }
-
-                                // 分支示意曲线（第2个节点画一条分叉演进线作为占位示意）
-                                Canvas {
-                                    visible: commitNode.index === 1
-                                    anchors.fill: parent
-                                    onPaint: {
-                                        var ctx = getContext("2d")
-                                        ctx.clearRect(0, 0, width, height)
-                                        ctx.strokeStyle = "#c084fc"
-                                        ctx.lineWidth = 2
-                                        ctx.beginPath()
-                                        ctx.moveTo(115, 41)
-                                        ctx.bezierCurveTo(150, 41, 160, 18, 200, 18)
-                                        ctx.stroke()
-                                    }
-                                }
-
-                                Column {
-                                    anchors.horizontalCenter: parent.horizontalCenter
-                                    y: 8
-                                    width: 206
-                                    spacing: 8
-
-                                    // 分支标签
-                                    Rectangle {
-                                        anchors.horizontalCenter: parent.horizontalCenter
-                                        height: 20
-                                        width: branchLabel.implicitWidth + 14
-                                        radius: 10
-                                        visible: commitNode.model.branch.length > 0
-                                        color: commitNode.model.isHead ? "#3834d399" : "#3258a6ff"
-                                        border.color: commitNode.model.isHead ? "#34d399" : "#58a6ff"
-                                        border.width: 1
-
-                                        Text {
-                                            id: branchLabel
-                                            anchors.centerIn: parent
-                                            text: commitNode.model.branch
-                                            color: "#f0f6ff"
-                                            font.family: "monospace"
-                                            font.pixelSize: 11
-                                        }
-                                    }
-
-                                    Item {
-                                        visible: commitNode.model.branch.length === 0
-                                        width: 1
-                                        height: 20
-                                    }
-
-                                    // Commit 圆点节点
-                                    Rectangle {
-                                        anchors.horizontalCenter: parent.horizontalCenter
-                                        width: 18
-                                        height: 18
-                                        radius: 9
-                                        color: commitNode.model.isHead ? "#34d399" : "#58a6ff"
-                                        border.color: "#ffffff"
-                                        border.width: 2.5
-                                    }
-
-                                    // Commit 信息卡片
-                                    Rectangle {
-                                        width: parent.width
-                                        height: 62
-                                        radius: 10
-                                        color: "#3218243a"
-                                        border.color: "#388aa8d8"
-                                        border.width: 1
-
-                                        Column {
-                                            anchors.fill: parent
-                                            anchors.margins: 8
-                                            spacing: 4
-
-                                            RowLayout {
-                                                width: parent.width
-                                                Text {
-                                                    text: commitNode.model.hash
-                                                    color: "#7cc4ff"
-                                                    font.family: "monospace"
-                                                    font.pixelSize: 11
-                                                    font.bold: true
-                                                }
-                                                Item { Layout.fillWidth: true }
-                                                Text {
-                                                    text: commitNode.model.author
-                                                    color: "#8aa0c0"
-                                                    font.pixelSize: 11
-                                                }
-                                            }
-
-                                            Text {
-                                                width: parent.width
-                                                text: commitNode.model.msg
-                                                color: "#e2ecff"
-                                                font.pixelSize: 12
-                                                elide: Text.ElideRight
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // 右滑按钮 "->"
-                Rectangle {
-                    Layout.alignment: Qt.AlignVCenter
-                    implicitWidth: 38
-                    implicitHeight: 38
-                    radius: 19
-                    color: rightSlideMouse.containsMouse ? "#4c2c446e" : "#2e1a2a44"
-                    border.color: "#588cb8ff"
-                    border.width: 1
-
-                    Text {
-                        anchors.centerIn: parent
-                        text: "->"
-                        color: "#e2ecff"
-                        font.family: "monospace"
-                        font.pixelSize: 13
-                        font.bold: true
-                    }
-
-                    MouseArea {
-                        id: rightSlideMouse
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: {
-                            var maxScroll = Math.max(0, gitHorizFlick.contentWidth - gitHorizFlick.width)
-                            gitHorizFlick.contentX = Math.min(maxScroll, gitHorizFlick.contentX + 240)
-                        }
-                    }
-                }
+                bridge: ffiBridge
             }
 
             // ----------------------------------------------------------------
@@ -1049,7 +804,7 @@ Window {
         // 提交处理逻辑：
         // - @AI 回车   -> 切换右侧 AI 窗口显示/关闭（展示时带分界线与模糊，点击别处不关闭，再次 @AI 关闭）
         // - @FILE 回车 -> 等同于点击左侧 Folder 按钮，打开项目列表或当前项目文件树（点击别处关闭）
-        // - @GIT 回车  -> 把当前菜单窗口变成横向可滑动的 Git 树（点击别处关闭）
+        // - @GIT tree / worktree / refresh -> Git 弹窗；diff [分支1] [分支2] -> 只读代码标签
         // - @TERMINAL add [id] / del id -> 管理左侧终端标签
         // - 其他 @...  -> 关闭菜单并提交给 Agent
         // - 非 @ 开头  -> 作为命令行提交
@@ -1069,6 +824,17 @@ Window {
                     Qt.callLater(bottomDialogBar.focusInput)
                     return
                 }
+                if (upper.split(/\s+/)[0] === "@GIT") {
+                    // Git 输入只走 Git RPC，不进入 Agent；分支名称保持原始大小写。
+                    if (ffiBridge.handleGitCommand(raw)) {
+                        bottomDialogBar.inputText = ""
+                        const action = upper.split(/\s+/)[1] || "TREE"
+                        rootCanvas.popupMode = action === "DIFF" ? "none" : "git"
+                    } else {
+                        bottomDialogBar.commandError = ffiBridge.message
+                    }
+                    return
+                }
                 ffiBridge.submitAgentInput(raw)
 
                 if (upper === "@AI") {
@@ -1078,9 +844,6 @@ Window {
                 } else if (upper === "@FILE") {
                     bottomDialogBar.inputText = ""
                     rootCanvas.showFiles()
-                } else if (upper === "@GIT") {
-                    bottomDialogBar.inputText = ""
-                    rootCanvas.popupMode = "git"
                 } else {
                     const titleText = raw.substring(1).trim()
                     if (titleText.length > 0) {

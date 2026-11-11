@@ -38,6 +38,33 @@ QByteArray terminalState(quint32 id) {
     return integer(quint32(4)) + integer(id);
 }
 
+QByteArray gitCommit(const QByteArray &hash, const QList<QByteArray> &parents,
+                     const QByteArray &refs = {}) {
+    QByteArray result = integer(quint8(hash.size())) + hash + integer(quint8(parents.size()));
+    for (const auto &parent : parents) result += integer(quint8(parent.size())) + parent;
+    return result + string(refs) + string(QStringLiteral("作者").toUtf8())
+           + integer(quint64(1700000000)) + string("commit " + hash);
+}
+
+QByteArray gitHistory() {
+    // 合并、分叉及共同祖先，最后一条的父节点在当前 100 条窗口之外。
+    return gitCommit("aaaaaaa", {"bbbbbbb", "ccccccc"}, "HEAD -> main")
+           + gitCommit("bbbbbbb", {"ddddddd"})
+           + gitCommit("ccccccc", {"ddddddd"}, "Feature/KeepCase")
+           + gitCommit("ddddddd", {"eeeeeee"});
+}
+
+const QByteArray worktreeDiff = "diff --git a/main.cpp b/main.cpp\n--- a/main.cpp\n+++ b/main.cpp\n"
+    "@@ -1 +1 @@\n-old\n+new\n"
+    "diff --git a/space name.cpp b/space name.cpp\n--- a/space name.cpp\n+++ b/space name.cpp\n"
+    "@@ -1 +1 @@\n-before\n+after\n"
+    "diff --git a/old.cpp b/new.cpp\nsimilarity index 100%\nrename from old.cpp\nrename to new.cpp\n"
+    "diff --git a/image.bin b/image.bin\nBinary files a/image.bin and b/image.bin differ\n"
+    "diff --git \"a/tab\\tname.cpp\" \"b/tab\\tname.cpp\"\n"
+    "--- \"a/tab\\tname.cpp\"\n+++ \"b/tab\\tname.cpp\"\n@@ -1 +1 @@\n-x\n+y\n"
+    "diff --git a/other.cpp b/other.cpp\n--- a/other.cpp\n+++ b/other.cpp\n"
+    "@@ -1 +1 @@\n--- a/main.cpp\n+++ b/main.cpp\n";
+
 struct Call {
     QPointer<QTcpSocket> peer;
     quint64 id;
@@ -121,6 +148,14 @@ class FakeServer : public QObject {
 
     void handle(const Call &call) {
         switch (call.method) {
+        case 0x0401:
+            respond(call, 0, QByteArray(" M") + string("main.cpp")
+                + "M " + string("space name.cpp") + "R " + string("new.cpp")
+                + " M" + string("image.bin") + " M" + string("tab\tname.cpp")
+                + "??" + string("untracked.txt"), true);
+            break;
+        case 0x0402: respond(call, 0, worktreeDiff, true); break;
+        case 0x0403: respond(call, 0, gitHistory(), true); break;
         case 0x0303: {
             const auto id = qFromBigEndian<quint32>(reinterpret_cast<const uchar *>(call.payload.constData() + 4));
             respond(call, 0, terminalState(id ? id : nextTerminalId++));
@@ -201,6 +236,126 @@ QQuickItem *findVisualItem(QQuickItem *root, const QString &name) {
 class WorkspaceTest : public QObject {
     Q_OBJECT
   private slots:
+    void gitProtocolGraphAndDiff() {
+        FakeServer server;
+        FfiClientBridge bridge;
+        bridge.connectToServer("127.0.0.1", server.server.serverPort());
+        QTRY_VERIFY(bridge.connected());
+        QCOMPARE(server.count(0x0403), 0); // 连接不自动拉取 Git。
+        bridge.listDir("demo");
+        QVERIFY(bridge.handleGitCommand("@gIt TrEe"));
+        QTRY_VERIFY(!bridge.gitLogLoading());
+        QCOMPARE(bridge.gitRepository(), QString("demo"));
+        QCOMPARE(bridge.gitNodes().size(), 4);
+        QCOMPARE(bridge.gitEdges().size(), 4);
+        QCOMPARE(bridge.gitLanes(), 2);
+        QCOMPARE(bridge.gitNodes()[0].toMap().value("isHead").toBool(), true);
+        QCOMPARE(bridge.gitNodes()[2].toMap().value("lane").toInt(), 1);
+        QCOMPARE(bridge.gitNodes()[3].toMap().value("childIndices").toList().size(), 2);
+        QVERIFY(bridge.gitEdges()[1].toMap().value("isMerge").toBool());
+        QCOMPARE(server.calls.last().payload, QByteArray("demo"));
+        QVERIFY(bridge.handleGitCommand("@GIT worktree"));
+        QTRY_VERIFY(!bridge.gitStatusLoading());
+        QCOMPARE(bridge.gitStatus().size(), 6);
+        QCOMPARE(bridge.gitStatus()[0].toMap().value("status").toString(), QString(" M"));
+        for (int i = 0; i < 6; ++i) {
+            bridge.openGitFileDiff(i);
+            auto *doc = document(bridge, i);
+            QTRY_VERIFY(!doc->refreshing());
+            QVERIFY(doc->preview());
+            QVERIFY(doc->readOnly());
+            QVERIFY(!doc->dirty());
+            const auto text = doc->text();
+            if (i == 0) {
+                QVERIFY(text.contains("+new")); QVERIFY(!text.contains("+after"));
+                QVERIFY(!text.contains("other.cpp")); // 块内的伪文件头不串入当前文件。
+            }
+            if (i == 1) { QVERIFY(text.contains("+after")); QVERIFY(!text.contains("+new")); }
+            if (i == 2) QVERIFY(text.contains("rename to new.cpp"));
+            if (i == 3) QVERIFY(text.contains("Binary files"));
+            if (i == 4) QVERIFY(text.contains("+y"));
+            if (i == 5) QVERIFY(text.contains(QStringLiteral("未跟踪文件")));
+            bridge.saveCurrent();
+        }
+        QCOMPARE(server.count(0x0203), 0);
+        QCOMPARE(server.count(0x0204), 0);
+        QVERIFY(bridge.handleGitCommand("@GIT diff Feature/KeepCase main"));
+        QTRY_VERIFY(document(bridge, 6)->loaded());
+        auto lastDiff = [&] {
+            for (auto it = server.calls.crbegin(); it != server.calls.crend(); ++it)
+                if (it->method == 0x0402) return it->payload;
+            return QByteArray();
+        };
+        QCOMPARE(lastDiff(), string("demo") + string("Feature/KeepCase") + "main");
+        QVERIFY(document(bridge, 6)->text().contains("+new"));
+        QVERIFY(document(bridge, 6)->text().contains("+after"));
+        QVERIFY(bridge.handleGitCommand("@GIT diff"));
+        QTRY_VERIFY(document(bridge, 7)->loaded());
+        QCOMPARE(lastDiff(), string("demo") + string("main") + "main");
+        const auto count = bridge.documents().size();
+        QVERIFY(bridge.handleGitCommand("@GIT diff"));
+        QCOMPARE(bridge.documents().size(), count); // 同一比较复用标签。
+        const int logCount = server.count(0x0403), statusCount = server.count(0x0401);
+        QVERIFY(bridge.handleGitCommand("@GIT refresh"));
+        QTRY_VERIFY(!bridge.gitLogLoading() && !bridge.gitStatusLoading());
+        QCOMPARE(server.count(0x0403), logCount + 1);
+        QCOMPARE(server.count(0x0401), statusCount + 1);
+        QCOMPARE(bridge.gitView(), QString("worktree"));
+        QVERIFY(!bridge.handleGitCommand("@GIT typo"));
+        QVERIFY(!bridge.handleGitCommand("@GIT tree extra"));
+        QVERIFY(!bridge.handleGitCommand("@GIT diff a b c"));
+        // 重连保留 diff 快照，虚拟路径不会被发给 file.read。
+        bridge.connectToServer("127.0.0.1", server.server.serverPort());
+        QTRY_VERIFY(bridge.connected());
+        QTRY_VERIFY(bridge.activeTerminal()->available());
+        QCOMPARE(server.count(0x0203), 0);
+        QCOMPARE(server.count(0x0403), logCount + 1);
+    }
+
+    void gitMalformedAndLateReplies() {
+        FakeServer server;
+        FfiClientBridge bridge;
+        bridge.connectToServer("127.0.0.1", server.server.serverPort());
+        QTRY_VERIFY(bridge.connected());
+        QList<Call> pending;
+        server.intercept = [&](const Call &call) {
+            if (call.method == 0x0403 || call.method == 0x0401) { pending.append(call); return true; }
+            return false;
+        };
+        bridge.handleGitCommand("@GIT tree");
+        QTRY_COMPARE(pending.size(), 1);
+        bridge.handleGitCommand("@GIT tree");
+        QTRY_COMPARE(pending.size(), 2);
+        server.respond(pending[1], 0, gitHistory());
+        QTRY_COMPARE(bridge.gitNodes().size(), 4);
+        server.respond(pending[0], 0, {});
+        QTest::qWait(50);
+        QCOMPARE(bridge.gitNodes().size(), 4);
+        pending.clear();
+        bridge.handleGitCommand("@GIT tree");
+        QTRY_COMPARE(pending.size(), 1);
+        server.respond(pending[0], 0, gitHistory().chopped(1));
+        QTRY_VERIFY(!bridge.gitLogLoading());
+        QVERIFY(!bridge.gitLogError().isEmpty());
+        QCOMPARE(bridge.gitNodes().size(), 4); // 格式错误不写入半份图。
+        pending.clear();
+        bridge.handleGitCommand("@GIT worktree");
+        QTRY_COMPARE(pending.size(), 1);
+        server.respond(pending[0], 0, QByteArray(" M") + integer(quint16(20)) + "short");
+        QTRY_VERIFY(!bridge.gitStatusLoading());
+        QVERIFY(!bridge.gitStatusError().isEmpty());
+        pending.clear();
+        bridge.listDir("other");
+        bridge.handleGitCommand("@GIT tree");
+        QTRY_COMPARE(pending.size(), 1);
+        QCOMPARE(pending[0].payload, QByteArray("other"));
+        QVERIFY(bridge.gitNodes().isEmpty());
+        server.respond(pending[0], 0, {});
+        QTRY_VERIFY(!bridge.gitLogLoading());
+        QVERIFY(bridge.gitLogError().isEmpty());
+        QVERIFY(bridge.gitNodes().isEmpty());
+    }
+
     void terminalRingAndSplitControlSequences() {
         TerminalSession terminal(1);
         const auto unicode = QString::fromUtf8("中文🙂").toUtf8();
@@ -620,6 +775,104 @@ class WorkspaceTest : public QObject {
             icon->setProperty("name", name);
             QTRY_VERIFY(coloredPixels(false) > 20);
         }
+    }
+
+    void gitUiAndScaledLineNumbers() {
+        FakeServer server;
+        QByteArray code;
+        for (int i = 1; i <= 500; ++i)
+            code += QStringLiteral("// 第 %1 行，字号与行号应对齐\n").arg(i).toUtf8();
+        server.files["demo/main.cpp"] = code;
+        qmlRegisterType<FfiClientBridge>("TinaIde", 1, 0, "FfiClientBridge");
+        qmlRegisterUncreatableType<WorkspaceDocument>("TinaIde", 1, 0, "WorkspaceDocument", "test");
+        qmlRegisterUncreatableType<TerminalSession>("TinaIde", 1, 0, "TerminalSession", "test");
+        QQmlApplicationEngine engine;
+        QList<QQmlError> warnings;
+        connect(&engine, &QQmlEngine::warnings, &engine, [&](const QList<QQmlError> &errors) {
+            warnings.append(errors);
+        });
+        engine.setInitialProperties({{"serverHost", "127.0.0.1"}, {"serverPort", server.server.serverPort()}});
+        engine.load(QUrl::fromLocalFile(QStringLiteral(TINA_QML_SOURCE_DIR "/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        auto *bridge = window->findChild<FfiClientBridge *>("workspaceBridge");
+        QTRY_VERIFY(bridge->connected());
+        window->requestActivate();
+        QTRY_VERIFY(window->isActive());
+        bridge->readFile("demo/main.cpp");
+        QTRY_VERIFY(document(*bridge)->loaded());
+        auto *editor = findVisualItem(window->contentItem(), "editor:demo/main.cpp");
+        auto *viewport = findVisualItem(window->contentItem(), "codeViewport:demo/main.cpp");
+        QVERIFY(editor && viewport);
+        auto *quickDocument = qvariant_cast<QQuickTextDocument *>(editor->property("textDocument"));
+        QVERIFY(quickDocument);
+        const auto rectangleAt = [&](int line) {
+            QRectF rect;
+            const int position = quickDocument->textDocument()->findBlockByNumber(line - 1).position();
+            const bool ok = QMetaObject::invokeMethod(editor, "positionToRectangle", Q_RETURN_ARG(QRectF, rect),
+                                                      Q_ARG(int, position));
+            if (!ok) qFatal("positionToRectangle unavailable");
+            return rect;
+        };
+        for (const int pixels : {16, 27, 11}) {
+            auto font = editor->property("font").value<QFont>();
+            font.setPixelSize(pixels);
+            editor->setProperty("font", font);
+            QTest::qWait(30);
+            // 从文件深处验证，旧算法在此会累积出明显的垂直偏差。
+            viewport->setProperty("contentY", rectangleAt(300).y() - 80);
+            for (const int line : {300, 301, 310}) {
+                QQuickItem *number = nullptr;
+                QTRY_VERIFY((number = findVisualItem(window->contentItem(),
+                    QStringLiteral("lineNumber:demo/main.cpp:%1").arg(line))));
+                QCOMPARE(number->property("font").value<QFont>().pixelSize(), pixels);
+                // 中文回退字体可能抬高行框，应比较文字基线而不是数字与行框的顶部。
+                const auto block = quickDocument->textDocument()->findBlockByNumber(line - 1);
+                const auto baseline = rectangleAt(line).y() + block.layout()->lineAt(0).ascent();
+                QTRY_VERIFY(std::abs(number->mapToItem(editor, QPointF(0, number->baselineOffset())).y()
+                                      - baseline) <= 1.0);
+            }
+        }
+        auto *command = window->findChild<QQuickItem *>("commandInput");
+        const auto submit = [&](const QString &text) {
+            command->forceActiveFocus();
+            command->setProperty("text", text);
+            QTest::keyClick(window, Qt::Key_Return);
+        };
+        submit("@GIT tree");
+        QTRY_COMPARE(bridge->gitNodes().size(), 4);
+        auto *graph = findVisualItem(window->contentItem(), "gitGraphViewport");
+        QVERIFY(graph);
+        QTRY_VERIFY(graph->isVisible());
+        QTRY_VERIFY(findVisualItem(window->contentItem(), "gitNode:aaaaaaa"));
+        QTest::qWait(180);
+        window->grabWindow().save(QStringLiteral("git-graph-preview.png"));
+        submit("@GIT worktree");
+        QTRY_COMPARE(bridge->gitStatus().size(), 6);
+        auto *status = findVisualItem(window->contentItem(), "gitStatus:main.cpp");
+        QVERIFY(status);
+        QTRY_VERIFY(status->isVisible());
+        QTest::qWait(180);
+        window->grabWindow().save(QStringLiteral("git-worktree-preview.png"));
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+            status->mapToScene(QPointF(status->width() / 2, status->height() / 2)).toPoint());
+        QTRY_COMPARE(bridge->documents().size(), 2);
+        QTRY_VERIFY(document(*bridge, 1)->loaded());
+        auto *diffEditor = findVisualItem(window->contentItem(), "editor:" + document(*bridge, 1)->path());
+        QVERIFY(diffEditor);
+        QVERIFY(diffEditor->property("readOnly").toBool());
+        QVERIFY(!graph->isVisible());
+        submit("@GIT diff Feature/KeepCase main");
+        QTRY_COMPARE(bridge->documents().size(), 3);
+        QTRY_VERIFY(document(*bridge, 2)->loaded());
+        QTest::qWait(180);
+        window->grabWindow().save(QStringLiteral("git-diff-preview.png"));
+        submit("@GIT refresh");
+        QTRY_VERIFY(!bridge->gitLogLoading() && !bridge->gitStatusLoading());
+        auto *list = findVisualItem(window->contentItem(), "gitStatusList");
+        QVERIFY(list && list->isVisible());
+        for (const auto &warning : warnings) qWarning() << warning;
+        QVERIFY(warnings.isEmpty());
     }
 
     void keyboardAndEditorState() {

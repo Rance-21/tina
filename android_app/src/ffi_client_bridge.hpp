@@ -15,7 +15,7 @@
 
 namespace tina::ui {
 
-// Qt 异步套接字实现 ide.client 的 Workspace 和 Terminal 操作。
+// Qt 异步套接字实现 ide.client 的 Workspace、Terminal 和 Git 操作。
 // Android 不依赖服务端 Linux epoll / C++ 模块构建链，线上格式保持完全一致。
 class FfiClientBridge : public QObject {
     Q_OBJECT
@@ -33,6 +33,16 @@ class FfiClientBridge : public QObject {
     Q_PROPERTY(QVariantList tabs READ tabs NOTIFY tabsChanged)
     Q_PROPERTY(int activeTabIndex READ activeTabIndex WRITE selectTab NOTIFY activeTabChanged)
     Q_PROPERTY(bool terminalActive READ terminalActive NOTIFY activeTabChanged)
+    Q_PROPERTY(QString gitRepository READ gitRepository NOTIFY gitChanged)
+    Q_PROPERTY(QString gitView READ gitView NOTIFY gitChanged)
+    Q_PROPERTY(QVariantList gitNodes READ gitNodes NOTIFY gitChanged)
+    Q_PROPERTY(QVariantList gitEdges READ gitEdges NOTIFY gitChanged)
+    Q_PROPERTY(int gitLanes READ gitLanes NOTIFY gitChanged)
+    Q_PROPERTY(QVariantList gitStatus READ gitStatus NOTIFY gitChanged)
+    Q_PROPERTY(bool gitLogLoading READ gitLogLoading NOTIFY gitChanged)
+    Q_PROPERTY(bool gitStatusLoading READ gitStatusLoading NOTIFY gitChanged)
+    Q_PROPERTY(QString gitLogError READ gitLogError NOTIFY gitChanged)
+    Q_PROPERTY(QString gitStatusError READ gitStatusError NOTIFY gitChanged)
 
   public:
     explicit FfiClientBridge(QObject *parent = nullptr);
@@ -50,6 +60,16 @@ class FfiClientBridge : public QObject {
     QVariantList tabs() const;
     int activeTabIndex() const { return tabs_.indexOf(activeTab_); }
     bool terminalActive() const { return qobject_cast<TerminalSession *>(activeTab_) != nullptr; }
+    QString gitRepository() const { return gitRepository_; }
+    QString gitView() const { return gitView_; }
+    QVariantList gitNodes() const { return gitNodes_; }
+    QVariantList gitEdges() const { return gitEdges_; }
+    int gitLanes() const { return gitLanes_; }
+    QVariantList gitStatus() const { return gitStatus_; }
+    bool gitLogLoading() const { return gitLogLoading_; }
+    bool gitStatusLoading() const { return gitStatusLoading_; }
+    QString gitLogError() const { return gitLogError_; }
+    QString gitStatusError() const { return gitStatusError_; }
 
     Q_INVOKABLE void connectToServer(const QString &host, int port = 3490);
     Q_INVOKABLE void ping();
@@ -74,6 +94,8 @@ class FfiClientBridge : public QObject {
     Q_INVOKABLE void completeTerminalInput();
     Q_INVOKABLE void interruptTerminal();
     Q_INVOKABLE void submitAgentInput(const QString &input);
+    Q_INVOKABLE bool handleGitCommand(const QString &input);
+    Q_INVOKABLE void openGitFileDiff(int index);
 
   signals:
     void connectionChanged();
@@ -90,6 +112,7 @@ class FfiClientBridge : public QObject {
     void activeTerminalChanged();
     void tabsChanged();
     void activeTabChanged();
+    void gitChanged();
 
   private:
     using Reply = std::function<void(quint16, const QByteArray &)>;
@@ -138,6 +161,11 @@ class FfiClientBridge : public QObject {
     void handleTerminalEvent(quint16 method, const QByteArray &payload);
     void invalidateTerminals();
     void terminalError(TerminalSession *terminal, const QString &message);
+    void updateGitRepository();
+    void fetchGitLog();
+    void fetchGitStatus();
+    void openGitDiff(const QString &base, const QString &target, const QString &file = {});
+    void fetchGitDiff(WorkspaceDocument *document);
 
     QTcpSocket socket_;
     QTimer pollTimer_;
@@ -162,6 +190,14 @@ class FfiClientBridge : public QObject {
     QObject *activeTab_{};
     // start 的响应可能晚于首条输出；暂存同样有容量和会话数量上限。
     QHash<quint32, QByteArray> earlyTerminalOutput_;
+    // 仅由 @GIT 命令读取；提交、文件事件和重连均不主动刷新 Git 快照。
+    QString gitRepository_;
+    QString gitView_{QStringLiteral("tree")};
+    QVariantList gitNodes_, gitEdges_, gitStatus_;
+    int gitLanes_{};
+    bool gitLogLoading_{}, gitStatusLoading_{};
+    QString gitLogError_, gitStatusError_;
+    quint64 gitLogGeneration_{}, gitStatusGeneration_{};
 };
 
 } // namespace tina::ui

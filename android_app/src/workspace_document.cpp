@@ -3,6 +3,10 @@
 
 #include <QStringConverter>
 #include <QTextDocument>
+#include <QAbstractTextDocumentLayout>
+#include <QTextBlock>
+#include <QTextLayout>
+#include <algorithm>
 
 namespace tina::ui {
 
@@ -20,11 +24,43 @@ void WorkspaceDocument::setText(const QString &text) {
 void WorkspaceDocument::attach(QQuickTextDocument *document) {
     if (!document || document == quickDocument_)
         return;
+    if (quickDocument_) {
+        disconnect(quickDocument_->textDocument(), nullptr, this, nullptr);
+        disconnect(quickDocument_->textDocument()->documentLayout(), nullptr, this, nullptr);
+    }
     delete highlighter_;
     quickDocument_ = document;
     highlighter_ = new CodeHighlighter(document->textDocument(), path_);
     // 由本文档管理生命周期，编辑器提前销毁时高亮器会自动解除文档关联。
     highlighter_->setParent(this);
+    const auto changed = [this] { ++layoutRevision_; emit layoutChanged(); };
+    connect(document->textDocument(), &QTextDocument::contentsChanged, this, changed);
+    connect(document->textDocument()->documentLayout(),
+            &QAbstractTextDocumentLayout::documentSizeChanged, this, changed);
+    changed();
+}
+
+QVariantList WorkspaceDocument::visibleLines(qreal top, qreal height) const {
+    QVariantList lines;
+    if (!quickDocument_ || height <= 0)
+        return lines;
+    auto *document = quickDocument_->textDocument();
+    auto *layout = document->documentLayout();
+    // 使用编辑器实际排版的行框与基线，避免 FontMetrics 的取整误差逐行累积。
+    const int position = layout->hitTest(QPointF(document->documentMargin() + 1,
+                                                std::max(qreal(0), top)), Qt::FuzzyHit);
+    auto block = position >= 0 ? document->findBlock(position) : document->begin();
+    for (; block.isValid(); block = block.next()) {
+        const auto rect = layout->blockBoundingRect(block);
+        if (rect.top() > top + height)
+            break;
+        if (rect.bottom() < top || !block.layout()->lineCount())
+            continue;
+        const auto line = block.layout()->lineAt(0);
+        lines.append(QVariantMap{{"number", block.blockNumber() + 1},
+                                 {"baseline", rect.y() + line.y() + line.ascent()}});
+    }
+    return lines;
 }
 
 bool WorkspaceDocument::applyRemote(const QByteArray &bytes, quint64 revision) {
