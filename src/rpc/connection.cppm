@@ -62,7 +62,8 @@ class Connection {
             return true;
 
         for (int i = 0; i < 8; ++i) {
-            auto n = socket_.try_recv((void *)input_.data(), input_.readable_bytes());
+            input_.ensure_writable(8192);
+            auto n = socket_.try_recv(input_.writable_data(), input_.writable_bytes());
 
             if (!n)
                 return true;
@@ -73,6 +74,8 @@ class Connection {
                 // EOF 时不允许残留不完整的 RPC Frame。
                 return input_.empty();
             }
+
+            input_.commit_write(*n);
 
             while (auto request = decode_frame(input_)) {
                 if (request->kind != Kind::request || pending_ >= max_inflight ||

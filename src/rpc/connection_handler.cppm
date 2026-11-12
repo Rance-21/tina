@@ -95,9 +95,13 @@ namespace {
 //   2. 若本次是成功的 workspace_list_dir 请求，将该目录注册到本 I/O 线程的 DirWatcher。
 //   3. !conn->enqueue_response(response)：核销 pending_ 并将响应编码进 output_；若超 4 MiB
 //   上限则关闭连接。
-//   4. conn->wants_write()：先直接调用一次非阻塞 write() 尝试当场发完；
-//      若当场发完则 output_ 变空，随后的 refresh_connection() 不会挂载 EPOLLOUT；
-//      若遇 EAGAIN 残留数据，则由 refresh_connection() 挂载 EPOLLOUT 等待内核缓冲区腾空。
+//   4. conn->wants_write()：先直接调用一次非阻塞 write() 尝试当场发完。
+//   5. 按需触发 refresh_connection()：
+//      由于 complete_response 由 wake_fd_ 跨线程任务触发（并未消耗 Socket 的 EPOLLONESHOT），
+//      记录入队前的待写状态 had_write：若像 ping 这类小响应在 write() 中当场一次写完，
+//      发送前后 wants_write() 均为 false（状态未变）且连接未到达关闭条件（!conn->finished()），
+//      则内核中原有的 EPOLLONESHOT | EPOLLIN 监听依然有效，直接跳过 refresh_connection()，
+//      省去每次响应不必要触发的 epoll_ctl(EPOLL_CTL_MOD) 系统调用。
 void complete_response(const std::weak_ptr<Connection> &weak, net::EventLoop &loop,
                        ConnectionMap &connections, ConnectionCounter &counter,
                        const std::shared_ptr<DirWatcher> &watcher, const Frame &response,
@@ -110,13 +114,16 @@ void complete_response(const std::weak_ptr<Connection> &weak, net::EventLoop &lo
         if (!watched_dir.empty() && response.status == Status::ok && watcher)
             watcher->watch(watched_dir, conn);
 
+        const bool had_write = conn->wants_write();
+
         if (!conn->enqueue_response(response)) {
             close_connection(loop, connections, counter, conn->fd());
             return;
         }
         if (conn->wants_write())
             conn->write();
-        refresh_connection(loop, connections, counter, conn);
+        if (conn->finished() || conn->wants_write() != had_write)
+            refresh_connection(loop, connections, counter, conn);
     } catch (...) {
         close_connection(loop, connections, counter, conn->fd());
     }
@@ -193,7 +200,6 @@ void handle_request(Frame request, const std::weak_ptr<Connection> &weak, int co
         request.payload = "internal server error";
     }
 
-    // 目前还没有编码 response
     (void)loop.post_task([weak, &loop, &connections, &counter, watcher,
                           response = std::move(request), watched_dir = std::move(watched_dir)] {
         complete_response(weak, loop, connections, counter, watcher, response, watched_dir);

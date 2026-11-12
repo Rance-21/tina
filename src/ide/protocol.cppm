@@ -97,21 +97,24 @@ static bool valid_header(const Frame &frame) {
 }
 
 // 客户端和服务端共用同一帧头。Length 不含自己的 4 字节，按当前负载重新计算。
+// 直接在输出 Buffer 尾部申请整帧连续空间（17 字节帧头 + Payload）并原地写入，
+// 消除栈上临时 header 数组的中转拷贝以及分两次 append 的开销。
 export void encode_frame(const Frame &frame, net::Buffer &out) {
-    if (frame.payload.size() > max_frame_length - min_frame_length || !valid_header(frame))
+    const std::size_t payload_size = frame.payload.size();
+    if (payload_size > max_frame_length - min_frame_length || !valid_header(frame))
         throw std::invalid_argument("invalid RPC frame");
 
-    std::array<char, frame_header_size> header;
-    write_be(header.data(), min_frame_length + static_cast<std::uint32_t>(frame.payload.size()));
+    char *dst = out.begin_write(frame_header_size + payload_size);
+    write_be(dst, min_frame_length + static_cast<std::uint32_t>(payload_size));
 
-    header[4] = static_cast<char>(frame.kind);
+    dst[4] = static_cast<char>(frame.kind);
 
-    write_be(header.data() + 5, frame.request_id);
-    write_be(header.data() + 13, std::to_underlying(frame.method));
-    write_be(header.data() + 15, std::to_underlying(frame.status));
+    write_be(dst + 5, frame.request_id);
+    write_be(dst + 13, std::to_underlying(frame.method));
+    write_be(dst + 15, std::to_underlying(frame.status));
 
-    out.append(header.data(), header.size());
-    out.append(frame.payload.data(), frame.payload.size());
+    if (payload_size > 0)
+        std::memcpy(dst + frame_header_size, frame.payload.data(), payload_size);
 }
 
 // 每次只取一帧。半包留在输入缓冲区；非法长度立即报错，不按外部长度预分配。
@@ -138,6 +141,7 @@ export std::optional<Frame> decode_frame(net::Buffer &in) {
     if (!valid_header(frame))
         throw std::invalid_argument("invalid RPC frame header");
 
+    // 完整的 payload
     frame.payload.assign(bytes + frame_header_size, length - min_frame_length);
     in.retrieve(4 + length);
     return frame;
@@ -371,8 +375,10 @@ export inline std::optional<std::uint32_t> decode_terminal_state_id(std::string_
 // ============================================================================
 // 设计原则：
 //   - 紧凑高效，不携带任何校验码（CRC）或冗余外层长度/条数头（Frame 已携带总 Length）；
-//   - 服务端解码 Request 优先使用 string_view 零拷贝视图，避免在 Frame::payload 之上二次分配 std::string；
-//   - 仅对单行轻量包装函数使用 inline，包含循环或复杂分支的编解码函数不加 inline，避免代码膨胀污染 L1 I-Cache。
+//   - 服务端解码 Request 优先使用 string_view 零拷贝视图，避免在 Frame::payload 之上二次分配
+//   std::string；
+//   - 仅对单行轻量包装函数使用 inline，包含循环或复杂分支的编解码函数不加 inline，避免代码膨胀污染
+//   L1 I-Cache。
 
 // git_log 默认最大拉取提交数量。
 export inline constexpr std::uint32_t git_log_limit = 100;
@@ -435,7 +441,8 @@ export inline std::string encode_git_status_request(const GitStatusRequest &req)
     return encode_git_status_request(req.path);
 }
 
-// 零拷贝校验并返回指向 Frame::payload 内部的仓库路径视图（供服务端直接消费，不分配新 std::string）。
+// 零拷贝校验并返回指向 Frame::payload 内部的仓库路径视图（供服务端直接消费，不分配新
+// std::string）。
 export inline std::optional<std::string_view>
 decode_git_path_request_view(std::string_view payload) noexcept {
     if (payload.size() > std::numeric_limits<std::uint16_t>::max() ||
@@ -658,8 +665,7 @@ export std::string encode_git_log_response(std::span<const GitCommit> commits) {
     return out;
 }
 
-export std::optional<std::vector<GitCommit>>
-decode_git_log_response(std::string_view payload) {
+export std::optional<std::vector<GitCommit>> decode_git_log_response(std::string_view payload) {
     PayloadReader reader(payload);
     std::vector<GitCommit> commits;
 

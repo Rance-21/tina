@@ -36,6 +36,7 @@ make_method_code(MethodGroup group, std::uint8_t op, bool event_only = false) no
 
 export enum class Method : std::uint16_t {
     // 0x00xx: System 模块
+    // 385463
     system_ping = make_method_code(MethodGroup::system, 1), // 0x0001 请求：检查连通性。
 
     // 0x01xx: KV 模块
