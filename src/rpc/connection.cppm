@@ -53,17 +53,16 @@ class Connection {
     //   1. draining_ 为 true：处于停机排空阶段，不再读取新数据，直接返回 true。
     //   2. 循环最多读 8 次（上限 64 KiB）：防止单条活跃连接饥饿同一 I/O 线程上的其他连接。
     //      - !n (EAGAIN)：内核接收缓冲区已读空，正常返回 true 等待下次 EPOLLIN。
-    //      - *n == 0 (EOF)：对端发送 FIN 关闭写端；若 input_ 还有未凑齐的半包则视为协议错误返回 false。
+    //      - *n == 0 (EOF)：对端发送 FIN 关闭写端；若 input_ 还有未凑齐的半包则视为协议错误返回
+    //      false。
     //      - *n > 0：追加到 input_ 并循环 decode_frame() 拆包；若非 request 帧、在途请求达到
     //        max_inflight (64) 或 WorkerPool 拒绝接收任务，则返回 false 关闭连接。
     template <typename Submit> bool read(Submit &&submit) {
         if (draining_)
             return true;
 
-        std::array<char, 8192> chunk{};
-
         for (int i = 0; i < 8; ++i) {
-            auto n = socket_.try_recv(chunk.data(), chunk.size());
+            auto n = socket_.try_recv((void *)input_.data(), input_.readable_bytes());
 
             if (!n)
                 return true;
@@ -74,8 +73,6 @@ class Connection {
                 // EOF 时不允许残留不完整的 RPC Frame。
                 return input_.empty();
             }
-
-            input_.append(chunk.data(), *n);
 
             while (auto request = decode_frame(input_)) {
                 if (request->kind != Kind::request || pending_ >= max_inflight ||
@@ -88,15 +85,16 @@ class Connection {
         return true;
     }
 
-    // Worker 算完响应后由所属 I/O 线程调用：核销一个在途请求（--pending_），并将响应帧编码进 output_。
-    // 分支逻辑：若在途计数异常为 0，或追加后输出缓冲区超过 max_output (4 MiB) 上限，则返回 false 关闭连接。
+    // Worker 算完响应后由所属 I/O 线程调用：核销一个在途请求（--pending_），并将响应帧编码进
+    // output_。 分支逻辑：若在途计数异常为 0，或追加后输出缓冲区超过 max_output (4 MiB)
+    // 上限，则返回 false 关闭连接。
     bool enqueue_response(const Frame &response) {
         const auto frame_size = frame_header_size + response.payload.size();
         if (pending_ == 0 || output_.readable_bytes() + frame_size > max_output)
             return false;
 
-        --pending_;
         encode_frame(response, output_);
+        --pending_;
         return true;
     }
 

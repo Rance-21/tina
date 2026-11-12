@@ -141,6 +141,7 @@ class WorkerPool {
 
                 // 没有任务时释放锁并休眠。
                 while (tasks_.empty() && !stopping_) {
+                    //
                     if (pthread_cond_wait(&cv_, &mutex_) != 0)
                         std::terminate();
                 }

@@ -1,5 +1,4 @@
 module;
-#include <errno.h>
 #include <sys/epoll.h>
 #include <unistd.h>
 
@@ -34,7 +33,8 @@ namespace {
 //   1. 基础掩码带 EPOLLONESHOT：每次触发事件后内核自动屏蔽该 fd，直到处理完后显式重装。
 //   2. 读分支（!conn.peer_eof() && !conn.draining()）：只要对端未发 FIN
 //   且服务端未停机，就继续监听可读与对端半关闭。
-//   3. 写分支（conn.wants_write()）：【按需挂载】仅当 output_ 仍有未发完的积压数据时才监听 EPOLLOUT，
+//   3. 写分支（conn.wants_write()）：【按需挂载】仅当 output_ 仍有未发完的积压数据时才监听
+//   EPOLLOUT，
 //      避免 Socket 长期可写导致 epoll_wait 忙轮询空转。
 net::EpollInterest interests(const Connection &conn) {
     auto mask = static_cast<net::EpollInterest>(EPOLLONESHOT);
@@ -124,7 +124,8 @@ void complete_response(const std::weak_ptr<Connection> &weak, net::EventLoop &lo
 
 // Method 编号采用 16 位位域编码（[15:8] MethodGroup | [7] event_only | [6:0] op）：
 //   1. 先通过 is_event_only_method() 单指令位测试拦截仅限服务端推送的 Event 方法（Bit 7 == 1）。
-//   2. 再通过 method_group() 单指令位与（& 0xFF00）提取高 8 位业务分组，直接由紧凑跳转表路由到对应模块。
+//   2. 再通过 method_group() 单指令位与（& 0xFF00）提取高 8
+//   位业务分组，直接由紧凑跳转表路由到对应模块。
 void dispatch_request(Frame &request, KvState &kv, std::string &watched_dir,
                       server::TerminalManager *terminal_mgr, int conn_fd) {
     if (is_event_only_method(request.method)) {
@@ -178,8 +179,7 @@ void dispatch_request(Frame &request, KvState &kv, std::string &watched_dir,
 //   3. 业务执行完毕后，通过 loop.post_task 将响应帧投递回所属 I/O 线程执行 complete_response()。
 void handle_request(Frame request, const std::weak_ptr<Connection> &weak, int conn_fd,
                     net::EventLoop &loop, ConnectionMap &connections, ConnectionCounter &counter,
-                    const std::shared_ptr<KvState> &kv,
-                    const std::shared_ptr<DirWatcher> &watcher,
+                    const std::shared_ptr<KvState> &kv, const std::shared_ptr<DirWatcher> &watcher,
                     const std::shared_ptr<server::TerminalManager> &terminal_mgr) {
     request.kind = Kind::response;
     std::string watched_dir;
@@ -195,8 +195,7 @@ void handle_request(Frame request, const std::weak_ptr<Connection> &weak, int co
 
     // 目前还没有编码 response
     (void)loop.post_task([weak, &loop, &connections, &counter, watcher,
-                          response = std::move(request),
-                          watched_dir = std::move(watched_dir)] {
+                          response = std::move(request), watched_dir = std::move(watched_dir)] {
         complete_response(weak, loop, connections, counter, watcher, response, watched_dir);
     });
 }
@@ -297,9 +296,9 @@ void register_connection(net::Socket socket, net::EventLoop &loop, ConnectionMap
 } // namespace
 
 // 创建绑定在本 I/O 线程上的 TerminalManager，并注入向客户端 Connection 推送 Event 帧的回调。
-export std::shared_ptr<server::TerminalManager>
-make_terminal_manager(net::EventLoop &loop, ConnectionMap &connections,
-                      ConnectionCounter &counter) {
+export std::shared_ptr<server::TerminalManager> make_terminal_manager(net::EventLoop &loop,
+                                                                      ConnectionMap &connections,
+                                                                      ConnectionCounter &counter) {
     return std::make_shared<server::TerminalManager>(
         loop, [&loop, &connections, &counter](int conn_fd, const Frame &event) {
             auto it = connections.find(conn_fd);

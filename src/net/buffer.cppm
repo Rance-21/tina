@@ -9,19 +9,18 @@ class Buffer {
         storage_.reserve(reserve_bytes);
     }
 
-    [[nodiscard]]
-    std::size_t readable_bytes() const noexcept {
+    [[nodiscard]] std::size_t inline readable_bytes() const noexcept {
         return storage_.size() - read_index_;
     }
 
     [[nodiscard]]
-    bool empty() const noexcept {
+    inline bool empty() const noexcept {
         return readable_bytes() == 0;
     }
 
     // 返回当前尚未消费的数据起点。
     [[nodiscard]]
-    const char *data() const noexcept {
+    inline const char *data() const noexcept {
         if (empty()) {
             return nullptr;
         }

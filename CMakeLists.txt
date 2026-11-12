@@ -118,3 +118,39 @@ set_tests_properties(rpc_integration PROPERTIES
     TIMEOUT 20
     RUN_SERIAL TRUE
 )
+
+# 压测程序 tina_bench。
+add_executable(tina_bench benchmark/main.cpp)
+
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(tina_bench PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+    )
+endif()
+
+set_target_properties(tina_bench PROPERTIES
+    CXX_MODULE_STD ON
+    RUNTIME_OUTPUT_DIRECTORY "$<1:${PROJECT_SOURCE_DIR}>"
+)
+
+target_sources(tina_bench
+    PRIVATE
+    FILE_SET CXX_MODULES
+    FILES
+        src/net/buffer.cppm
+        src/net/socket.cppm
+        src/net/epoll.cppm
+        src/rpc/protocol.cppm
+        src/ide/protocol.cppm
+        src/ide/client_protocol.cppm
+        benchmark/stats.cppm
+        benchmark/workload.cppm
+        benchmark/client.cppm
+)
+
+target_link_libraries(tina_bench PRIVATE
+    Threads::Threads
+)
+
