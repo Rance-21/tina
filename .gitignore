@@ -36,6 +36,7 @@ notes.md
 .cache/
 logs/
 .venv
+build-release/
 
 ddns
 knowledge.md

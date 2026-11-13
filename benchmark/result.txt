@@ -13,64 +13,64 @@
   Measured Duration      : 25.00 s
 
 [2. Throughput & Request Summary]
-  Warmup Completed       : 2583126 reqs (errors: 0)
-  Measured Completed     : 13034209 reqs
+  Warmup Completed       : 2475518 reqs (errors: 0)
+  Measured Completed     : 12528076 reqs
   Measured Errors        : 0 reqs
   Success Rate           : 100.00 %
-  Average QPS            : 521367.94 req/s
-  Peak 1s QPS            : 538159.00 req/s
-  Min 1s QPS             : 489795.00 req/s
-  TX Throughput          : 8.45 MiB/s (221581553 bytes)
-  RX Throughput          : 10.44 MiB/s (273718389 bytes)
-  Total Bandwidth        : 18.89 MiB/s
+  Average QPS            : 501122.86 req/s
+  Peak 1s QPS            : 516392.00 req/s
+  Min 1s QPS             : 476675.00 req/s
+  TX Throughput          : 8.12 MiB/s (212977292 bytes)
+  RX Throughput          : 10.04 MiB/s (263089596 bytes)
+  Total Bandwidth        : 18.16 MiB/s
 
 [3. Latency Distribution (Microseconds / Milliseconds)]
-  Min                    :      37.29 us  (  0.0373 ms)
-  Avg (Mean)             :     116.96 us  (  0.1170 ms)
-  StdDev                 :      95.06 us  (  0.0951 ms)
-  P50 (Median)           :     115.37 us  (  0.1154 ms)
-  P75                    :     120.19 us  (  0.1202 ms)
-  P90                    :     125.26 us  (  0.1253 ms)
-  P95                    :     129.54 us  (  0.1295 ms)
-  P99                    :     188.60 us  (  0.1886 ms)
-  P99.9                  :     293.86 us  (  0.2939 ms)
-  P99.99                 :     400.72 us  (  0.4007 ms)
-  Max                    :   45508.19 us  ( 45.5082 ms)
+  Min                    :      37.63 us  (  0.0376 ms)
+  Avg (Mean)             :     121.99 us  (  0.1220 ms)
+  StdDev                 :      78.19 us  (  0.0782 ms)
+  P50 (Median)           :     120.48 us  (  0.1205 ms)
+  P75                    :     126.12 us  (  0.1261 ms)
+  P90                    :     132.26 us  (  0.1323 ms)
+  P95                    :     137.77 us  (  0.1378 ms)
+  P99                    :     185.93 us  (  0.1859 ms)
+  P99.9                  :     280.86 us  (  0.2809 ms)
+  P99.99                 :     389.16 us  (  0.3892 ms)
+  Max                    :   37934.41 us  ( 37.9344 ms)
 
 [4. Latency Histogram]
   < 20 us       :          0  (  0.00 %)
-  20 - 50 us    :       1081  (  0.01 %)
-  50 - 100 us   :     398173  (  3.05 %)
-  100 - 200 us  :   12527242  ( 96.11 %)
-  200 - 500 us  :     107429  (  0.82 %)
-  500 - 1000 us :        118  (  0.00 %)
-  >= 1000 us    :        166  (  0.00 %)
+  20 - 50 us    :        736  (  0.01 %)
+  50 - 100 us   :     187213  (  1.49 %)
+  100 - 200 us  :   12246195  ( 97.75 %)
+  200 - 500 us  :      93405  (  0.75 %)
+  500 - 1000 us :        314  (  0.00 %)
+  >= 1000 us    :        213  (  0.00 %)
 
 [5. Per-Second Measured QPS Timeline]
-  Sec  1 (t= 6s) :     523975 req/s
-  Sec  2 (t= 7s) :     520541 req/s
-  Sec  3 (t= 8s) :     522593 req/s
-  Sec  4 (t= 9s) :     517265 req/s
-  Sec  5 (t=10s) :     521202 req/s
-  Sec  6 (t=11s) :     528383 req/s
-  Sec  7 (t=12s) :     520146 req/s
-  Sec  8 (t=13s) :     489795 req/s
-  Sec  9 (t=14s) :     537168 req/s
-  Sec 10 (t=15s) :     526893 req/s
-  Sec 11 (t=16s) :     526864 req/s
-  Sec 12 (t=17s) :     533272 req/s
-  Sec 13 (t=18s) :     529093 req/s
-  Sec 14 (t=19s) :     526023 req/s
-  Sec 15 (t=20s) :     523972 req/s
-  Sec 16 (t=21s) :     519408 req/s
-  Sec 17 (t=22s) :     525899 req/s
-  Sec 18 (t=23s) :     521592 req/s
-  Sec 19 (t=24s) :     538159 req/s
-  Sec 20 (t=25s) :     511381 req/s
-  Sec 21 (t=26s) :     517549 req/s
-  Sec 22 (t=27s) :     519706 req/s
-  Sec 23 (t=28s) :     499122 req/s
-  Sec 24 (t=29s) :     516041 req/s
-  Sec 25 (t=30s) :     518167 req/s
+  Sec  1 (t= 6s) :     516392 req/s
+  Sec  2 (t= 7s) :     508264 req/s
+  Sec  3 (t= 8s) :     501640 req/s
+  Sec  4 (t= 9s) :     495462 req/s
+  Sec  5 (t=10s) :     486820 req/s
+  Sec  6 (t=11s) :     490932 req/s
+  Sec  7 (t=12s) :     496552 req/s
+  Sec  8 (t=13s) :     501670 req/s
+  Sec  9 (t=14s) :     505836 req/s
+  Sec 10 (t=15s) :     504198 req/s
+  Sec 11 (t=16s) :     502856 req/s
+  Sec 12 (t=17s) :     499283 req/s
+  Sec 13 (t=18s) :     512943 req/s
+  Sec 14 (t=19s) :     513890 req/s
+  Sec 15 (t=20s) :     515769 req/s
+  Sec 16 (t=21s) :     506852 req/s
+  Sec 17 (t=22s) :     500426 req/s
+  Sec 18 (t=23s) :     499329 req/s
+  Sec 19 (t=24s) :     490270 req/s
+  Sec 20 (t=25s) :     497183 req/s
+  Sec 21 (t=26s) :     505328 req/s
+  Sec 22 (t=27s) :     498506 req/s
+  Sec 23 (t=28s) :     498174 req/s
+  Sec 24 (t=29s) :     476675 req/s
+  Sec 25 (t=30s) :     502826 req/s
 
 ====================================================================

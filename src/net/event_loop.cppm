@@ -82,8 +82,12 @@ class EventLoop {
         if (!task)
             return false;
 
+        bool empty;
+
         {
             std::lock_guard lock(mutex_);
+
+            empty = tasks_.empty();
 
             if (stopping_.load())
                 return false;
@@ -91,14 +95,18 @@ class EventLoop {
             tasks_.push_back(std::move(task));
         }
 
-        wakeup();
+        if (empty) {
+            wakeup();
+        }
+
         return true;
     }
 
     // I/O 线程主事件循环。
     // 分支逻辑：
     //   1. 若就绪 fd 是 wake_fd_：读空 eventfd 计数器，批量执行跨线程队列 tasks_ 中的任务。
-    //   2. 若就绪 fd 是普通 Socket/timerfd：查找对应回调并执行；若回调抛异常则注销该 fd 防止反复触发。
+    //   2. 若就绪 fd 是普通 Socket/timerfd：查找对应回调并执行；若回调抛异常则注销该 fd
+    //   防止反复触发。
     void run() {
         if (started_.exchange(true))
             throw std::logic_error("EventLoop already started");
