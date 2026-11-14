@@ -148,7 +148,7 @@ inline std::optional<std::string> projects_root_dir() {
 
 // 校验客户端传入的相对于 ~/projects 的路径（如 "tina" 或 "tina/src/main.cpp"），
 // 严格禁止以 "/" 开头、禁止空路径段 "//"、禁止 "." 与 ".." 越界逃逸。
-inline std::optional<std::string> resolve_workspace_path(std::string_view rel_path) {
+std::optional<std::string> resolve_workspace_path(std::string_view rel_path) {
     if (rel_path.empty() || rel_path.front() == '/' || rel_path.back() == '/' ||
         rel_path.find('\0') != std::string_view::npos)
         return std::nullopt;
@@ -179,7 +179,8 @@ inline std::optional<std::string> resolve_workspace_path(std::string_view rel_pa
 
 // 枚举指定完整目录路径下的一级子项（深度为 1，不递归展开）。
 // 成功返回 0，失败返回对应的 errno（> 0 表示 open 失败，< 0 表示 readdir 失败的 -errno）。
-inline int read_directory_entries(const std::string &target_path, std::vector<DirEntry> &entries) {
+int read_directory_entries(const std::string &target_path, std::vector<DirEntry> &entries) {
+    // disk io
     ScopedDir dir(::opendir(target_path.c_str()));
     if (!dir)
         return errno != 0 ? errno : EIO;
@@ -188,6 +189,7 @@ inline int read_directory_entries(const std::string &target_path, std::vector<Di
 
     while (true) {
         errno = 0;
+        // syscall （绝大部分一次），会在用户态缓冲
         dirent *entry = ::readdir(dir.get());
         if (entry == nullptr) {
             if (errno != 0)

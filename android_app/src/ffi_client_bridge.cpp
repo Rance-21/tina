@@ -13,6 +13,7 @@ constexpr quint16 ListProjects = 0x0201;
 constexpr quint16 ListDir = 0x0202;
 constexpr quint16 ReadFile = 0x0203;
 constexpr quint16 WriteFile = 0x0204;
+constexpr quint16 CloseDir = 0x0205;
 constexpr quint16 Unavailable = 11;
 constexpr quint32 TransientStatusMask = (1u << 6) | (1u << 7) | (1u << 10) | (1u << 11) | (1u << 12);
 constexpr quint32 MaxFrame = 1024 * 1024;
@@ -207,7 +208,9 @@ void FfiClientBridge::completeRequest(quint64 token, quint16 status, const QByte
     // 只有无副作用的读操作可以重试；Shell 创建、输入、补全不可重放。
     const bool transient = status <= 12 && ((TransientStatusMask >> status) & 1u) != 0;
     const bool retryable = it->method == Ping || it->method == ListProjects
-                           || it->method == ListDir || it->method == ReadFile
+                           || (it->method == ListDir
+                               && !closingDirectories_.contains(QString::fromUtf8(it->payload.sliced(2))))
+                           || it->method == ReadFile
                            || (it->method >= 0x0401 && it->method <= 0x0403);
     if (status && transient && retryable && it->attempts < 3 && connected()) {
         it->waiting = false;
@@ -271,7 +274,7 @@ void FfiClientBridge::onReadyRead() {
             if (!decodeDirectory(payload, path, entries))
                 continue;
             auto directory = browserDirectories_.find(path);
-            if (directory != browserDirectories_.end()) {
+            if (directory != browserDirectories_.end() && !closingDirectories_.contains(path)) {
                 if (directory->requestId)
                     directory->refreshPending = true;
                 else
@@ -343,25 +346,37 @@ void FfiClientBridge::setBrowserRoot(const QString &path) {
     browserRequested_ = true;
     if (directory_ != path) {
         directory_ = path;
-        browserDirectories_.clear();
+        // 切换项目也会移除整棵树，逐个释放原项目已加载目录的服务端监听。
+        const auto paths = browserDirectories_.keys();
+        for (const auto &oldPath : paths)
+            discardDirectory(oldPath);
     }
     fetchDirectory(path);
 }
 
 bool FfiClientBridge::browsing() const {
     const auto root = browserDirectories_.constFind(directory_);
-    return root != browserDirectories_.cend() && root->requestId != 0;
+    return root != browserDirectories_.cend()
+           && (root->requestId != 0 || closingDirectories_.contains(directory_));
 }
 
 void FfiClientBridge::fetchDirectory(QString path) {
     auto &directory = browserDirectories_[path];
-    if (directory.requestId)
+    if (directory.requestId || closingDirectories_.contains(path)) {
+        rebuildBrowserEntries();
         return;
+    }
     const auto requestId = nextId_++;
     directory.requestId = requestId;
     rebuildBrowserEntries();
     request(path.isEmpty() ? ListProjects : ListDir, path.isEmpty() ? QByteArray{} : pathPayload(path),
             [this, path, requestId](quint16 status, const QByteArray &payload) {
+        const auto closing = closingDirectories_.constFind(path);
+        if (closing != closingDirectories_.cend() && closing.value() == requestId) {
+            // 服务端在 list_dir 完成时才添加监听，必须等旧读取结束再关闭，避免监听泄漏。
+            closeDirectory(path);
+            return;
+        }
         auto directory = browserDirectories_.find(path);
         if (directory == browserDirectories_.end() || directory->requestId != requestId)
             return; // 切换项目或删除分支后，丢弃旧请求的响应。
@@ -428,16 +443,50 @@ void FfiClientBridge::applyDirectoryEntries(const QString &path, QVariantList en
 }
 
 void FfiClientBridge::discardDirectory(const QString &path) {
+    if (!browserDirectories_.contains(path))
+        return;
     const auto directory = browserDirectories_.take(path);
     for (const auto &row : directory.children) {
         const auto item = row.toMap();
         if (item.value("type").toInt() == 1)
             discardDirectory(item.value("path").toString());
     }
+    // 服务端只关闭指定目录，不会递归；子目录也要分别取消监听。
+    if (!path.isEmpty() && !closingDirectories_.contains(path)) {
+        closingDirectories_.insert(path, directory.requestId);
+        if (!directory.requestId)
+            closeDirectory(path);
+    }
+}
+
+void FfiClientBridge::closeDirectory(const QString &path) {
+    closingDirectories_[path] = 0;
+    // 0x0205 请求与响应均为大端 u16 字节长度加 UTF-8 路径；关闭请求不自动重放。
+    request(CloseDir, pathPayload(path), [this, path](quint16 status, const QByteArray &payload) {
+        closingDirectories_.remove(path);
+        qsizetype offset = 0;
+        QString closedPath;
+        // 与公共客户端一致，空响应表示已关闭请求路径；同时兼容四字节长度的旧响应。
+        if (payload.startsWith(QByteArray(2, '\0')))
+            offset = 2;
+        const bool valid = payload.isEmpty()
+                           || (readString(payload, offset, closedPath)
+                               && offset == payload.size() && closedPath == path);
+        if (status || !valid)
+            setMessage(QStringLiteral("目录关闭失败：")
+                       + (status ? QString::fromUtf8(payload) : QStringLiteral("响应格式无效")));
+        // 用户快速重新展开时，先等 close_dir 收尾，再重新读取并恢复监听。
+        const auto directory = browserDirectories_.constFind(path);
+        if (connected() && directory != browserDirectories_.cend()
+            && (path == directory_ || directory->expanded))
+            fetchDirectory(path);
+        else
+            rebuildBrowserEntries();
+    });
 }
 
 void FfiClientBridge::rebuildBrowserEntries() {
-    // 用一份扁平列表显示可见行，仍由 ListView 按需创建代理；折叠只隐藏子项。
+    // 用扁平列表显示可见行，仍由 ListView 按需创建代理；已关闭分支不保留子项缓存。
     entries_.clear();
     const auto appendVisible = [this](auto &&append, const QString &path, int depth) -> void {
         const auto directory = browserDirectories_.constFind(path);
@@ -450,7 +499,8 @@ void FfiClientBridge::rebuildBrowserEntries() {
             const bool expanded = child != browserDirectories_.cend() && child->expanded;
             item.insert("depth", depth);
             item.insert("expanded", expanded);
-            item.insert("loading", expanded && child->requestId != 0);
+            item.insert("loading", expanded
+                        && (child->requestId != 0 || closingDirectories_.contains(childPath)));
             entries_.append(item);
             if (expanded)
                 append(append, childPath, depth + 1);
@@ -483,14 +533,16 @@ void FfiClientBridge::setEntryExpanded(int index, bool expanded) {
         return;
     }
 
-    auto &directory = browserDirectories_[path];
-    if (directory.expanded == expanded)
+    if (browserDirectories_.value(path).expanded == expanded)
         return;
-    directory.expanded = expanded;
-    if (expanded && !directory.requestId)
+    if (expanded) {
+        browserDirectories_[path].expanded = true;
         fetchDirectory(path);
-    else
+    } else {
+        // 单击已展开目录、回车和左方向键共用此入口，立即折叠并清空整条分支。
+        discardDirectory(path);
         rebuildBrowserEntries();
+    }
 }
 
 QVariantList FfiClientBridge::documents() const {
@@ -707,11 +759,6 @@ void FfiClientBridge::selectTab(int index) {
         selectDocument(documents_.indexOf(document));
     else if (auto *terminal = qobject_cast<TerminalSession *>(tab))
         selectTerminal(terminals_.indexOf(terminal));
-}
-
-void FfiClientBridge::submitAgentInput(const QString &input) {
-    if (input.trimmed().compare(QStringLiteral("@AI"), Qt::CaseInsensitive) == 0)
-        emit openAgentWindowRequested();
 }
 
 } // namespace tina::ui

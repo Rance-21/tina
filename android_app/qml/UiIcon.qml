@@ -82,36 +82,6 @@ Canvas {
                 ctx.lineTo(19, 11)
             }
             break
-        case "sparkle":
-            ctx.moveTo(12, 2)
-            ctx.quadraticCurveTo(12, 12, 22, 12)
-            ctx.quadraticCurveTo(12, 12, 12, 22)
-            ctx.quadraticCurveTo(12, 12, 2, 12)
-            ctx.quadraticCurveTo(12, 12, 12, 2)
-            ctx.closePath()
-            break
-        case "diamond":
-            ctx.moveTo(12, 2)
-            ctx.lineTo(22, 12)
-            ctx.lineTo(12, 22)
-            ctx.lineTo(2, 12)
-            ctx.closePath()
-            ctx.moveTo(12, 7)
-            ctx.lineTo(17, 12)
-            ctx.lineTo(12, 17)
-            ctx.lineTo(7, 12)
-            ctx.closePath()
-            break
-        case "cluster":
-            for (const point of [[12, 5], [5, 12], [19, 12], [12, 19]]) {
-                ctx.moveTo(point[0], point[1] - 3)
-                ctx.lineTo(point[0] + 3, point[1])
-                ctx.lineTo(point[0], point[1] + 3)
-                ctx.lineTo(point[0] - 3, point[1])
-                ctx.closePath()
-            }
-            ctx.fill()
-            return
         case "branch":
             ctx.moveTo(6, 7)
             ctx.lineTo(6, 17)

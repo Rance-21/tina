@@ -64,24 +64,19 @@ Window {
         id: rootCanvas
         anchors.fill: parent
 
-        // 状态控制
-        // 右侧 AI Agent 窗口：默认不显示，输入 @AI 回车切换显示/关闭（点击别处不关闭）
-        property bool agentWindowVisible: false
-
         // 对齐底部对话框弹出的窗口状态：
         // "none"   -> 不显示
-        // "menu"   -> 首字母输入 '@' 时展示的四行菜单 (AI / GIT / FILE / TERMINAL)
+        // "menu"   -> 首字母输入 '@' 时展示的三行菜单 (GIT / FILE / TERMINAL)
         // "git"    -> @GIT tree / worktree 在同一个弹窗显示 Git 数据
         // "folder" -> 点击左侧 Folder 按钮，或输入 @FILE 回车后弹出的文件窗口
         property string popupMode: "none"
 
         // 布局核心几何参数：
         // 左侧标签栏缩短，贴紧屏幕左侧；逻辑上保留左右分界区域，视觉上去除代码区左右分割线
-        // 标签栏和 Agent 面板底边跟随输入框，窗口尺寸变化时保持对齐。
+        // 标签栏底边跟随输入框，窗口尺寸变化时保持对齐。
         readonly property real leftColumnWidth: 108
-        readonly property real rightAgentWidth: Math.min(320, width * 0.3)
         readonly property real codeLeftMargin: leftColumnWidth + 10
-        readonly property real codeRightMargin: agentWindowVisible ? rightAgentWidth + 20 : 20
+        readonly property real codeRightMargin: 20
         readonly property real bottomMargin: 18
 
         ListModel { id: editorDocuments }
@@ -103,14 +98,9 @@ Window {
             fileList.forceActiveFocus()
         }
 
-        // @ 出来的菜单数据：左侧图标，往右字 (AI / GIT / FILE / TERMINAL)
+        // @ 出来的菜单数据：左侧图标，往右字 (GIT / FILE / TERMINAL)
         ListModel {
             id: atMenuModel
-            ListElement {
-                cmdKey: "AI"
-                iconName: "sparkle"
-                iconColor: "#58a6ff"
-            }
             ListElement {
                 cmdKey: "GIT"
                 iconName: "branch"
@@ -128,37 +118,8 @@ Window {
             }
         }
 
-        // 右侧 AI Agent 窗口内的对话列表模型（左上角模型 Icon + 右边对话名，点击展开）
-        ListModel {
-            id: agentDialoguesModel
-            ListElement {
-                modelIcon: "sparkle"
-                modelColor: "#58a6ff"
-                modelTag: "Gemini"
-                dialogueTitle: "重构 epoll 事件分发与零拷贝发包"
-                expanded: true
-                detailText: "已分析 src/net/epoll.cppm 与 socket.cppm：\n建议在发送大文件分块时引入 MSG_ZEROCOPY，并将 signalfd 纳入主 EventLoop 统一管理。"
-            }
-            ListElement {
-                modelIcon: "diamond"
-                modelColor: "#c084fc"
-                modelTag: "Codex"
-                dialogueTitle: "生成 Rust FFI 与 C++23 QObject 桥接层"
-                expanded: false
-                detailText: "已生成 extern \"C\" 导出符号定义：\n- tina_ffi_client_create\n- tina_ffi_client_send_command\n- tina_ffi_client_send_agent_prompt"
-            }
-            ListElement {
-                modelIcon: "cluster"
-                modelColor: "#34d399"
-                modelTag: "Antigravity"
-                dialogueTitle: "检查 workspace 相对路径安全校验"
-                expanded: false
-                detailText: "通过 std::filesystem::weakly_canonical 校验客户端请求路径，防止 .. 越界访问项目根目录之外的文件。"
-            }
-        }
-
         // ====================================================================
-        // 0. 底层：16:10 暗色背景图 + 中间代码区域（代码区、左侧区域、未开启AI时的右侧区域均不模糊，且无视觉分割线）
+        // 0. 底层：16:10 暗色背景图 + 中间代码区域（背景与代码区保持清晰，无视觉分割线）
         // ====================================================================
         Item {
             id: backgroundAndCodeScene
@@ -203,7 +164,7 @@ Window {
             }
         }
 
-        // 点击别处关闭弹窗的遮罩层（仅关闭 menu / git / folder 弹窗，绝不关闭右侧 AI 窗口）
+        // 点击别处关闭弹窗的遮罩层（关闭 menu / git / folder 弹窗）
         // ====================================================================
         MouseArea {
             id: outsideClickCatcher
@@ -220,7 +181,7 @@ Window {
         //    - 区域本身不模糊、无分界线、底部无小横线
         //    - 每个标签缩短、紧贴屏幕左侧（左边取消圆角 flatLeftEdge: true，仅右边圆角）
         //    - 标签内部透明模糊，选中高亮
-        //    - 区域逻辑最低点与右边 Agent 窗口最低点一致
+        //    - 区域底边与底部输入框对齐
         // ====================================================================
         Item {
             id: leftTabsContainer
@@ -307,198 +268,9 @@ Window {
             }
         }
 
-        // 2. 右侧：AI Agent 窗口
-        //    - 平时不显示（右侧区域也不模糊、无分界线）
-        //    - 只有输入 @AI 回车才展示，展示时带有左侧分界线与背景模糊
-        //    - 点击别处不关闭，再次输入 @AI 回车关闭
-        //    - 底边与输入框底边一致
-        // ====================================================================
-        Item {
-            id: rightAgentWindow
-            objectName: "agentPanel"
-            width: rootCanvas.rightAgentWidth
-            anchors.right: parent.right
-            anchors.rightMargin: 16
-            anchors.top: parent.top
-            anchors.topMargin: 18
-            anchors.bottom: bottomDialogBar.bottom
-            visible: rootCanvas.agentWindowVisible
-            opacity: rootCanvas.agentWindowVisible ? 1.0 : 0.0
-
-            Behavior on opacity { NumberAnimation { duration: 180 } }
-
-            // 展示右侧 AI 窗口时显示的左侧分界线
-            Rectangle {
-                id: agentLeftDividerLine
-                x: -10
-                y: 0
-                width: 1.5
-                height: parent.height
-                color: "#527cb8ff"
-            }
-
-            // 阻止点击穿透到外层
-            MouseArea {
-                anchors.fill: parent
-            }
-
-            GlassPanel {
-                anchors.fill: parent
-                blurSource: backgroundAndCodeScene
-                cornerRadius: 20
-                blurRadius: 32
-                tintColor: "#74111828"
-                borderColor: "#4c8cb4ff"
-                borderWidth: 1.2
-                highlightGlow: true
-            }
-
-            ColumnLayout {
-                anchors.fill: parent
-                anchors.margins: 14
-                spacing: 12
-
-                // 顶部标题栏
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 8
-
-                    Rectangle {
-                        implicitWidth: 8
-                        implicitHeight: 8
-                        radius: 4
-                        color: "#38bdf8"
-                    }
-
-                    Text {
-                        Layout.fillWidth: true
-                        text: "AI Agent"
-                        color: "#eef4ff"
-                        font.pixelSize: 14
-                        font.weight: Font.DemiBold
-                    }
-
-                    Text {
-                        text: "@AI"
-                        color: "#7c93b8"
-                        font.family: "monospace"
-                        font.pixelSize: 12
-                    }
-                }
-
-                // 内部一条条对话列表（左上角是模型的 Icon，从 Icon 右边开始是对话名，点击展开）
-                ListView {
-                    id: agentDialogueList
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    spacing: 10
-                    clip: true
-                    model: agentDialoguesModel
-
-                    delegate: Item {
-                        id: dialogueCard
-                        required property var model
-                        required property int index
-                        width: agentDialogueList.width
-                        height: cardCol.implicitHeight + 22
-
-                        Rectangle {
-                            anchors.fill: parent
-                            radius: 14
-                            color: cardMouse.containsMouse
-                                   ? "#42243452"
-                                   : (dialogueCard.model.expanded ? "#381e2d48" : "#26162034")
-                            border.color: dialogueCard.model.expanded ? "#687cb8ff" : "#288aa8d8"
-                            border.width: 1
-                        }
-
-                        ColumnLayout {
-                            id: cardCol
-                            anchors.top: parent.top
-                            anchors.left: parent.left
-                            anchors.right: parent.right
-                            anchors.margins: 11
-                            spacing: 8
-
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 10
-
-                                // 左上角模型 Icon
-                                Rectangle {
-                                    Layout.alignment: Qt.AlignTop
-                                    implicitWidth: 30
-                                    implicitHeight: 30
-                                    radius: 15
-                                    color: "#30ffffff"
-                                    border.color: dialogueCard.model.modelColor
-                                    border.width: 1.5
-
-                                    UiIcon {
-                                        anchors.centerIn: parent
-                                        name: dialogueCard.model.modelIcon
-                                        color: dialogueCard.model.modelColor
-                                        width: 18
-                                        height: 18
-                                    }
-                                }
-
-                                // 从 Icon 右边开始是对话名
-                                Text {
-                                    Layout.fillWidth: true
-                                    Layout.alignment: Qt.AlignVCenter
-                                    text: dialogueCard.model.dialogueTitle
-                                    color: "#f0f6ff"
-                                    font.pixelSize: 13
-                                    font.weight: Font.Medium
-                                    wrapMode: Text.WordWrap
-                                }
-
-                                UiIcon {
-                                    Layout.alignment: Qt.AlignTop
-                                    name: dialogueCard.model.expanded ? "chevron-down" : "chevron-right"
-                                    color: "#7c93b8"
-                                    implicitWidth: 14
-                                    implicitHeight: 14
-                                }
-                            }
-
-                            Rectangle {
-                                visible: dialogueCard.model.expanded
-                                Layout.fillWidth: true
-                                implicitHeight: 1
-                                color: "#22ffffff"
-                            }
-
-                            Text {
-                                visible: dialogueCard.model.expanded
-                                Layout.fillWidth: true
-                                text: "[" + dialogueCard.model.modelTag + "] " + dialogueCard.model.detailText
-                                color: "#b6c8e4"
-                                font.pixelSize: 12
-                                lineHeight: 1.35
-                                wrapMode: Text.WordWrap
-                            }
-                        }
-
-                        MouseArea {
-                            id: cardMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                agentDialoguesModel.setProperty(dialogueCard.index, "expanded", !dialogueCard.model.expanded)
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // ====================================================================
-        // 3. 与底部输入框对齐的毛玻璃弹窗。
+        // 2. 与底部输入框对齐的毛玻璃弹窗。
         //    支持三种状态：
-        //    - "menu"   : 首字母输入 '@' 时出现的四行选项（AI / GIT / FILE / TERMINAL）
+        //    - "menu"   : 首字母输入 '@' 时出现的三行选项（GIT / FILE / TERMINAL）
         //    - "git"    : 显示 Git 提交图或工作区修改，均由显式命令请求服务端
         //    - "folder" : 点击 Folder 按钮或输入 @FILE 回车后弹出的文件列表
         //    以上弹窗均在点击别处时关闭。
@@ -536,7 +308,7 @@ Window {
             }
 
             // ----------------------------------------------------------------
-            // 状态 A ("menu")：@ 菜单（AI / GIT / FILE / TERMINAL）
+            // 状态 A ("menu")：@ 菜单（GIT / FILE / TERMINAL）
             // ----------------------------------------------------------------
             ColumnLayout {
                 anchors.fill: parent
@@ -587,7 +359,7 @@ Window {
                                 }
                             }
 
-                            // 往右字：AI / GIT / FILE / TERMINAL
+                            // 往右字：GIT / FILE / TERMINAL
                             Text {
                                 Layout.fillWidth: true
                                 text: menuRow.model.cmdKey
@@ -802,11 +574,10 @@ Window {
         }
 
         // 提交处理逻辑：
-        // - @AI 回车   -> 切换右侧 AI 窗口显示/关闭（展示时带分界线与模糊，点击别处不关闭，再次 @AI 关闭）
         // - @FILE 回车 -> 等同于点击左侧 Folder 按钮，打开项目列表或当前项目文件树（点击别处关闭）
         // - @GIT tree / worktree / refresh -> Git 弹窗；diff [分支1] [分支2] -> 只读代码标签
         // - @TERMINAL add [id] / del id -> 管理左侧终端标签
-        // - 其他 @...  -> 关闭菜单并提交给 Agent
+        // - 其他 @...  -> 提示支持的命令，保留输入便于修改
         // - 非 @ 开头  -> 作为命令行提交
         // ====================================================================
         function submitCurrentInput() {
@@ -825,7 +596,7 @@ Window {
                     return
                 }
                 if (upper.split(/\s+/)[0] === "@GIT") {
-                    // Git 输入只走 Git RPC，不进入 Agent；分支名称保持原始大小写。
+                    // Git 输入走对应 RPC；分支名称保持原始大小写。
                     if (ffiBridge.handleGitCommand(raw)) {
                         bottomDialogBar.inputText = ""
                         const action = upper.split(/\s+/)[1] || "TREE"
@@ -835,28 +606,12 @@ Window {
                     }
                     return
                 }
-                ffiBridge.submitAgentInput(raw)
-
-                if (upper === "@AI") {
-                    rootCanvas.agentWindowVisible = !rootCanvas.agentWindowVisible
-                    bottomDialogBar.inputText = ""
-                    rootCanvas.popupMode = "none"
-                } else if (upper === "@FILE") {
+                if (upper === "@FILE") {
                     bottomDialogBar.inputText = ""
                     rootCanvas.showFiles()
                 } else {
-                    const titleText = raw.substring(1).trim()
-                    if (titleText.length > 0) {
-                        agentDialoguesModel.insert(0, {
-                            modelIcon: "sparkle",
-                            modelColor: "#58a6ff",
-                            modelTag: "Agent",
-                            dialogueTitle: titleText,
-                            expanded: false,
-                            detailText: "等待后端 FFI / RPC Agent 服务响应..."
-                        })
-                    }
-                    bottomDialogBar.inputText = ""
+                    // 未知命令保留原始草稿，不创建占位内容，也不发送到终端。
+                    bottomDialogBar.commandError = "未知命令，请使用 @GIT、@FILE 或 @TERMINAL"
                     rootCanvas.popupMode = "none"
                 }
             } else {

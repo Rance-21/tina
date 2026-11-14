@@ -11,7 +11,9 @@ void print_usage() {
               << "options:\n"
               << "  --host <addr>         Server host (default: 127.0.0.1)\n"
               << "  --port <port>         Server port (default: 3490)\n"
-              << "  --workload <name>     ping | kv_set | kv_get | kv_mixed | file_read | list_dir (default: ping)\n"
+              << "  --workload <name>     ping | kv_set | kv_get | kv_mixed | file_read | list_dir | fs_mixed (default: ping)\n"
+              << "  --fs-root <path>      fs_mixed 扫描的目录，相对 ~/projects (default: linux)\n"
+              << "  --fs-list-percent <n> fs_mixed 中 list_dir 占比 0..100，其余为 read_file (default: 50)\n"
               << "  --connections <n>     Number of TCP connections (default: 1)\n"
               << "  --inflight <n>        Max in-flight requests per connection, 1..64 (default: 64)\n"
               << "  --warmup <sec>        Warmup duration in seconds (default: 5)\n"
@@ -42,6 +44,11 @@ bench::BenchConfig parse_args(int argc, char *argv[]) {
             config.port = std::string(require_value(arg));
         } else if (arg == "--workload") {
             config.workload.type = bench::parse_workload_type(require_value(arg));
+        } else if (arg == "--fs-root") {
+            config.workload.fs_root = std::string(require_value(arg));
+        } else if (arg == "--fs-list-percent") {
+            config.workload.fs_list_dir_percent = static_cast<std::uint32_t>(
+                std::min<unsigned long long>(std::stoull(std::string(require_value(arg))), 100));
         } else if (arg == "--connections") {
             config.connections = std::stoull(std::string(require_value(arg)));
         } else if (arg == "--inflight") {

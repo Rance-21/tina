@@ -93,7 +93,6 @@ class FfiClientBridge : public QObject {
     Q_INVOKABLE bool submitCommand(const QString &command);
     Q_INVOKABLE void completeTerminalInput();
     Q_INVOKABLE void interruptTerminal();
-    Q_INVOKABLE void submitAgentInput(const QString &input);
     Q_INVOKABLE bool handleGitCommand(const QString &input);
     Q_INVOKABLE void openGitFileDiff(int index);
 
@@ -107,7 +106,6 @@ class FfiClientBridge : public QObject {
     void messageChanged();
     void fileOpened();
     void commandSubmitted(const QString &command);
-    void openAgentWindowRequested();
     void terminalsChanged();
     void activeTerminalChanged();
     void tabsChanged();
@@ -149,6 +147,7 @@ class FfiClientBridge : public QObject {
     void fetchDirectory(QString path);
     void applyDirectoryEntries(const QString &path, QVariantList entries);
     void discardDirectory(const QString &path);
+    void closeDirectory(const QString &path);
     void rebuildBrowserEntries();
     bool decodeDirectory(const QByteArray &payload, QString &path, QVariantList &entries);
     void refreshDocument(WorkspaceDocument *document);
@@ -179,6 +178,8 @@ class FfiClientBridge : public QObject {
     int reconnectAttempts_{};
     QString directory_;
     QHash<QString, BrowserDirectory> browserDirectories_;
+    // 关闭期间暂停同一路径的新读取；值非零表示仍需等待旧的目录读取结束。
+    QHash<QString, quint64> closingDirectories_;
     QVariantList entries_;
     bool browserRequested_{};
     QList<WorkspaceDocument *> documents_;

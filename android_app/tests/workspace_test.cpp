@@ -7,6 +7,7 @@
 #include <QQuickItem>
 #include <QQuickStyle>
 #include <QQuickWindow>
+#include <QSet>
 #include <QStyleHints>
 #include <QTcpServer>
 #include <QTest>
@@ -81,6 +82,7 @@ class FakeServer : public QObject {
                                    {"demo/other.cpp", "// other\n"}};
     quint64 revision = 0xfedcba9876543210ULL;
     QList<Call> calls;
+    QSet<QString> watchedDirectories;
     std::function<bool(const Call &)> intercept;
     quint32 nextTerminalId{1};
 
@@ -112,6 +114,11 @@ class FakeServer : public QObject {
     void respond(const Call &call, quint16 status, const QByteArray &payload, bool fragment = false) {
         if (!call.peer)
             return;
+        // 模拟服务端在响应前添加或取消单个目录监听，检查客户端是否完整释放嵌套分支。
+        if (!status && call.method == 0x0202)
+            watchedDirectories.insert(pathOf(call.payload));
+        if (!status && call.method == 0x0205)
+            watchedDirectories.remove(pathOf(call.payload));
         auto frame = integer(quint32(13 + payload.size())) + char(2) + integer(call.id)
                    + integer(call.method) + integer(status) + payload;
         if (!fragment) {
@@ -213,6 +220,7 @@ class FakeServer : public QObject {
             respond(call, 0, integer(revision));
             break;
         }
+        case 0x0205: respond(call, 0, call.payload); break;
         }
     }
 };
@@ -584,6 +592,97 @@ class WorkspaceTest : public QObject {
         QCOMPARE(bridge.entries()[0].toMap().value("path").toString(), QString("other/a.cpp"));
     }
 
+    void browserCloseNestedDirectories() {
+        FakeServer server;
+        FfiClientBridge bridge;
+        bridge.connectToServer("127.0.0.1", server.server.serverPort());
+        QTRY_VERIFY(bridge.connected());
+        bridge.listDir("demo");
+        QTRY_VERIFY(!bridge.browsing());
+        bridge.activateEntry(0); // 展开 src。
+        QTRY_COMPARE(bridge.entries().size(), 3);
+        server.event("demo/src", QByteArray(1, char(1)) + string("nested"));
+        QTRY_COMPARE(bridge.entries()[1].toMap().value("name").toString(), QString("nested"));
+        bridge.activateEntry(1);
+        QTRY_COMPARE(bridge.entries().size(), 4);
+        QCOMPARE(server.watchedDirectories.size(), 3);
+
+        bridge.activateEntry(0); // 关闭父目录时，子目录需要单独发送 close_dir。
+        QCOMPARE(bridge.entries().size(), 2);
+        QTRY_COMPARE(server.count(0x0205), 2);
+        QTRY_COMPARE(server.watchedDirectories, QSet<QString>{"demo"});
+        QSet<QByteArray> closedPayloads;
+        for (const auto &call : server.calls)
+            if (call.method == 0x0205)
+                closedPayloads.insert(call.payload);
+        QCOMPARE(closedPayloads, (QSet<QByteArray>{string("demo/src"), string("demo/src/nested")}));
+        server.event("demo/src", QByteArray(1, char(0)) + string("stale.cpp"));
+        bridge.activateEntry(0);
+        QTRY_COMPARE(bridge.entries().size(), 3);
+        QCOMPARE(bridge.entries()[1].toMap().value("name").toString(), QString("a.cpp"));
+        // 返回项目列表也会关闭原项目根目录与仍展开的分支。
+        bridge.listProjects();
+        QTRY_COMPARE(bridge.entries().size(), 2);
+        QTRY_VERIFY(server.watchedDirectories.isEmpty());
+        QCOMPARE(server.count(0x0205), 4);
+    }
+
+    void browserCloseDuringReadAndReopen() {
+        FakeServer server;
+        FfiClientBridge bridge;
+        bridge.connectToServer("127.0.0.1", server.server.serverPort());
+        QTRY_VERIFY(bridge.connected());
+        bridge.listDir("demo");
+        QTRY_VERIFY(!bridge.browsing());
+        std::optional<Call> reading, closing;
+        server.intercept = [&](const Call &call) {
+            if (call.method == 0x0202 && pathOf(call.payload) == "demo/src") {
+                reading = call;
+                return true;
+            }
+            if (call.method == 0x0205) {
+                closing = call;
+                return true;
+            }
+            return false;
+        };
+        bridge.activateEntry(0);
+        QTRY_VERIFY(reading.has_value());
+        bridge.activateEntry(0);
+        bridge.activateEntry(0); // 读取中关闭后立刻重新展开，不能提前发起第二次读取。
+        QCOMPARE(bridge.entries().size(), 2);
+        QCOMPARE(server.count(0x0202), 2);
+        QCOMPARE(server.count(0x0205), 0);
+        server.respond(*reading, 0, string("demo/src") + char(0) + string("old.cpp"));
+        QTRY_VERIFY(closing.has_value());
+        server.event("demo/src", QByteArray(1, char(0)) + string("stale.cpp"));
+        QTest::qWait(30);
+        QCOMPARE(bridge.entries().size(), 2);
+        QCOMPARE(server.count(0x0202), 2);
+        server.intercept = {};
+        server.respond(*closing, 0, {}, true); // 半包与空响应兼容公共客户端约定。
+        QTRY_COMPARE(bridge.entries().size(), 3);
+        QCOMPARE(bridge.entries()[1].toMap().value("name").toString(), QString("a.cpp"));
+        QCOMPARE(server.count(0x0202), 3);
+
+        // 畸形响应与服务端错误可见，不能恢复旧缓存或自动重放关闭请求。
+        for (const auto status : {quint16(0), quint16(11)}) {
+            server.intercept = [&, status](const Call &call) {
+                if (call.method != 0x0205) return false;
+                server.respond(call, status, status ? QByteArray("busy") : string("wrong/path"));
+                return true;
+            };
+            const auto closeCount = server.count(0x0205);
+            bridge.activateEntry(0);
+            QTRY_VERIFY(bridge.message().startsWith(QStringLiteral("目录关闭失败：")));
+            QCOMPARE(bridge.entries().size(), 2);
+            QTest::qWait(400);
+            QCOMPARE(server.count(0x0205), closeCount + 1);
+            bridge.activateEntry(0);
+            QTRY_COMPARE(bridge.entries().size(), 3);
+        }
+    }
+
     void chunkedReadRevisionChangeAndUtf8() {
         FakeServer server;
         FfiClientBridge bridge;
@@ -767,9 +866,8 @@ class WorkspaceTest : public QObject {
         icon->setProperty("color", QColor(Qt::green));
         QTRY_VERIFY(coloredPixels(false) > 20);
         QTRY_COMPARE(coloredPixels(true), 0);
-        // 每一种菜单、文件树和模型图标都必须有实际绘制内容。
-        for (const auto *name : {"folder", "file", "link", "arrow-up", "sparkle",
-                                 "diamond", "cluster", "branch", "more", "terminal"}) {
+        // 每一种菜单和文件树图标都必须有实际绘制内容。
+        for (const auto *name : {"folder", "file", "link", "arrow-up", "branch", "more", "terminal"}) {
             icon->setProperty("name", "");
             QTRY_COMPARE(coloredPixels(false), 0);
             icon->setProperty("name", name);
@@ -927,8 +1025,8 @@ class WorkspaceTest : public QObject {
         QTRY_COMPARE(bar->height(), originalHeight + 200);
         const auto newHandleCenter = resizeHandle->mapToScene(QPointF(resizeHandle->width() / 2, 8)).toPoint();
         QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, newHandleCenter);
-        QTest::mouseMove(window, newHandleCenter + QPoint(0, 300), 30);
-        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, newHandleCenter + QPoint(0, 300));
+        QTest::mouseMove(window, newHandleCenter + QPoint(0, 230), 30);
+        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, newHandleCenter + QPoint(0, 230));
         QTRY_COMPARE(bar->height(), originalHeight);
         bar->setProperty("requestedHeight", originalHeight);
         QTRY_VERIFY(bridge->activeTerminal() && bridge->activeTerminal()->available());
@@ -1007,11 +1105,23 @@ class WorkspaceTest : public QObject {
         QCOMPARE(fileList->property("currentIndex").toInt(), 0);
         QTest::keyClick(window, Qt::Key_Left);
         QCOMPARE(bridge->entries().size(), 2);
+        QTRY_COMPARE(server.count(0x0205), 1);
 
+        QTest::qWait(160); // 等弹窗高度动画结束，再按当前行坐标模拟触控。
         const auto *folder = findVisualItem(window->contentItem(), "fileRow:demo/src");
         QVERIFY(folder);
         QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
                           folder->mapToScene(QPointF(folder->width() / 2, folder->height() / 2)).toPoint());
+        QTRY_COMPARE(bridge->entries().size(), 3);
+        // 单击已展开的目录也必须关闭服务端监听，再次单击重新获取子项。
+        // 列表更新会重建代理，必须重新获取行对象，不能复用展开前的指针。
+        const auto *expandedFolder = findVisualItem(window->contentItem(), "fileRow:demo/src");
+        QVERIFY(expandedFolder);
+        QTest::mouseClick(window, Qt::LeftButton, Qt::NoModifier,
+                          expandedFolder->mapToScene(QPointF(expandedFolder->width() / 2, expandedFolder->height() / 2)).toPoint());
+        QCOMPARE(bridge->entries().size(), 2);
+        QTRY_COMPARE(server.count(0x0205), 2);
+        QTest::keyClick(window, Qt::Key_Right);
         QTRY_COMPARE(bridge->entries().size(), 3);
         QTest::keyClick(window, Qt::Key_Down); // a.cpp
         QTest::keyClick(window, Qt::Key_Down); // main.cpp 仍与 src 同级。
@@ -1059,18 +1169,26 @@ class WorkspaceTest : public QObject {
         QVERIFY(fileList->isVisible());
         QTest::keyClick(window, Qt::Key_Escape);
         command->forceActiveFocus();
-        command->setProperty("text", "@AI");
+        command->setProperty("text", "@unknown");
         QTest::keyClick(window, Qt::Key_Return);
-        auto *agent = findVisualItem(window->contentItem(), "agentPanel");
+        QCOMPARE(command->property("text").toString(), QString("@unknown"));
+        QVERIFY(bar->property("commandError").toString().contains(QStringLiteral("未知命令")));
+        command->setProperty("text", "@");
+        const auto *popup = findVisualItem(window->contentItem(), "commandMenuPopup");
+        QVERIFY(popup);
+        QTRY_COMPARE(popup->height(), 180.0); // 三行菜单与间距。
+        for (const auto *name : {"GIT", "FILE", "TERMINAL"})
+            QVERIFY(findVisualItem(window->contentItem(), QString("commandMenu:") + name)->isVisible());
+        QTest::keyClick(window, Qt::Key_Escape);
         auto *tabs = findVisualItem(window->contentItem(), "fileTabs");
-        QVERIFY(agent && tabs);
-        QTRY_VERIFY(agent->isVisible());
+        QVERIFY(tabs);
         for (const auto &size : {QSize(1280, 800), QSize(1600, 1000), QSize(960, 600)}) {
             window->resize(size);
             QTRY_COMPARE(bar->mapToScene(QPointF(0, bar->height())).y(),
-                         agent->mapToScene(QPointF(0, agent->height())).y());
+                         tabs->mapToScene(QPointF(0, tabs->height())).y());
             QCOMPARE(bar->mapToItem(codeArea, QPointF()).x(), 0.0);
             QCOMPARE(bar->width(), codeArea->width());
+            QTRY_COMPARE(codeArea->mapToScene(QPointF(codeArea->width(), 0)).x(), qreal(size.width() - 20));
             const auto gap = codeArea->x() - tabs->width();
             QVERIFY(gap > 0 && gap <= 12);
             QVERIFY(tabs->width() < 132);
