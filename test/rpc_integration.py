@@ -199,6 +199,20 @@ def test_workspace_and_inotify(port, projects_root):
         assert kind == 3 and event_req_id == 0 and method == 0x0202 and status == 0
         assert (struct.pack("!BH", 0, 5) + b"b.txt") in event_payload
 
+        # 6. workspace_close_dir (0x0205)：关闭目录并取消服务端 inotify 监听
+        close_req = struct.pack("!H", 4) + b"demo"
+        sock.sendall(frame(706, 0x0205, close_req))
+        req_id, status, payload = recv_response(sock, 0x0205)
+        assert req_id == 706 and status == 0
+        assert payload == close_req
+
+        # 取消监听后再次新建文件，再发一次 ping，确认不会再收到 0x0202 目录变更 Event
+        with open(os.path.join(proj_dir, "c.txt"), "wb") as f:
+            f.write(b"after_close")
+        time.sleep(0.05)
+        sock.sendall(frame(707, 0x0001))
+        assert recv_response(sock, 0x0001) == (707, 0, b"PONG")
+
 
 def test_terminal(port):
     with connect(port) as sock:

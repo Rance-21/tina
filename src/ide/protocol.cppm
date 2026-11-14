@@ -206,6 +206,11 @@ export struct WriteFileRequest {
     std::string content;               // 待保存的完整 UTF-8 文本内容
 };
 
+// 0x0205 (workspace_close_dir) 请求参数。
+export struct CloseDirRequest {
+    std::string path; // 相对于 ~/projects 的待关闭目录路径（如 "tina" 或 "tina/src"）
+};
+
 // ============================================================================
 // Terminal 模块协议公共数据结构与编解码函数
 // ============================================================================

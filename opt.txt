@@ -2,19 +2,13 @@
 
 ## 一、 系统调用与 Epoll 事件驱动优化
 
-### 1. 消除 `refresh` 中冗余的 `epoll_ctl(EPOLL_CTL_MOD)` 系统调用（新增）
-- **现状**：
-  - **客户端 (`RpcClient::State::refresh`)**：未使用 `EPOLLONESHOT`，连接建立后常态掩码恒为 `read | peer_closed`。但每次 `send()` 当场发完数据或 `on_event()` 读完响应后，都会无条件调用 `modify_event()` 触发一次掩码未变的 `EPOLL_CTL_MOD`。
-  - **服务端 (`complete_response`)**：`handle_connection_event()` 末尾已重装过 `EPOLLONESHOT`；当 Worker 通过 `post_task` 回传结果并在 `complete_response()` 中当场 `write()` 发完时，连接掩码未发生任何变化，却又执行了一次 `modify_event()`。
-- **优化方案**：在 `RpcClient::State` 和服务端 `Connection` 中缓存上一次注册的 `last_interest_`（服务端额外区分是否由 `epoll_wait` 触发导致 `EPOLLONESHOT` 失效），若掩码未变且无需重装 `ONESHOT`，直接跳过 `epoll_ctl`。
-
-### 2. 减少高频路径上的系统调用次数（合并读写与唤醒）
-- **现状**：每次 `post_task()` 都会立即调用一次 `::write(wake_fd_, ...)` 系统调用；高并发下多个 Worker 同时完成任务会频繁触发 `write(eventfd)`。
-- **优化方案**：在 `EventLoop` 中引入 `std::atomic<bool> wakeup_pending_{false}` 标志，仅当标志从 `false` 变为 `true` 时才真正调用 `::write(wake_fd_)`，在 `drain_wakeup()` 时重置为 `false`，可将多生产者的并发唤醒合并为 1 次系统调用。
-
 ### 3. `Connection::write()` 与 `send_pending()` 的循环语义及 `writev` 聚集写（新增）
-- **现状**：`write()` 外层写了 `for (int i = 0; i < 8 && wants_write(); ++i)`，但内部直接传入了整个连续缓冲区 `output_.readable_bytes()`。若内核缓冲区够大，第 1 次就全发完；若不够大（部分写），第 2 次必然立即触发 `EAGAIN` 退出，8 次循环形同虚设。
-- **优化方案**：去掉无意义的外层循环（只调一次 `try_send`）；更进一步，在编码响应帧时无需把固定 17B 帧头和大 Payload 拼进同一个 `output_` 连续内存，可用 `::writev(fd, iov, iovcnt)` 直接将帧头与 Payload 聚集发送。
+- **现状**：`write()` 外层写了 `for (int i = 0; i < 8 && wants_write(); ++i)`，
+但内部直接传入了整个连续缓冲区 `output_.readable_bytes()`。
+  若内核缓冲区够大，第 1 次就全发完；若不够大（部分写），第 2 次必然立即触发 `EAGAIN` 退出，8 次循环形同虚设。
+- **优化方案**：去掉无意义的外层循环（只调一次 `try_send`）；
+  更进一步，在编码响应帧时无需把固定 17B 帧头和大 Payload 拼进同一个 `output_` 连续内存，
+  可用 `::writev(fd, iov, iovcnt)` 直接将帧头与 Payload 聚集发送。
 
 ### 4. `run_server` 对同一次 `accept_epoll.wait()` 结果的双重遍历
 - **现状**：`src/rpc/server.cppm` 主循环每次 `accept_epoll.wait()` 返回后，先 `for` 遍历一遍找 `signals.fd()`，再 `for` 遍历第二遍找 `listener->native_handle()`。
@@ -37,10 +31,12 @@
   - 对小负载请求利用 SSO（Small String Optimization），或引入针对固定尺寸帧的 Arena / 对象池复用 `Frame` 缓冲。
 
 ### 7. 大文件/大负载传输的零拷贝（`sendfile` / `MSG_ZEROCOPY`）
-- **现状**：Remote IDE 后续涉及 `workspace_read_file` 等大文件读取，走传统 `read(file) + send(socket)` 会经历 4 次上下文切换与多次内核/用户态拷贝。
+- **现状**：Remote IDE 后续涉及 `workspace_read_file` 等大文件读取，
+走传统 `read(file) + send(socket)` 会经历 4 次上下文切换与多次内核/用户态拷贝。
 - **优化方案**：
   - **文件直传**：先用普通 `send` 发送 17B 帧头，再用 `::sendfile()`（或 `splice`）在内核态直接将文件页缓存（Page Cache）送入网卡缓冲区；
-  - **用户态大块内存发送**：对大于 10KB~64KB 的动态生成缓冲，可开启 `SO_ZEROCOPY` 并使用 `send(..., MSG_ZEROCOPY)` 避免内核拷贝（需配合处理 `MSG_ERRQUEUE` 异步完成通知后再释放用户态缓冲，小包切勿开启以免通知开销反超拷贝开销）。
+  - **用户态大块内存发送**：对大于 10KB~64KB 的动态生成缓冲，可开启 `SO_ZEROCOPY` 
+  并使用 `send(..., MSG_ZEROCOPY)` 避免内核拷贝（需配合处理 `MSG_ERRQUEUE` 异步完成通知后再释放用户态缓冲，小包切勿开启以免通知开销反超拷贝开销）。
 
 ---
 
@@ -49,15 +45,25 @@
 ### 8. `EINTR` 重试、异步信号安全与 `signalfd` 的配合
 - **现状**：多处 I/O 函数（`try_recv`、`try_send`、`try_accept`、`epoll_wait`）手写了 `if (errno == EINTR) continue;` 循环。
 - **说明与优化**：
-  - 进程启动时 `StopSignals` 已经通过 `pthread_sigmask(SIG_BLOCK)` 在所有线程屏蔽了 `SIGINT` 和 `SIGTERM`，并交由 `signalfd` 同步读取，规避了传统异步信号处理函数（Signal Handler）的非异步信号安全问题；
-  - 若未来注册其他信号处理函数，应在 `sigaction` 中开启 `SA_RESTART` 让内核自动重启被中断的系统调用；保留 `EINTR` 分支仅作为防御性兜底（例如 `gdb` 调试挂起恢复时内核仍可能使 `epoll_wait` 返回 `EINTR`）。
+  - 进程启动时 `StopSignals` 已经通过 `pthread_sigmask(SIG_BLOCK)` 
+  在所有线程屏蔽了 `SIGINT` 和 `SIGTERM`，并交由 `signalfd` 同步读取，
+  规避了传统异步信号处理函数（Signal Handler）的非异步信号安全问题；
+  - 若未来注册其他信号处理函数，应在 `sigaction` 中开启 `SA_RESTART` 
+  让内核自动重启被中断的系统调用；保留 `EINTR` 分支仅作为防御性兜底（例如 `gdb` 调试挂起恢复时内核仍可能使 `epoll_wait` 返回 `EINTR`）。
 
 ### 9. `Socket::try_accept()` 的非阻塞循环与瞬态错误容错
-- **现状**：`src/net/socket.cppm` 中 `try_accept()` 使用 `while (true)` 包裹 `accept4`，除 `EINTR` 和 `EAGAIN` 外遇到任何 `errno` 直接 `throw std::runtime_error` 导致整个 Acceptor 线程崩溃退出。
-- **优化方案**：TCP 服务端 `accept4` 遇到客户端在三次握手刚完成就发 RST 断开时，Linux 可能返回 `ECONNABORTED`、`EPROTO` 或 `EPERM`（防火墙拦截），甚至暂时达到文件描述符上限 `EMFILE`/`ENFILE`。这些属于**单条客户端连接的瞬态错误**，不应 `throw` 搞垮整个 Server，而应记录日志后忽略（或返回 `nullopt`）继续服务后续连接。
+- **现状**：`src/net/socket.cppm` 中 `try_accept()` 使用 `while (true)` 包裹 `accept4`，
+除 `EINTR` 和 `EAGAIN` 外遇到任何 `errno` 直接 `throw std::runtime_error` 导致整个 Acceptor 线程崩溃退出。
+- **优化方案**：TCP 服务端 `accept4` 遇到客户端在三次握手刚完成就发 RST 断开时，
+Linux 可能返回 `ECONNABORTED`、`EPROTO` 或 `EPERM`（防火墙拦截），
+甚至暂时达到文件描述符上限 `EMFILE`/`ENFILE`。这些属于**单条客户端连接的瞬态错误**，
+不应 `throw` 搞垮整个 Server，而应记录日志后忽略（或返回 `nullopt`）继续服务后续连接。
 
 ### 10. UDP 分支单应用帧限制在 `<= 1460`（或 `1472`）字节以内
-- **原理与说明**：以太网标准 MTU 为 `1500` 字节（扣除 20B IP 头 + 8B UDP 头 = `1472` 字节；若考虑 PPPoE 或隧道开销，安全载荷常取 `1400~1460` 字节）。UDP 本身不负责分段，一旦单帧超过 MTU 触发 **IP 层分片（IP Fragmentation）**，任何一个分片在公网丢失都会导致整个 UDP 报文被内核丢弃，丢包率呈指数级恶化。因此 UDP 分支的应用层协议必须严格将单包控制在 MTU 以内。
+- **原理与说明**：以太网标准 MTU 为 `1500` 字节（扣除 20B IP 头 + 8B UDP 头 = `1472` 字节；
+若考虑 PPPoE 或隧道开销，安全载荷常取 `1400~1460` 字节）。
+UDP 本身不负责分段，一旦单帧超过 MTU 触发 **IP 层分片（IP Fragmentation）**，
+任何一个分片在公网丢失都会导致整个 UDP 报文被内核丢弃，丢包率呈指数级恶化。因此 UDP 分支的应用层协议必须严格将单包控制在 MTU 以内。
 
 ---
 
@@ -99,6 +105,6 @@
 handle_workspace_read_file while 可能空转
 增加close dir / file
 缓存功能，减少disk io
-
+GitExecResult run_git_command 实现 async
 
 

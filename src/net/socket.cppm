@@ -72,9 +72,8 @@ class Socket {
 
                 // 显式启用双栈，不依赖系统 bindv6only 的默认值；不可用时回退 IPv4。
                 int ipv6_only = 0;
-                if (family == AF_INET6
-                    && ::setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY,
-                                    &ipv6_only, sizeof(ipv6_only)) == -1) {
+                if (family == AF_INET6 && ::setsockopt(fd, IPPROTO_IPV6, IPV6_V6ONLY, &ipv6_only,
+                                                       sizeof(ipv6_only)) == -1) {
                     ::close(fd);
                     continue;
                 }
@@ -232,8 +231,11 @@ class Socket {
     //     实际发送出去的字节数。
     // nullopt：
     //     send buffer 暂时没有空间。
-    std::optional<std::size_t> try_send(const void *buffer, std::size_t bytes) const {
+    std::optional<std::size_t> inline try_send(const void *buffer, std::size_t bytes) const {
         while (true) {
+            // 向已收到 RST（对端已关闭）的 Socket 调用 write/send，Linux 内核除了返回 EPIPE
+            // 错误外， 还会向当前进程发送 SIGPIPE 信号，而 SIGPIPE 的默认动作是直接终止整个进程！
+            // 传入 MSG_NOSIGNAL 即可抑制该信号，只通过返回值报错
             ssize_t n = ::send(fd_, buffer, bytes, MSG_NOSIGNAL);
 
             if (n >= 0) {
@@ -244,6 +246,7 @@ class Socket {
                 continue;
             }
 
+            // send buffer 塞满
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 return std::nullopt;
             }

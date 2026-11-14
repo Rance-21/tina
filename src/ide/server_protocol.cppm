@@ -77,6 +77,29 @@ std::optional<WriteFileRequest> decode_workspace_write_file(std::string_view pay
     };
 }
 
+// 解码 0x0205 (workspace_close_dir) 请求负载：
+// 格式：[u16 pathLength][path bytes]（即 len + data，同时兼容 4 字节大端 len 编码）。
+std::optional<CloseDirRequest> decode_workspace_close_dir(std::string_view payload) {
+    PayloadReader reader(payload);
+    auto path_len = reader.read_int<std::uint16_t>();
+    if (!path_len)
+        return std::nullopt;
+
+    std::optional<std::string_view> path;
+    if (*path_len > 0) {
+        path = reader.read_bytes(*path_len);
+    } else if (reader.remaining_size() >= 2) {
+        auto low_len = reader.read_int<std::uint16_t>();
+        if (low_len && *low_len > 0)
+            path = reader.read_bytes(*low_len);
+    }
+
+    if (!path || !reader.finished() || path->find('\0') != std::string_view::npos)
+        return std::nullopt;
+
+    return CloseDirRequest{.path = std::string(*path)};
+}
+
 // ============================================================================
 // Workspace 模块服务端 Encode 函数（构造返回给客户端的 Response / Event Payload）
 // ============================================================================
@@ -150,6 +173,24 @@ std::string encode_workspace_write_file(std::uint64_t revision) {
     out.reserve(8);
     append_be(out, revision);
     return out;
+}
+
+// 编码 0x0205 (workspace_close_dir) 响应负载：
+// 格式：[u16 pathLength][path bytes]（len + data，返回已关闭并取消 inotify 监听的目录相对路径）。
+std::string encode_workspace_close_dir(std::string_view dir_path) {
+    if (dir_path.empty() || dir_path.size() > std::numeric_limits<std::uint16_t>::max() ||
+        dir_path.find('\0') != std::string_view::npos)
+        throw std::invalid_argument("invalid workspace_close_dir path");
+
+    std::string out;
+    out.reserve(2 + dir_path.size());
+    append_be(out, static_cast<std::uint16_t>(dir_path.size()));
+    out.append(dir_path);
+    return out;
+}
+
+std::string encode_workspace_close_dir(const CloseDirRequest &req) {
+    return encode_workspace_close_dir(req.path);
 }
 
 using ::decode_terminal_input;

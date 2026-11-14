@@ -117,6 +117,7 @@ class Connection {
     // 非阻塞将 output_ 中的待发数据刷入内核 Socket 发送缓冲区。
     // 分支逻辑：若 try_send 返回 nullopt（EAGAIN，内核发送缓冲区已满）则立即中断循环，
     // 剩余未发完的数据留在 output_ 中，由随后的 refresh_connection() 按需挂载 EPOLLOUT。
+    // Linux 发送缓冲区的动态扩容 或 小概率循环过程中数据发送，8次大部分只执行2次
     void write() {
         for (int i = 0; i < 8 && wants_write(); ++i) {
             auto n = socket_.try_send(output_.data(), output_.readable_bytes());

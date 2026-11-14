@@ -5,12 +5,12 @@ import std;
 export enum class Kind : std::uint8_t {
     request = 0x01,  // Android 向服务端发起请求。
     response = 0x02, // 服务端返回这次请求的结果。
-    event = 0x03     // 服务端主动推送目录变更、终端或 Agent 事件。
+    event = 0x03     // 服务端主动推送目录变更或终端事件。
 };
 
 // ============================================================================
 // 16 位 Method 位域编码设计：
-//   Bits [15:8] (0xFF00) : 业务模块分组（MethodGroup），右移 8 位即可得到连续分组索引 0..5
+//   Bits [15:8] (0xFF00) : 业务模块分组（MethodGroup），右移 8 位即可得到连续分组索引 0..4
 //   Bit  [7]    (0x0080) : 纯服务端推送事件标志位（method_event_flag，1 表示不可作为客户端 Request
 //   调用） Bits [6:0]  (0x007F) : 模块内操作序号（从 1 开始连续编号，利好编译器生成紧凑跳转表）
 // ============================================================================
@@ -24,8 +24,7 @@ export enum class MethodGroup : std::uint16_t {
     kv = 0x0100,        // 0x01xx：KV 内存存储
     workspace = 0x0200, // 0x02xx：工作区项目与文件读写
     terminal = 0x0300,  // 0x03xx：终端 PTY 会话与补全
-    git = 0x0400,       // 0x04xx：Git 状态、Diff 与提交历史
-    agent = 0x0500      // 0x05xx：AI Agent 会话管理与事件流
+    git = 0x0400        // 0x04xx：Git 状态、Diff 与提交历史
 };
 
 export [[nodiscard]] constexpr inline std::uint16_t
@@ -53,6 +52,8 @@ export enum class Method : std::uint16_t {
                                            3), // 0x0203 请求：读取 UTF-8 文本，可按字节范围分段。
     workspace_write_file =
         make_method_code(MethodGroup::workspace, 4), // 0x0204 请求：保存完整的 UTF-8 文本文件。
+    workspace_close_dir = make_method_code(
+        MethodGroup::workspace, 5), // 0x0205 请求：关闭目录并取消服务端 inotify 监听。
 
     // 0x03xx: Terminal 模块
     terminal_input =
@@ -68,19 +69,7 @@ export enum class Method : std::uint16_t {
     // 0x04xx: Git 模块
     git_status = make_method_code(MethodGroup::git, 1), // 0x0401 请求：查询分支及文件状态。
     git_diff = make_method_code(MethodGroup::git, 2), // 0x0402 请求：读取指定文件的 Unified Diff。
-    git_log = make_method_code(MethodGroup::git, 3),  // 0x0403 请求：查询提交历史记录（Git Log）。
-
-    // 0x05xx: Agent 模块
-    agent_list = make_method_code(MethodGroup::agent, 1),  // 0x0501 请求：列出 Agent 会话。
-    agent_start = make_method_code(MethodGroup::agent, 2), // 0x0502 请求：按配置启动会话。
-    agent_input = make_method_code(MethodGroup::agent, 3), // 0x0503 请求：向会话输入文本。
-    agent_cancel = make_method_code(MethodGroup::agent,
-                                    4), // 0x0504 请求：中断当前任务，尽量保留进程以便继续对话。
-    agent_close =
-        make_method_code(MethodGroup::agent, 5), // 0x0505 请求：结束会话并释放进程和 PTY。
-    agent_output =
-        make_method_code(MethodGroup::agent, 1, true),          // 0x0581 事件：推送指定会话的输出。
-    agent_state = make_method_code(MethodGroup::agent, 2, true) // 0x0582 事件：通知会话状态变化。
+    git_log = make_method_code(MethodGroup::git, 3)   // 0x0403 请求：查询提交历史记录（Git Log）。
 };
 
 // 单指令位与提取 Method 所属模块分组（保留高 8 位，如 0x0300）。
@@ -88,7 +77,7 @@ export [[nodiscard]] constexpr inline MethodGroup method_group(Method method) no
     return static_cast<MethodGroup>(std::to_underlying(method) & method_group_mask);
 }
 
-// 单指令右移提取连续分组索引（0..5），适合作为紧凑跳转表或数组下标。
+// 单指令右移提取连续分组索引（0..4），适合作为紧凑跳转表或数组下标。
 export [[nodiscard]] constexpr std::uint8_t method_group_index(Method method) noexcept {
     return static_cast<std::uint8_t>(std::to_underlying(method) >> method_group_shift);
 }

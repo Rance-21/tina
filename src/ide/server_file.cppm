@@ -345,8 +345,34 @@ void handle_workspace_write_file(Frame &frame) {
     frame.payload = encode_workspace_write_file(new_rev);
 }
 
+// 处理 0x0205 (workspace_close_dir)：
+// 客户端折叠或关闭指定目录时调用，请求与响应负载均为 [u16 pathLength][path bytes]（len + data）。
+// 校验相对目录路径合法后，将目录相对路径写入 *unwatched_dir，供所属 I/O 线程在 DirWatcher 中执行 unwatch 释放 inotify 监听。
+void handle_workspace_close_dir(Frame &frame, std::string *unwatched_dir = nullptr) {
+    auto req = decode_workspace_close_dir(frame.payload);
+    if (!req) {
+        frame.status = Status::invalid_argument;
+        frame.payload = "invalid workspace_close_dir payload";
+        return;
+    }
+
+    auto target_path = resolve_workspace_path(req->path);
+    if (!target_path) {
+        frame.status = Status::invalid_argument;
+        frame.payload = "invalid workspace directory path";
+        return;
+    }
+
+    frame.status = Status::ok;
+    frame.payload = encode_workspace_close_dir(req->path);
+    if (unwatched_dir != nullptr)
+        *unwatched_dir = std::move(req->path);
+}
+
 // Workspace 模块请求统一分发入口（对应 MethodGroup::workspace 0x0200）。
-void handle_workspace_request(Frame &frame, std::string *watched_dir = nullptr) {
+// watched_dir 用于回传 list_dir 需新增监听或 close_dir 需取消监听的目录相对路径（若额外提供了 unwatched_dir 则优先写入 unwatched_dir）。
+void handle_workspace_request(Frame &frame, std::string *watched_dir = nullptr,
+                              std::string *unwatched_dir = nullptr) {
     switch (frame.method) {
     case Method::workspace_list_projects:
         handle_workspace_list_projects(frame);
@@ -362,6 +388,10 @@ void handle_workspace_request(Frame &frame, std::string *watched_dir = nullptr) 
 
     case Method::workspace_write_file:
         handle_workspace_write_file(frame);
+        return;
+
+    case Method::workspace_close_dir:
+        handle_workspace_close_dir(frame, unwatched_dir != nullptr ? unwatched_dir : watched_dir);
         return;
 
     default:

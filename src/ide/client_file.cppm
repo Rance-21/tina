@@ -165,6 +165,17 @@ FileNode *apply_list_dir(FileNode &root, const ListDirResponse &response) {
     return dir_node;
 }
 
+// 关闭目标目录节点：清空其已缓存的一级子项列表，并将节点状态重置为 LoadState::Unloaded。
+FileNode *apply_close_dir(FileNode &root, std::string_view dir_path) noexcept {
+    FileNode *dir_node = find_node(root, dir_path);
+    if (dir_node == nullptr || dir_node->type != NodeType::directory)
+        return nullptr;
+
+    dir_node->children.clear();
+    dir_node->state = LoadState::Unloaded;
+    return dir_node;
+}
+
 // ============================================================================
 // Workspace 客户端会话封装（含 RPC 编解码、文件树状态维护与服务端 Event 自动刷新）
 // ============================================================================
@@ -287,6 +298,27 @@ class WorkspaceClient {
         }
 
         throw std::runtime_error("workspace_write_file failed: " + frame.payload);
+    }
+
+    // 0x0205: 关闭指定目录，通知服务端 unwatch 对应的 inotify 监听，并重置本地文件树节点为 Unloaded。
+    std::string close_dir(std::string_view path) {
+        auto frame =
+            rpc_.async_call(Method::workspace_close_dir, encode_workspace_close_dir(path)).get();
+        if (frame.status != Status::ok)
+            throw std::runtime_error("workspace_close_dir failed: " + frame.payload);
+
+        auto closed_path = decode_workspace_close_dir(frame.payload);
+        if (!closed_path)
+            throw std::runtime_error("invalid workspace_close_dir response payload");
+
+        const std::string_view target =
+            closed_path->empty() ? path : std::string_view(*closed_path);
+        {
+            std::lock_guard lock(mutex_);
+            if (root_)
+                (void)apply_close_dir(*root_, target);
+        }
+        return closed_path->empty() ? std::string(path) : std::move(*closed_path);
     }
 
   private:

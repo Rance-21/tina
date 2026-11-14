@@ -115,6 +115,34 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
         path_to_wd_[entry.rel_path] = wd;
     }
 
+    // 取消某条客户端连接对 rel_path 目录的监听（由 workspace_close_dir 触发）。
+    // 若移除该连接后该目录已无任何存活订阅者，则立即调用 inotify_rm_watch 释放内核监听槽位。
+    void unwatch(const std::string &rel_path, const std::shared_ptr<rpc::Connection> &conn) noexcept {
+        if (!conn)
+            return;
+        unwatch(rel_path, conn->fd());
+    }
+
+    void unwatch(const std::string &rel_path, int conn_fd) noexcept {
+        if (stopped_ || rel_path.empty() || inotify_fd_ < 0)
+            return;
+
+        auto it = path_to_wd_.find(rel_path);
+        if (it == path_to_wd_.end())
+            return;
+
+        const int wd = it->second;
+        auto wit = watches_.find(wd);
+        if (wit == watches_.end()) {
+            path_to_wd_.erase(it);
+            return;
+        }
+
+        wit->second.subscribers.erase(conn_fd);
+        if (!prune_expired(wit->second))
+            remove_watch(wd, true);
+    }
+
   private:
     struct WatchEntry {
         std::string rel_path;

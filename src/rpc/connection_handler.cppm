@@ -111,8 +111,12 @@ void complete_response(const std::weak_ptr<Connection> &weak, net::EventLoop &lo
         return;
 
     try {
-        if (!watched_dir.empty() && response.status == Status::ok && watcher)
-            watcher->watch(watched_dir, conn);
+        if (!watched_dir.empty() && response.status == Status::ok && watcher) {
+            if (response.method == Method::workspace_list_dir)
+                watcher->watch(watched_dir, conn);
+            else if (response.method == Method::workspace_close_dir)
+                watcher->unwatch(watched_dir, conn);
+        }
 
         const bool had_write = conn->wants_write();
 
@@ -169,9 +173,6 @@ void dispatch_request(Frame &request, KvState &kv, std::string &watched_dir,
     case MethodGroup::git:
         server::handle_git_request(request);
         return;
-
-    case MethodGroup::agent:
-        break;
     }
 
     request.status = Status::unsupported;

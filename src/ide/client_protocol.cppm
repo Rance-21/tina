@@ -81,6 +81,22 @@ std::string encode_workspace_write_file(const WriteFileRequest &req) {
     return encode_workspace_write_file(req.path, req.expected_revision, req.content);
 }
 
+// 编码 0x0205 (workspace_close_dir) 请求负载：
+// 格式：[u16 pathLength][path bytes]（即 len + data，携带待关闭目录的相对路径）。
+std::string encode_workspace_close_dir(std::string_view path) {
+    validate_non_empty_u16_string(path, "invalid workspace_close_dir path");
+
+    std::string out;
+    out.reserve(2 + path.size());
+    append_be(out, static_cast<std::uint16_t>(path.size()));
+    out.append(path);
+    return out;
+}
+
+std::string encode_workspace_close_dir(const CloseDirRequest &req) {
+    return encode_workspace_close_dir(req.path);
+}
+
 // ============================================================================
 // Workspace 模块客户端 Decode 函数（解析服务端返回的 Response / Event Payload）
 // ============================================================================
@@ -166,6 +182,32 @@ std::optional<std::uint64_t> decode_workspace_write_file(std::string_view payloa
         return std::nullopt;
 
     return *revision;
+}
+
+// 解码 0x0205 (workspace_close_dir) 响应负载：
+// 格式：[u16 pathLength][path bytes]（即 len + data，返回服务端已关闭并取消 inotify 监听的目录相对路径）。
+std::optional<std::string> decode_workspace_close_dir(std::string_view payload) {
+    if (payload.empty())
+        return std::string{};
+
+    PayloadReader reader(payload);
+    auto path_len = reader.read_int<std::uint16_t>();
+    if (!path_len)
+        return std::nullopt;
+
+    std::optional<std::string_view> path;
+    if (*path_len > 0) {
+        path = reader.read_bytes(*path_len);
+    } else if (reader.remaining_size() >= 2) {
+        auto low_len = reader.read_int<std::uint16_t>();
+        if (low_len && *low_len > 0)
+            path = reader.read_bytes(*low_len);
+    }
+
+    if (!path || !reader.finished() || path->find('\0') != std::string_view::npos)
+        return std::nullopt;
+
+    return std::string(*path);
 }
 
 using ::decode_terminal_input;
