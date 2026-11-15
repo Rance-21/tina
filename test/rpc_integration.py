@@ -146,12 +146,36 @@ def test_workspace_and_inotify(port, projects_root):
     with open(file_path, "wb") as f:
         f.write(b"hello")
 
+    # 准备一个从未调用过 list_dir 的独立目录与文件，验证 FileWatcher 独立生效。
+    unlisted_dir = os.path.join(projects_root, "solo_proj")
+    os.makedirs(unlisted_dir, exist_ok=True)
+    solo_file = os.path.join(unlisted_dir, "solo.txt")
+    with open(solo_file, "wb") as f:
+        f.write(b"solo-v1")
+
     with connect(port) as sock:
+        # 0. 直接 read_file 未经 list_dir 的文件，外部修改后应由 FileWatcher 触发缓存失效
+        solo_rel = b"solo_proj/solo.txt"
+        solo_read_req = struct.pack("!H", len(solo_rel)) + solo_rel + struct.pack("!QI", 0, 1024)
+        sock.sendall(frame(700, 0x0203, solo_read_req))
+        req_id, status, payload = recv_response(sock, 0x0203)
+        assert req_id == 700 and status == 0 and payload[16:] == b"solo-v1"
+
+        with open(solo_file, "wb") as f:
+            f.write(b"solo-v2")
+        time.sleep(0.05)
+        sock.sendall(frame(699, 0x0203, solo_read_req))
+        req_id, status, payload = recv_response(sock, 0x0203)
+        assert req_id == 699 and status == 0 and payload[16:] == b"solo-v2"
+
         # 1. workspace_list_projects (0x0201)
         sock.sendall(frame(701, 0x0201))
         req_id, status, payload = recv_response(sock, 0x0201)
         assert req_id == 701 and status == 0
-        assert payload == struct.pack("!H", 4) + b"demo"
+        assert payload == (
+            struct.pack("!H", 4) + b"demo"
+            + struct.pack("!H", 9) + b"solo_proj"
+        )
 
         # 2. workspace_list_dir (0x0202)
         dir_req = struct.pack("!H", 4) + b"demo"
@@ -182,12 +206,29 @@ def test_workspace_and_inotify(port, projects_root):
         rev2, = struct.unpack("!Q", payload)
         assert rev2 != rev1
 
+        # write_file 后紧接着 read_file，必须返回最新写入的内容与 rev2（不可命中旧缓存）
+        sock.sendall(frame(708, 0x0203, read_req))
+        req_id, status, payload = recv_response(sock, 0x0203)
+        assert req_id == 708 and status == 0
+        file_size, rev_after_write = struct.unpack("!QQ", payload[:16])
+        assert file_size == 6 and rev_after_write == rev2 and payload[16:] == b"world!"
+
         # 用旧的 rev1 再次写，应当返回 Status::conflict (6) 以及当前的 rev2
         sock.sendall(frame(705, 0x0204, write_req))
         req_id, status, payload = recv_response(sock, 0x0204)
         assert req_id == 705 and status == 6
         conflict_rev, = struct.unpack("!Q", payload)
         assert conflict_rev == rev2
+
+        # 外部直接原地修改 a.txt（不增删目录项），验证 inotify 失效文件缓存且不误推送 list_dir 事件
+        with open(file_path, "wb") as f:
+            f.write(b"external-edit")
+        time.sleep(0.05)
+        sock.sendall(frame(709, 0x0203, read_req))
+        req_id, status, payload = recv_response(sock, 0x0203)
+        assert req_id == 709 and status == 0
+        file_size, _ = struct.unpack("!QQ", payload[:16])
+        assert file_size == len(b"external-edit") and payload[16:] == b"external-edit"
 
         # 5. 在已 list_dir 的目录下新建文件，验证服务端通过 inotify 主动推送 Kind::event (kind=3)
         with open(os.path.join(proj_dir, "b.txt"), "wb") as f:
@@ -199,19 +240,29 @@ def test_workspace_and_inotify(port, projects_root):
         assert kind == 3 and event_req_id == 0 and method == 0x0202 and status == 0
         assert (struct.pack("!BH", 0, 5) + b"b.txt") in event_payload
 
-        # 6. workspace_close_dir (0x0205)：关闭目录并取消服务端 inotify 监听
+        # 6. workspace_close_dir (0x0205)：关闭目录并取消服务端 inotify 监听（同时淘汰目录与子文件缓存）
         close_req = struct.pack("!H", 4) + b"demo"
         sock.sendall(frame(706, 0x0205, close_req))
         req_id, status, payload = recv_response(sock, 0x0205)
         assert req_id == 706 and status == 0
         assert payload == close_req
 
-        # 取消监听后再次新建文件，再发一次 ping，确认不会再收到 0x0202 目录变更 Event
+        # 取消监听后修改文件并新建 c.txt：验证不推送事件，且重新 list_dir/read_file 能读到磁盘最新状态
+        with open(file_path, "wb") as f:
+            f.write(b"after-unwatch")
         with open(os.path.join(proj_dir, "c.txt"), "wb") as f:
             f.write(b"after_close")
         time.sleep(0.05)
         sock.sendall(frame(707, 0x0001))
         assert recv_response(sock, 0x0001) == (707, 0, b"PONG")
+
+        sock.sendall(frame(710, 0x0202, dir_req))
+        req_id, status, payload = recv_response(sock, 0x0202)
+        assert req_id == 710 and status == 0 and (struct.pack("!BH", 0, 5) + b"c.txt") in payload
+
+        sock.sendall(frame(711, 0x0203, read_req))
+        req_id, status, payload = recv_response(sock, 0x0203)
+        assert req_id == 711 and status == 0 and payload[16:] == b"after-unwatch"
 
 
 def test_terminal(port):

@@ -11,11 +11,15 @@ export module ide.server;
 
 import std;
 import service.file;
+import service.file_watcher;
+import service.workspace_cache;
 export import ide.server_protocol;
 
 export namespace server {
 
 using service::file::file_revision;
+using service::file::has_projects_root_env;
+using service::file::is_valid_workspace_rel_path;
 using service::file::path_mutex_for;
 using service::file::projects_root_dir;
 using service::file::read_directory_entries;
@@ -25,23 +29,66 @@ using service::file::ScopedFd;
 using service::file::set_errno_error;
 using service::file::write_all;
 
+namespace detail {
+
+// 从已缓存的完整文件响应中按 [offset, max_bytes] 零拷贝切片出响应内容。
+inline std::string_view slice_file_content(const ReadFileResponse &cached, std::uint64_t offset,
+                                           std::uint32_t max_bytes) noexcept {
+    if (offset >= cached.file_size || offset >= cached.content.size())
+        return {};
+
+    const auto available = std::min<std::uint64_t>(
+        cached.file_size - offset, cached.content.size() - static_cast<std::size_t>(offset));
+    const auto to_read = static_cast<std::size_t>(std::min<std::uint64_t>(available, max_bytes));
+    return std::string_view(cached.content).substr(static_cast<std::size_t>(offset), to_read);
+}
+
+// 从已打开的 fd 指定偏移读取最多 to_read 字节（处理 EINTR 与短读），成功返回 true。
+inline bool pread_range(int fd, std::uint64_t offset, std::size_t to_read, std::string &out,
+                        int &out_errno) {
+    out.resize(to_read);
+    std::size_t total_read = 0;
+    while (total_read < to_read) {
+        ssize_t n = ::pread(fd, out.data() + total_read, to_read - total_read,
+                            static_cast<off_t>(offset + total_read));
+        if (n < 0) {
+            if (errno == EINTR)
+                continue;
+            out_errno = errno;
+            return false;
+        }
+        if (n == 0)
+            break; // 遇到文件末尾（例如读取途中文件被截断）
+        total_read += static_cast<std::size_t>(n);
+    }
+    out.resize(total_read);
+    return true;
+}
+
+} // namespace detail
+
 // 解析客户端相对目录路径为服务端绝对路径（供 IO 线程注册 inotify 使用）。
-std::optional<std::string> resolve_workspace_dir_path(std::string_view rel_path) {
+std::optional<std::string> inline resolve_workspace_dir_path(std::string_view rel_path) {
     return resolve_workspace_path(rel_path);
 }
 
-// 当 inotify 监听到目录变化时，由 Worker 线程重新扫描目录并构造 Kind::event 帧。
+// 当 inotify 监听到目录变化时，由 Worker 线程重新扫描目录并构造 Kind::event 帧，同时刷新缓存。
 // 事件负载格式与 workspace_list_dir 响应完全一致：[u16 dirPathLen][dirPath bytes][entries...]。
 std::optional<Frame> build_workspace_list_dir_event(std::string_view rel_path) {
     auto target_path = resolve_workspace_path(rel_path);
     if (!target_path)
         return std::nullopt;
 
-    std::vector<DirEntry> entries;
-    if (read_directory_entries(*target_path, entries) != 0)
+    auto &cache = service::global_workspace_cache();
+    const auto epoch = cache.dir_epoch(rel_path);
+
+    auto entries = std::make_shared<std::vector<DirEntry>>();
+    if (read_directory_entries(*target_path, *entries) != 0)
         return std::nullopt;
 
-    auto payload = encode_workspace_list_dir(rel_path, entries);
+    cache.put_dir(rel_path, entries, epoch);
+
+    auto payload = encode_workspace_list_dir(rel_path, *entries);
     if (payload.size() > max_frame_length - min_frame_length)
         return std::nullopt;
 
@@ -120,26 +167,44 @@ void handle_workspace_list_projects(Frame &frame) {
 
 // 处理 0x0202 (workspace_list_dir)：
 // 枚举 ~/projects/<path> 下的一级文件与文件夹（深度为 1，不递归展开子目录）。
-// 响应头部为 [u16 dirPathLen][dirPath bytes]，随后每个条目编码为 [u8 type][u16 nameLen][name bytes]，
-// 其中：type = 0（普通文件）、type = 1（目录）、type = 2（符号链接）。
+// 优先命中内存缓存（std::vector<DirEntry>），命中时完全不进入 Linux 文件系统；
+// 未命中时扫描目录并将结果按失效版本号写入缓存。
 // 若成功且 watched_dir 非空，则将标准化后的目录相对路径写入 *watched_dir 供 IO 线程注册 inotify。
 void handle_workspace_list_dir(Frame &frame, std::string *watched_dir = nullptr) {
-    auto req = decode_workspace_list_dir(frame.payload);
+    auto req = decode_workspace_list_dir_view(frame.payload);
     if (!req) {
         frame.status = Status::invalid_argument;
         frame.payload = "invalid workspace_list_dir payload";
         return;
     }
 
-    auto target_path = resolve_workspace_path(req->path);
+    const std::string_view rel_path = req->path;
+    if (!is_valid_workspace_rel_path(rel_path) || !has_projects_root_env()) {
+        frame.status = Status::invalid_argument;
+        frame.payload = "invalid workspace directory path";
+        return;
+    }
+
+    auto &cache = service::global_workspace_cache();
+    if (auto cached = cache.get_dir(rel_path)) {
+        // 先提取或消费 rel_path，再覆盖 frame.payload（rel_path 是 frame.payload 的切片视图）。
+        if (watched_dir != nullptr)
+            *watched_dir = std::string(rel_path);
+        frame.status = Status::ok;
+        frame.payload = encode_workspace_list_dir(rel_path, *cached);
+        return;
+    }
+
+    auto target_path = resolve_workspace_path(rel_path);
     if (!target_path) {
         frame.status = Status::invalid_argument;
         frame.payload = "invalid workspace directory path";
         return;
     }
 
-    std::vector<DirEntry> entries;
-    const int rc = read_directory_entries(*target_path, entries);
+    const auto epoch = cache.dir_epoch(rel_path);
+    auto entries = std::make_shared<std::vector<DirEntry>>();
+    const int rc = read_directory_entries(*target_path, *entries);
     if (rc > 0) {
         set_errno_error(frame, rc, "failed to open target directory");
         return;
@@ -149,25 +214,45 @@ void handle_workspace_list_dir(Frame &frame, std::string *watched_dir = nullptr)
         return;
     }
 
-    frame.status = Status::ok;
-    frame.payload = encode_workspace_list_dir(req->path, entries);
+    cache.put_dir(rel_path, entries, epoch);
+
     if (watched_dir != nullptr)
-        *watched_dir = std::move(req->path);
+        *watched_dir = std::string(rel_path);
+    frame.status = Status::ok;
+    frame.payload = encode_workspace_list_dir(rel_path, *entries);
 }
 
 // 处理 0x0203 (workspace_read_file)：
 // 按 [offset, maxBytes] 分段读取 UTF-8 文件内容。
-// 采用乐观并发控制：每次 pread 读取前后各做一次 fstat 计算 revision，
-// 若前后 revision 一致则返回 [u64 fileSize][u64 revision][bytes...]；若不一致则自动重试。
+// 优先命中内存缓存（ReadFileResponse），命中时直接切片编码返回，不进入 Linux 文件系统；
+// 未命中时采用乐观并发控制（pread 前后 fstat 校验 revision），文件不超过缓存上限时整文件写入缓存。
 void handle_workspace_read_file(Frame &frame) {
-    auto req = decode_workspace_read_file(frame.payload);
+    auto req = decode_workspace_read_file_view(frame.payload);
     if (!req) {
         frame.status = Status::invalid_argument;
         frame.payload = "invalid workspace_read_file payload";
         return;
     }
 
-    auto full_path = resolve_workspace_path(req->path);
+    const std::string_view rel_path = req->path;
+    const std::uint64_t offset = req->offset;
+    const std::uint32_t max_bytes = req->max_bytes;
+
+    if (!is_valid_workspace_rel_path(rel_path) || !has_projects_root_env()) {
+        frame.status = Status::invalid_argument;
+        frame.payload = "invalid workspace file path";
+        return;
+    }
+
+    auto &cache = service::global_workspace_cache();
+    if (auto cached = cache.get_file(rel_path)) {
+        const auto slice = detail::slice_file_content(*cached, offset, max_bytes);
+        frame.status = Status::ok;
+        frame.payload = encode_workspace_read_file(cached->file_size, cached->revision, slice);
+        return;
+    }
+
+    auto full_path = resolve_workspace_path(rel_path);
     if (!full_path) {
         frame.status = Status::invalid_argument;
         frame.payload = "invalid workspace file path";
@@ -179,6 +264,9 @@ void handle_workspace_read_file(Frame &frame) {
         set_errno_error(frame, errno, "failed to open file for reading");
         return;
     }
+
+    auto &file_watcher = service::global_file_watcher();
+    bool watched = false;
 
     // 每次读取前后比对 revision，若读取期间文件恰好被并发修改则重试。
     while (true) {
@@ -195,29 +283,36 @@ void handle_workspace_read_file(Frame &frame) {
 
         const auto file_size = static_cast<std::uint64_t>(st_before.st_size);
         const auto rev_before = file_revision(st_before);
+        const bool cacheable = file_size <= cache.max_cacheable_file_bytes();
+
+        // 若目标可缓存，先向 FileWatcher 注册监听并采样版本号，保证读盘期间的并发修改可被感知。
+        std::uint64_t epoch = 0;
+        if (cacheable) {
+            if (!watched) {
+                file_watcher.watch_file(rel_path, *full_path);
+                watched = true;
+            }
+            epoch = cache.file_epoch(rel_path);
+        }
 
         std::string content;
-        if (req->offset < file_size) {
-            const auto readable = file_size - req->offset;
-            const auto to_read =
-                static_cast<std::size_t>(std::min<std::uint64_t>(readable, req->max_bytes));
-            content.resize(to_read);
-
-            std::size_t total_read = 0;
-            while (total_read < to_read) {
-                ssize_t n = ::pread(fd.get(), content.data() + total_read, to_read - total_read,
-                                    static_cast<off_t>(req->offset + total_read));
-                if (n < 0) {
-                    if (errno == EINTR)
-                        continue;
-                    set_errno_error(frame, errno, "failed to pread file");
-                    return;
-                }
-                if (n == 0)
-                    break; // 遇到文件末尾（例如读取途中文件被截断）
-                total_read += static_cast<std::size_t>(n);
+        if (cacheable) {
+            int err = 0;
+            if (file_size > 0 &&
+                !detail::pread_range(fd.get(), 0, static_cast<std::size_t>(file_size), content,
+                                     err)) {
+                set_errno_error(frame, err, "failed to pread file");
+                return;
             }
-            content.resize(total_read);
+        } else if (offset < file_size) {
+            const auto readable = file_size - offset;
+            const auto to_read =
+                static_cast<std::size_t>(std::min<std::uint64_t>(readable, max_bytes));
+            int err = 0;
+            if (!detail::pread_range(fd.get(), offset, to_read, content, err)) {
+                set_errno_error(frame, err, "failed to pread file");
+                return;
+            }
         }
 
         struct stat st_after{};
@@ -228,12 +323,22 @@ void handle_workspace_read_file(Frame &frame) {
 
         const auto rev_after = file_revision(st_after);
         if (rev_before == rev_after) {
+            if (cacheable) {
+                auto cached = std::make_shared<ReadFileResponse>(ReadFileResponse{
+                    .file_size = file_size,
+                    .revision = rev_after,
+                    .content = std::move(content),
+                });
+                cache.put_file(rel_path, cached, epoch);
+
+                const auto slice = detail::slice_file_content(*cached, offset, max_bytes);
+                frame.status = Status::ok;
+                frame.payload = encode_workspace_read_file(file_size, rev_after, slice);
+                return;
+            }
+
             frame.status = Status::ok;
-            frame.payload = encode_workspace_read_file(ReadFileResponse{
-                .file_size = file_size,
-                .revision = rev_after,
-                .content = std::move(content),
-            });
+            frame.payload = encode_workspace_read_file(file_size, rev_after, content);
             return;
         }
     }
@@ -323,7 +428,13 @@ void handle_workspace_write_file(Frame &frame) {
         return;
     }
 
-    // 6. 确认未变化后，执行 rename 原子替换原文件。
+    // 6. 确认未变化后，先注销旧 inode 的 FileWatcher 监听并使旧缓存失效，再执行 rename
+    // 原子替换原文件。
+    auto &cache = service::global_workspace_cache();
+    auto &file_watcher = service::global_file_watcher();
+    file_watcher.unwatch_file(req->path);
+    cache.invalidate_file(req->path);
+
     if (::rename(tmp_path.c_str(), full_path->c_str()) != 0) {
         const int err = errno;
         (void)::unlink(tmp_path.c_str());
@@ -331,7 +442,7 @@ void handle_workspace_write_file(Frame &frame) {
         return;
     }
 
-    // 7. 取得替换后的新文件 revision。
+    // 7. 取得替换后的新文件 revision，并为新 inode 注册监听后同步刷新缓存。
     struct stat st_new{};
     if (::lstat(full_path->c_str(), &st_new) != 0) {
         set_errno_error(frame, errno, "failed to stat replaced file");
@@ -339,6 +450,17 @@ void handle_workspace_write_file(Frame &frame) {
     }
 
     const auto new_rev = file_revision(st_new);
+    if (req->content.size() <= cache.max_cacheable_file_bytes()) {
+        file_watcher.watch_file(req->path, *full_path);
+        auto cached = std::make_shared<ReadFileResponse>(ReadFileResponse{
+            .file_size = static_cast<std::uint64_t>(st_new.st_size),
+            .revision = new_rev,
+            .content = std::move(req->content),
+        });
+        cache.put_file_after_write(req->path, std::move(cached));
+    } else {
+        cache.invalidate_file(req->path);
+    }
 
     // 8. 函数退出自动释放路径锁，返回 OK 及 [u64 newRevision]。
     frame.status = Status::ok;
@@ -347,7 +469,8 @@ void handle_workspace_write_file(Frame &frame) {
 
 // 处理 0x0205 (workspace_close_dir)：
 // 客户端折叠或关闭指定目录时调用，请求与响应负载均为 [u16 pathLength][path bytes]（len + data）。
-// 校验相对目录路径合法后，将目录相对路径写入 *unwatched_dir，供所属 I/O 线程在 DirWatcher 中执行 unwatch 释放 inotify 监听。
+// 校验相对目录路径合法后，将目录相对路径写入 *unwatched_dir，供所属 I/O 线程在 DirWatcher 中执行
+// unwatch 释放 inotify 监听。
 void handle_workspace_close_dir(Frame &frame, std::string *unwatched_dir = nullptr) {
     auto req = decode_workspace_close_dir(frame.payload);
     if (!req) {
@@ -370,7 +493,8 @@ void handle_workspace_close_dir(Frame &frame, std::string *unwatched_dir = nullp
 }
 
 // Workspace 模块请求统一分发入口（对应 MethodGroup::workspace 0x0200）。
-// watched_dir 用于回传 list_dir 需新增监听或 close_dir 需取消监听的目录相对路径（若额外提供了 unwatched_dir 则优先写入 unwatched_dir）。
+// watched_dir 用于回传 list_dir 需新增监听或 close_dir 需取消监听的目录相对路径（若额外提供了
+// unwatched_dir 则优先写入 unwatched_dir）。
 void handle_workspace_request(Frame &frame, std::string *watched_dir = nullptr,
                               std::string *unwatched_dir = nullptr) {
     switch (frame.method) {

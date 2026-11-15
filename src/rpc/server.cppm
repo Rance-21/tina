@@ -124,6 +124,28 @@ void run_server(std::string_view port) {
             detail::make_terminal_manager(*slot.loop, slot.connections, connection_counter);
     }
 
+    // 将每个 I/O 线程的 DirWatcher 以及全局 FileWatcher（挂载于 slots[0]）一次性启动并挂入 epoll。
+    {
+        auto watchers_started = std::make_shared<std::latch>(static_cast<std::ptrdiff_t>(slots.size()));
+        for (std::size_t i = 0; i < slots.size(); ++i) {
+            auto &slot = slots[i];
+            if (!slot.loop->post_task([i, loop = slot.loop, watcher = slot.watcher,
+                                       watchers_started] {
+                    try {
+                        watcher->start();
+                        if (i == 0)
+                            detail::start_file_watcher(*loop);
+                    } catch (...) {
+                        runtime::log::error("startup: failed to start inotify watchers");
+                    }
+                    watchers_started->count_down();
+                })) {
+                throw std::runtime_error("cannot start inotify watchers");
+            }
+        }
+        watchers_started->wait();
+    }
+
     std::size_t next_io = 0;
     runtime::log::info("tina listening on port " + std::string(port));
 
@@ -182,12 +204,15 @@ void run_server(std::string_view port) {
         auto *connections = &slot.connections;
         auto watcher = slot.watcher;
         auto terminal_mgr = slot.terminal_mgr;
+        const bool stop_fw = (&slot == &slots[0]);
 
         bool posted = loop->post_task(
-            [loop, connections, watcher, terminal_mgr, &connection_counter, frozen] {
+            [loop, connections, watcher, terminal_mgr, stop_fw, &connection_counter, frozen] {
                 try {
                     if (watcher)
                         watcher->stop();
+                    if (stop_fw)
+                        detail::stop_file_watcher();
                     if (terminal_mgr)
                         terminal_mgr->stop();
                     for (auto it = connections->begin(); it != connections->end();) {

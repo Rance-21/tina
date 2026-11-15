@@ -15,9 +15,21 @@ bool decode_workspace_list_projects(std::string_view payload) {
     return payload.empty();
 }
 
-// 解码 0x0202 (workspace_list_dir) 请求负载：
+// 0x0202 (workspace_list_dir) 零拷贝视图，直接引用 Frame::payload 切片。
+struct ListDirRequestView {
+    std::string_view path;
+};
+
+// 0x0203 (workspace_read_file) 零拷贝视图，直接引用 Frame::payload 切片。
+struct ReadFileRequestView {
+    std::string_view path;
+    std::uint64_t offset{};
+    std::uint32_t max_bytes{};
+};
+
+// 零拷贝解码 0x0202 (workspace_list_dir) 请求负载：
 // 格式：[u16 pathLength][path bytes]
-std::optional<ListDirRequest> decode_workspace_list_dir(std::string_view payload) {
+std::optional<ListDirRequestView> decode_workspace_list_dir_view(std::string_view payload) noexcept {
     PayloadReader reader(payload);
     auto path_len = reader.read_int<std::uint16_t>();
     if (!path_len || *path_len == 0)
@@ -27,12 +39,22 @@ std::optional<ListDirRequest> decode_workspace_list_dir(std::string_view payload
     if (!path || !reader.finished() || path->find('\0') != std::string_view::npos)
         return std::nullopt;
 
-    return ListDirRequest{.path = std::string(*path)};
+    return ListDirRequestView{.path = *path};
 }
 
-// 解码 0x0203 (workspace_read_file) 请求负载：
+// 解码 0x0202 (workspace_list_dir) 请求负载：
+// 格式：[u16 pathLength][path bytes]
+std::optional<ListDirRequest> decode_workspace_list_dir(std::string_view payload) {
+    auto view = decode_workspace_list_dir_view(payload);
+    if (!view)
+        return std::nullopt;
+    return ListDirRequest{.path = std::string(view->path)};
+}
+
+// 零拷贝解码 0x0203 (workspace_read_file) 请求负载：
 // 格式：[u16 pathLength][path bytes][u64 offset][u32 maxBytes]
-std::optional<ReadFileRequest> decode_workspace_read_file(std::string_view payload) {
+std::optional<ReadFileRequestView>
+decode_workspace_read_file_view(std::string_view payload) noexcept {
     PayloadReader reader(payload);
     auto path_len = reader.read_int<std::uint16_t>();
     if (!path_len || *path_len == 0)
@@ -49,10 +71,24 @@ std::optional<ReadFileRequest> decode_workspace_read_file(std::string_view paylo
     if (*max_bytes == 0 || *max_bytes > max_file_read_bytes)
         return std::nullopt;
 
-    return ReadFileRequest{
-        .path = std::string(*path),
+    return ReadFileRequestView{
+        .path = *path,
         .offset = *offset,
         .max_bytes = *max_bytes,
+    };
+}
+
+// 解码 0x0203 (workspace_read_file) 请求负载：
+// 格式：[u16 pathLength][path bytes][u64 offset][u32 maxBytes]
+std::optional<ReadFileRequest> decode_workspace_read_file(std::string_view payload) {
+    auto view = decode_workspace_read_file_view(payload);
+    if (!view)
+        return std::nullopt;
+
+    return ReadFileRequest{
+        .path = std::string(view->path),
+        .offset = view->offset,
+        .max_bytes = view->max_bytes,
     };
 }
 
@@ -157,13 +193,18 @@ std::string encode_workspace_list_dir(const ListDirResponse &response) {
 
 // 编码 0x0203 (workspace_read_file) 响应负载：
 // 格式：[u64 fileSize][u64 revision][content bytes...]
-std::string encode_workspace_read_file(const ReadFileResponse &response) {
+std::string encode_workspace_read_file(std::uint64_t file_size, std::uint64_t revision,
+                                       std::string_view content) {
     std::string out;
-    out.reserve(16 + response.content.size());
-    append_be(out, response.file_size);
-    append_be(out, response.revision);
-    out.append(response.content);
+    out.reserve(16 + content.size());
+    append_be(out, file_size);
+    append_be(out, revision);
+    out.append(content);
     return out;
+}
+
+std::string encode_workspace_read_file(const ReadFileResponse &response) {
+    return encode_workspace_read_file(response.file_size, response.revision, response.content);
 }
 
 // 编码 0x0204 (workspace_write_file) 响应负载：

@@ -16,6 +16,7 @@ import ide.server;
 import ide.server_git;
 import ide.server_terminal;
 import service.dir_watcher;
+import service.file_watcher;
 import service.kv;
 
 namespace rpc::detail {
@@ -76,15 +77,25 @@ export void refresh_connection(net::EventLoop &loop, ConnectionMap &connections,
 export using DirWatcher = service::DirWatcher;
 
 // 创建绑定在本 I/O 线程上的 DirWatcher，并注入 refresh_connection 回调。
-export std::shared_ptr<DirWatcher> make_dir_watcher(net::EventLoop &loop,
-                                                    ConnectionMap &connections,
-                                                    runtime::WorkerPool &workers,
-                                                    ConnectionCounter &counter) {
+export inline std::shared_ptr<DirWatcher> make_dir_watcher(net::EventLoop &loop,
+                                                           ConnectionMap &connections,
+                                                           runtime::WorkerPool &workers,
+                                                           ConnectionCounter &counter) {
     return std::make_shared<DirWatcher>(
         loop, connections, workers, counter,
         [&loop, &connections, &counter](const std::shared_ptr<Connection> &conn) {
             refresh_connection(loop, connections, counter, conn);
         });
+}
+
+// 在所属 I/O 线程启动全局 FileWatcher（将文件监听 fd 挂载到 epoll）。
+export void start_file_watcher(net::EventLoop &loop) {
+    service::global_file_watcher().start(loop);
+}
+
+// 在所属 I/O 线程停止全局 FileWatcher 并释放 inotify 资源。
+export void stop_file_watcher() noexcept {
+    service::global_file_watcher().stop();
 }
 
 namespace {
@@ -115,7 +126,7 @@ void complete_response(const std::weak_ptr<Connection> &weak, net::EventLoop &lo
             if (response.method == Method::workspace_list_dir)
                 watcher->watch(watched_dir, conn);
             else if (response.method == Method::workspace_close_dir)
-                watcher->unwatch(watched_dir, conn);
+                watcher->unwatch(watched_dir, conn->fd());
         }
 
         const bool had_write = conn->wants_write();
@@ -278,9 +289,6 @@ void register_connection(net::Socket socket, net::EventLoop &loop, ConnectionMap
                          const std::shared_ptr<KvState> &kv,
                          const std::shared_ptr<DirWatcher> &watcher,
                          const std::shared_ptr<server::TerminalManager> &terminal_mgr) {
-    if (watcher)
-        watcher->ensure_started();
-
     auto conn = std::make_shared<Connection>(std::move(socket));
     int fd = conn->fd();
     std::weak_ptr<Connection> weak = conn;

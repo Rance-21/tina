@@ -104,6 +104,32 @@ target_sources(test_buffer
 # 注册测试。
 add_test(NAME buffer COMMAND test_buffer)
 
+add_executable(test_workspace_cache test/workspace_cache.cpp)
+set_target_properties(test_workspace_cache PROPERTIES
+    CXX_MODULE_STD ON
+)
+target_sources(test_workspace_cache
+    PRIVATE
+    FILE_SET CXX_MODULES
+    FILES
+        src/net/buffer.cppm
+        src/net/epoll.cppm
+        src/net/event_loop.cppm
+        src/runtime/log.cppm
+        src/rpc/protocol.cppm
+        src/ide/protocol.cppm
+        src/ide/server_protocol.cppm
+        src/service/file.cppm
+        src/service/workspace_cache.cppm
+        src/service/file_watcher.cppm
+        src/ide/server_file.cppm
+)
+target_link_libraries(test_workspace_cache PRIVATE
+    Threads::Threads
+    spdlog::spdlog
+)
+add_test(NAME workspace_cache COMMAND test_workspace_cache)
+
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 add_test(

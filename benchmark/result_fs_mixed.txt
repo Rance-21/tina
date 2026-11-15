@@ -1,0 +1,76 @@
+====================================================================
+                     Tina RPC Benchmark Report                      
+====================================================================
+
+[1. Test Configuration]
+  Server Target          : 127.0.0.1:3490
+  Workload               : fs_mixed
+  TCP Connections        : 4
+  Max Inflight / Conn    : 64
+  Total Max Concurrency  : 256
+  Total Duration         : 30.00 s
+  Warmup Duration        : 5.00 s
+  Measured Duration      : 25.00 s
+
+[2. Throughput & Request Summary]
+  Warmup Completed       : 482421 reqs (errors: 0)
+  Measured Completed     : 5329132 reqs
+  Measured Errors        : 0 reqs
+  Success Rate           : 100.00 %
+  Average QPS            : 213165.19 req/s
+  Peak 1s QPS            : 222710.00 req/s
+  Min 1s QPS             : 176699.00 req/s
+  TX Throughput          : 13.10 MiB/s (343496032 bytes)
+  RX Throughput          : 323.37 MiB/s (8476999078 bytes)
+  Total Bandwidth        : 336.48 MiB/s
+
+[3. Latency Distribution (Microseconds / Milliseconds)]
+  Min                    :     389.39 us  (  0.3894 ms)
+  Avg (Mean)             :    1198.82 us  (  1.1988 ms)
+  StdDev                 :     157.69 us  (  0.1577 ms)
+  P50 (Median)           :    1157.78 us  (  1.1578 ms)
+  P75                    :    1247.81 us  (  1.2478 ms)
+  P90                    :    1400.56 us  (  1.4006 ms)
+  P95                    :    1501.57 us  (  1.5016 ms)
+  P99                    :    1763.99 us  (  1.7640 ms)
+  P99.9                  :    2244.82 us  (  2.2448 ms)
+  P99.99                 :    2947.24 us  (  2.9472 ms)
+  Max                    :    3516.15 us  (  3.5161 ms)
+
+[4. Latency Histogram]
+  < 20 us       :          0  (  0.00 %)
+  20 - 50 us    :          0  (  0.00 %)
+  50 - 100 us   :          0  (  0.00 %)
+  100 - 200 us  :          0  (  0.00 %)
+  200 - 500 us  :         56  (  0.00 %)
+  500 - 1000 us :      72401  (  1.36 %)
+  >= 1000 us    :    5256675  ( 98.64 %)
+
+[5. Per-Second Measured QPS Timeline]
+  Sec  1 (t= 6s) :     176699 req/s
+  Sec  2 (t= 7s) :     204023 req/s
+  Sec  3 (t= 8s) :     217208 req/s
+  Sec  4 (t= 9s) :     205879 req/s
+  Sec  5 (t=10s) :     218504 req/s
+  Sec  6 (t=11s) :     214184 req/s
+  Sec  7 (t=12s) :     222710 req/s
+  Sec  8 (t=13s) :     220494 req/s
+  Sec  9 (t=14s) :     216963 req/s
+  Sec 10 (t=15s) :     220871 req/s
+  Sec 11 (t=16s) :     221729 req/s
+  Sec 12 (t=17s) :     218872 req/s
+  Sec 13 (t=18s) :     221491 req/s
+  Sec 14 (t=19s) :     213294 req/s
+  Sec 15 (t=20s) :     217912 req/s
+  Sec 16 (t=21s) :     222270 req/s
+  Sec 17 (t=22s) :     221741 req/s
+  Sec 18 (t=23s) :     219758 req/s
+  Sec 19 (t=24s) :     217286 req/s
+  Sec 20 (t=25s) :     218004 req/s
+  Sec 21 (t=26s) :     189747 req/s
+  Sec 22 (t=27s) :     206605 req/s
+  Sec 23 (t=28s) :     207107 req/s
+  Sec 24 (t=29s) :     204649 req/s
+  Sec 25 (t=30s) :     211132 req/s
+
+====================================================================

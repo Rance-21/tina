@@ -133,6 +133,12 @@ inline void set_errno_error(Frame &frame, int err, std::string_view context) {
 }
 
 // 3. 工作区根目录（~/projects）与相对路径安全校验
+// 判断 HOME 环境变量是否有效（零内存分配快速检查，供缓存命中路径复用）。
+inline bool has_projects_root_env() noexcept {
+    const char *home = ::getenv("HOME");
+    return home != nullptr && home[0] != '\0';
+}
+
 // 获取 ~/projects 根目录路径。
 inline std::optional<std::string> projects_root_dir() {
     const char *home = ::getenv("HOME");
@@ -146,12 +152,11 @@ inline std::optional<std::string> projects_root_dir() {
     return root;
 }
 
-// 校验客户端传入的相对于 ~/projects 的路径（如 "tina" 或 "tina/src/main.cpp"），
-// 严格禁止以 "/" 开头、禁止空路径段 "//"、禁止 "." 与 ".." 越界逃逸。
-std::optional<std::string> resolve_workspace_path(std::string_view rel_path) {
+// 仅做相对路径合法性校验（零堆分配），用于缓存命中路径快速拦截非法越界路径。
+inline bool is_valid_workspace_rel_path(std::string_view rel_path) noexcept {
     if (rel_path.empty() || rel_path.front() == '/' || rel_path.back() == '/' ||
         rel_path.find('\0') != std::string_view::npos)
-        return std::nullopt;
+        return false;
 
     std::size_t start = 0;
     while (start < rel_path.size()) {
@@ -161,12 +166,20 @@ std::optional<std::string> resolve_workspace_path(std::string_view rel_path) {
                                     : rel_path.substr(start, slash - start);
 
         if (part.empty() || part == "." || part == "..")
-            return std::nullopt;
+            return false;
 
         if (slash == std::string_view::npos)
             break;
         start = slash + 1;
     }
+    return true;
+}
+
+// 校验客户端传入的相对于 ~/projects 的路径（如 "tina" 或 "tina/src/main.cpp"），
+// 严格禁止以 "/" 开头、禁止空路径段 "//"、禁止 "." 与 ".." 越界逃逸。
+std::optional<std::string> resolve_workspace_path(std::string_view rel_path) {
+    if (!is_valid_workspace_rel_path(rel_path))
+        return std::nullopt;
 
     auto root = projects_root_dir();
     if (!root)

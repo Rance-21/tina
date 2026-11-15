@@ -106,5 +106,6 @@ handle_workspace_read_file while 可能空转
 增加close dir / file
 缓存功能，减少disk io
 GitExecResult run_git_command 实现 async
+inotify 防抖 ，利用 timerfd
 
 
