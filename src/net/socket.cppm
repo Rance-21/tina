@@ -1,14 +1,26 @@
 module;
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <netinet/in.h>
 #include <netdb.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <signal.h>
 #include <errno.h>
 #include <string.h>
 
 export module net.socket;
 import std;
+
+namespace {
+
+// 全局一次性忽略 SIGPIPE：防止使用 ::writev() 向对端已 RST 的 Socket 写入时触发 SIGPIPE 终止进程。
+const bool ignore_sigpipe = []() noexcept {
+    ::signal(SIGPIPE, SIG_IGN);
+    return true;
+}();
+
+} // namespace
 
 export namespace net {
 
@@ -252,6 +264,29 @@ class Socket {
             }
 
             throw std::runtime_error(std::string{"send: "} + ::strerror(errno));
+        }
+    }
+
+    // non-blocking writev（聚集写）。
+    // 将分散在多个 iovec 中的数据块（如 17B 帧头 + 协议头 + 零拷贝外置缓存切片）在单次系统调用中写入内核。
+    std::optional<std::size_t> inline try_writev(const struct iovec *iov, int iovcnt) const {
+        (void)ignore_sigpipe;
+        while (true) {
+            ssize_t n = ::writev(fd_, iov, iovcnt);
+
+            if (n >= 0) {
+                return static_cast<std::size_t>(n);
+            }
+
+            if (errno == EINTR) {
+                continue;
+            }
+
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return std::nullopt;
+            }
+
+            throw std::runtime_error(std::string{"writev: "} + ::strerror(errno));
         }
     }
 

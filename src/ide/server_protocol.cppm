@@ -42,15 +42,6 @@ std::optional<ListDirRequestView> decode_workspace_list_dir_view(std::string_vie
     return ListDirRequestView{.path = *path};
 }
 
-// 解码 0x0202 (workspace_list_dir) 请求负载：
-// 格式：[u16 pathLength][path bytes]
-std::optional<ListDirRequest> decode_workspace_list_dir(std::string_view payload) {
-    auto view = decode_workspace_list_dir_view(payload);
-    if (!view)
-        return std::nullopt;
-    return ListDirRequest{.path = std::string(view->path)};
-}
-
 // 零拷贝解码 0x0203 (workspace_read_file) 请求负载：
 // 格式：[u16 pathLength][path bytes][u64 offset][u32 maxBytes]
 std::optional<ReadFileRequestView>
@@ -75,20 +66,6 @@ decode_workspace_read_file_view(std::string_view payload) noexcept {
         .path = *path,
         .offset = *offset,
         .max_bytes = *max_bytes,
-    };
-}
-
-// 解码 0x0203 (workspace_read_file) 请求负载：
-// 格式：[u16 pathLength][path bytes][u64 offset][u32 maxBytes]
-std::optional<ReadFileRequest> decode_workspace_read_file(std::string_view payload) {
-    auto view = decode_workspace_read_file_view(payload);
-    if (!view)
-        return std::nullopt;
-
-    return ReadFileRequest{
-        .path = std::string(view->path),
-        .offset = view->offset,
-        .max_bytes = view->max_bytes,
     };
 }
 
@@ -142,13 +119,6 @@ decode_workspace_close_dir_view(std::string_view payload, bool *is_canonical_u16
     return *path;
 }
 
-std::optional<CloseDirRequest> decode_workspace_close_dir(std::string_view payload) {
-    auto path = decode_workspace_close_dir_view(payload);
-    if (!path)
-        return std::nullopt;
-    return CloseDirRequest{.path = std::string(*path)};
-}
-
 // ============================================================================
 // Workspace 模块服务端 Encode 函数（构造返回给客户端的 Response / Event Payload）
 // ============================================================================
@@ -169,12 +139,6 @@ void encode_workspace_list_projects_into(const std::vector<std::string> &project
         append_be(out, static_cast<std::uint16_t>(name.size()));
         out.append(name);
     }
-}
-
-std::string encode_workspace_list_projects(const std::vector<std::string> &projects) {
-    std::string out;
-    encode_workspace_list_projects_into(projects, out);
-    return out;
 }
 
 // 原地编码 0x0202 (workspace_list_dir) 响应与目录变化 Event 负载进 out。
@@ -204,29 +168,6 @@ void encode_workspace_list_dir_into(std::string_view dir_path, const std::vector
     }
 }
 
-std::string encode_workspace_list_dir(std::string_view dir_path,
-                                      const std::vector<DirEntry> &entries) {
-    std::string out;
-    encode_workspace_list_dir_into(dir_path, entries, out);
-    return out;
-}
-
-std::string encode_workspace_list_dir(const ListDirResponse &response) {
-    return encode_workspace_list_dir(response.path, response.entries);
-}
-
-// 零拷贝编码 0x0203 (workspace_read_file) 响应到 Frame：
-// 仅在 frame.payload 原地写入 16 字节头 [u64 fileSize][u64 revision]，
-// 文件内容通过 payload_owner + external_payload 零拷贝挂载，由 encode_frame 直写输出缓冲。
-void encode_workspace_read_file(Frame &frame, std::uint64_t file_size, std::uint64_t revision,
-                                std::shared_ptr<const void> owner, std::string_view content) {
-    frame.payload.resize(16);
-    write_be(frame.payload.data(), file_size);
-    write_be(frame.payload.data() + 8, revision);
-    frame.payload_owner = std::move(owner);
-    frame.external_payload = content;
-}
-
 // 原地编码 0x0203 (workspace_read_file) 响应负载进 out：
 // 格式：[u64 fileSize][u64 revision][content bytes...]
 void encode_workspace_read_file_into(std::uint64_t file_size, std::uint64_t revision,
@@ -238,28 +179,11 @@ void encode_workspace_read_file_into(std::uint64_t file_size, std::uint64_t revi
     out.append(content);
 }
 
-std::string encode_workspace_read_file(std::uint64_t file_size, std::uint64_t revision,
-                                       std::string_view content) {
-    std::string out;
-    encode_workspace_read_file_into(file_size, revision, content, out);
-    return out;
-}
-
-std::string encode_workspace_read_file(const ReadFileResponse &response) {
-    return encode_workspace_read_file(response.file_size, response.revision, response.content);
-}
-
 // 原地编码 0x0204 (workspace_write_file) 响应负载进 out：
 // 格式：[u64 revision]（写入成功时为 newRevision；版本冲突时为当前实际的 currentRevision）。
 void encode_workspace_write_file_into(std::uint64_t revision, std::string &out) {
     out.resize(8);
     write_be(out.data(), revision);
-}
-
-std::string encode_workspace_write_file(std::uint64_t revision) {
-    std::string out;
-    encode_workspace_write_file_into(revision, out);
-    return out;
 }
 
 // 原地编码 0x0205 (workspace_close_dir) 响应负载进 out：
@@ -273,16 +197,6 @@ void encode_workspace_close_dir_into(std::string_view dir_path, std::string &out
     out.reserve(2 + dir_path.size());
     append_be(out, static_cast<std::uint16_t>(dir_path.size()));
     out.append(dir_path);
-}
-
-std::string encode_workspace_close_dir(std::string_view dir_path) {
-    std::string out;
-    encode_workspace_close_dir_into(dir_path, out);
-    return out;
-}
-
-std::string encode_workspace_close_dir(const CloseDirRequest &req) {
-    return encode_workspace_close_dir(req.path);
 }
 
 using ::decode_terminal_input;

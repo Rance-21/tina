@@ -41,7 +41,7 @@ class Connection {
 
     // 判断连接是否已满足关闭条件：
     // 对端已半关闭（peer_eof_）或服务端主动停止读新请求（draining_），
-    // 且所有已提交给 Worker 的在途请求均已处理完（pending_ == 0），且输出缓冲区已全部发空。
+    // 且所有已提交给 Worker 的在途请求均已处理完（pending_ == 0），且待发队列已全部发空。
     [[nodiscard]]
     bool finished() const noexcept {
         return (peer_eof_ || draining_) && pending_ == 0 && output_.empty();
@@ -88,15 +88,12 @@ class Connection {
         return true;
     }
 
-    // Worker 算完响应后由所属 I/O 线程调用：核销一个在途请求（--pending_），并将响应帧编码进
-    // output_。 分支逻辑：若在途计数异常为 0，或追加后输出缓冲区超过 max_output (4 MiB)
-    // 上限，则返回 false 关闭连接。
-    bool enqueue_response(const Frame &response) {
-        const auto frame_size = frame_header_size + response.payload_size();
-        if (pending_ == 0 || output_.readable_bytes() + frame_size > max_output)
+    // Worker 算完响应后由所属 I/O 线程调用：
+    // 核销一个在途请求（--pending_），编码 17B 帧头并直接 std::move 接管 response.payload（不拷贝负载）。
+    bool enqueue_response(Frame &response) {
+        if (pending_ == 0 || !output_.enqueue(response, max_output))
             return false;
 
-        encode_frame(response, output_);
         --pending_;
         return true;
     }
@@ -106,28 +103,12 @@ class Connection {
         if (peer_eof_ || draining_)
             return false;
 
-        const auto frame_size = frame_header_size + event.payload_size();
-        if (output_.readable_bytes() + frame_size > max_output)
-            return false;
-
-        encode_frame(event, output_);
-        return true;
+        return output_.enqueue(event, max_output);
     }
 
-    // 非阻塞将 output_ 中的待发数据刷入内核 Socket 发送缓冲区。
-    // 分支逻辑：若 try_send 返回 nullopt（EAGAIN，内核发送缓冲区已满）则立即中断循环，
-    // 剩余未发完的数据留在 output_ 中，由随后的 refresh_connection() 按需挂载 EPOLLOUT。
-    // Linux 发送缓冲区的动态扩容 或 小概率循环过程中数据发送，8次大部分只执行2次
+    // 使用 ::writev() 将 output_ 队列中的“17B 帧头 + Payload”聚集写入内核 Socket 发送缓冲区。
     void write() {
-        for (int i = 0; i < 8 && wants_write(); ++i) {
-            auto n = socket_.try_send(output_.data(), output_.readable_bytes());
-
-            // EAGAIN：等待下一次 EPOLLOUT。
-            if (!n || *n == 0)
-                break;
-
-            output_.retrieve(*n);
-        }
+        output_.write(socket_);
     }
 
   private:
@@ -136,14 +117,12 @@ class Connection {
 
     net::Socket socket_;
     net::Buffer input_;
-    net::Buffer output_;
+    FrameSendQueue output_;
 
     // 已提交、但尚未收到业务执行结果的 RPC 数量。
     std::size_t pending_{0};
 
     bool peer_eof_{false};
-
-    // true 时已经清空
     bool draining_{false};
 };
 

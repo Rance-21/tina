@@ -115,7 +115,7 @@ namespace {
 //      省去每次响应不必要触发的 epoll_ctl(EPOLL_CTL_MOD) 系统调用。
 void complete_response(const std::weak_ptr<Connection> &weak, net::EventLoop &loop,
                        ConnectionMap &connections, ConnectionCounter &counter,
-                       const std::shared_ptr<DirWatcher> &watcher, const Frame &response,
+                       const std::shared_ptr<DirWatcher> &watcher, Frame &response,
                        const std::string &watched_dir) {
     auto conn = weak.lock();
     if (!conn)
@@ -205,17 +205,16 @@ void handle_request(Frame request, const std::weak_ptr<Connection> &weak, int co
     try {
         dispatch_request(request, *kv, watched_dir, terminal_mgr.get(), conn_fd);
     } catch (const std::bad_alloc &) {
-        request.clear_external_payload();
         request.status = Status::resource_exhausted;
         request.payload = "out of memory";
     } catch (...) {
-        request.clear_external_payload();
         request.status = Status::internal;
         request.payload = "internal server error";
     }
 
     (void)loop.post_task([weak, &loop, &connections, &counter, watcher,
-                          response = std::move(request), watched_dir = std::move(watched_dir)] {
+                          response = std::move(request),
+                          watched_dir = std::move(watched_dir)]() mutable {
         complete_response(weak, loop, connections, counter, watcher, response, watched_dir);
     });
 }

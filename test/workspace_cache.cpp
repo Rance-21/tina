@@ -255,7 +255,7 @@ int test_handlers_skip_filesystem_on_hit() {
     CHECK(list_frame.status == Status::ok);
     CHECK(watched_dir == "demo");
 
-    // 2. 首次 read_file 读取前 3 字节，底层整文件写入缓存，响应内容零拷贝挂载到 external_payload。
+    // 2. 首次 read_file 读取前 3 字节，底层整文件写入缓存。
     Frame read_frame1{
         .kind = Kind::request,
         .request_id = 2,
@@ -266,15 +266,8 @@ int test_handlers_skip_filesystem_on_hit() {
     read_frame1.kind = Kind::response;
     server::handle_workspace_read_file(read_frame1);
     CHECK(read_frame1.status == Status::ok);
-    CHECK(read_frame1.payload.size() == 16);
-    CHECK(read_frame1.payload_owner != nullptr);
-    CHECK(read_frame1.external_payload == "abc");
-
-    net::Buffer wire;
-    encode_frame(read_frame1, wire);
-    auto decoded1 = decode_frame(wire);
-    CHECK(decoded1.has_value());
-    CHECK(decoded1->payload.substr(16) == "abc");
+    CHECK(read_frame1.payload.size() == 19);
+    CHECK(read_frame1.payload.substr(16) == "abc");
 
     // 3. 删除磁盘上的目录和文件（不触发任何缓存失效），验证后续访问完全不走 Linux 文件系统。
     std::filesystem::remove_all(proj_dir, ec);
@@ -293,7 +286,7 @@ int test_handlers_skip_filesystem_on_hit() {
     CHECK(watched_dir == "demo");
     CHECK(list_hit.payload == list_frame.payload);
 
-    // 命中缓存且使用不同 offset/maxBytes 分段读取仍应零拷贝返回正确切片 "def"。
+    // 命中缓存且使用不同 offset/maxBytes 分段读取仍应返回正确切片 "def"。
     Frame read_hit{
         .kind = Kind::response,
         .request_id = 4,
@@ -303,14 +296,8 @@ int test_handlers_skip_filesystem_on_hit() {
     };
     server::handle_workspace_read_file(read_hit);
     CHECK(read_hit.status == Status::ok);
-    CHECK(read_hit.payload.size() == 16);
-    CHECK(read_hit.payload_owner != nullptr);
-    CHECK(read_hit.external_payload == "def");
-
-    encode_frame(read_hit, wire);
-    auto decoded_hit = decode_frame(wire);
-    CHECK(decoded_hit.has_value());
-    CHECK(decoded_hit->payload.substr(16) == "def");
+    CHECK(read_hit.payload.size() == 19);
+    CHECK(read_hit.payload.substr(16) == "def");
 
     // 4. 模拟 unwatch 淘汰后，再次访问会回落到 Linux 文件系统并返回 not_found。
     service::global_workspace_cache().invalidate_dir_and_files("demo");

@@ -154,8 +154,12 @@ void RpcClient::State::send(Method method, std::string payload, Clock::time_poin
     pendings.emplace(id, Pending{method, promise, deadline});
     deadlines.emplace(deadline, id);
 
-    encode_frame({.kind = Kind::request, .request_id = id, .method = method,
-                  .status = Status::ok, .payload = std::move(payload)}, output);
+    Frame req{.kind = Kind::request,
+              .request_id = id,
+              .method = method,
+              .status = Status::ok,
+              .payload = std::move(payload)};
+    (void)output.enqueue(req);
 
     // 仅在最早的截止时间改变时更新定时器。
     if (earliest)
@@ -167,16 +171,9 @@ void RpcClient::State::send(Method method, std::string payload, Clock::time_poin
     refresh();
 }
 
-// 非阻塞将 output 缓冲区中的请求数据写入 Socket；遇 EAGAIN 时中断，留待下次 EPOLLOUT 继续发送。
+// 非阻塞将 output 队列中的请求数据通过 writev 写入 Socket；遇 EAGAIN 时中断，留待下次 EPOLLOUT 继续发送。
 void RpcClient::State::send_pending() {
-    for (int i = 0; i < 8 && !output.empty(); ++i) {
-        auto n = socket->try_send(output.data(), output.readable_bytes());
-
-        if (!n || *n == 0)
-            break;
-
-        output.retrieve(*n);
-    }
+    output.write(*socket);
 }
 
 // 非阻塞从 Socket 循环读取响应字节流（单次事件最多 64 KiB），每读一块就调用 handle_responses() 拆包分发。

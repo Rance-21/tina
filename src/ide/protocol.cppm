@@ -1,3 +1,6 @@
+module;
+#include <sys/uio.h>
+
 export module ide.protocol;
 
 import std;
@@ -96,31 +99,137 @@ static bool valid_header(const Frame &frame) {
     return false;
 }
 
-// 客户端和服务端共用同一帧头。Length 不含自己的 4 字节，按当前负载重新计算。
-// 直接在输出 Buffer 尾部申请整帧连续空间（17 字节帧头 + Payload）并原地写入，
-// 消除栈上临时 header 数组的中转拷贝以及分两次 append 的开销。
-export void encode_frame(const Frame &frame, net::Buffer &out) {
+// 将 Frame 的 5 个头部字段编码为 17 字节大端序固定帧头写入 dst。
+// 注意：这里只写 17 字节帧头，绝对不拷贝 frame.payload；
+// frame.payload 通过 std::move 直接交给发送队列，由 ::writev() 将帧头和负载一起聚集发送。
+export void encode_frame_header(const Frame &frame, char *dst) {
     constexpr std::size_t max_payload = max_frame_length - min_frame_length;
-    const std::size_t head_size = frame.payload.size();
-    const std::size_t ext_size = frame.external_payload.size();
-    if (ext_size > max_payload || head_size > max_payload - ext_size || !valid_header(frame))
+    const std::size_t payload_size = frame.payload.size();
+
+    if (payload_size > max_payload || !valid_header(frame))
         throw std::invalid_argument("invalid RPC frame");
-    const std::size_t payload_size = head_size + ext_size;
 
-    char *dst = out.begin_write(frame_header_size + payload_size);
+    // 17 字节帧头布局：
+    // [0..3]  : Length (4B, 不含自身的 4 字节 = 13B 剩余帧头 + Payload 长度)
+    // [4]     : Kind (1B, request / response / event)
+    // [5..12] : Request ID (8B)
+    // [13..14]: Method (2B)
+    // [15..16]: Status (2B)
     write_be(dst, min_frame_length + static_cast<std::uint32_t>(payload_size));
-
     dst[4] = static_cast<char>(frame.kind);
-
     write_be(dst + 5, frame.request_id);
     write_be(dst + 13, std::to_underlying(frame.method));
     write_be(dst + 15, std::to_underlying(frame.status));
-
-    if (head_size > 0)
-        std::memcpy(dst + frame_header_size, frame.payload.data(), head_size);
-    if (ext_size > 0)
-        std::memcpy(dst + frame_header_size + head_size, frame.external_payload.data(), ext_size);
 }
+
+// 基于 ::writev() 的帧发送队列（服务端 Connection、客户端 RpcClient 与压测端共用）。
+// 核心设计：
+//   - 每帧拆分为“17 字节固定帧头（内联数组）”和“直接 std::move 接管的 payload 字符串”，
+//     彻底省去在用户态分配连续大 Buffer 并把 payload 再 memcpy 拷贝一遍的开销。
+//   - 发送时通过 ::writev() 在单次系统调用中将多帧的“17B 帧头 + Payload”一起聚集写入内核。
+export class FrameSendQueue {
+  public:
+    [[nodiscard]] inline bool empty() const noexcept {
+        return frames_.empty();
+    }
+
+    [[nodiscard]] inline std::size_t readable_bytes() const noexcept {
+        return queued_bytes_;
+    }
+
+    // 入队一帧（直接移动接管 frame.payload，零拷贝）。
+    // 若超出 max_bytes 上限则返回 false。
+    bool enqueue(Frame &frame, std::size_t max_bytes = std::numeric_limits<std::size_t>::max()) {
+        const std::size_t frame_size = frame_header_size + frame.payload.size();
+        if (queued_bytes_ + frame_size > max_bytes)
+            return false;
+
+        Item item{};
+        encode_frame_header(frame, item.header.data()); // 1. 编码 17 字节固定帧头
+        item.payload = std::move(frame.payload);        // 2. 直接移动接管 payload，不拷贝字节
+        frames_.push_back(std::move(item));
+        queued_bytes_ += frame_size;
+        return true;
+    }
+
+    // 入队只读帧（如向多个订阅者广播同一个 Event 帧）。
+    bool enqueue(const Frame &frame,
+                 std::size_t max_bytes = std::numeric_limits<std::size_t>::max()) {
+        Frame copy = frame;
+        return enqueue(copy, max_bytes);
+    }
+
+    // 使用 ::writev() 将队列中待发的“17B 帧头”和“Payload”聚集写入非阻塞 Socket。
+    template <typename Socket> void write(const Socket &socket) {
+        constexpr int kMaxIov = 64;
+        std::array<struct iovec, kMaxIov> iov{};
+
+        while (!frames_.empty()) {
+            int iov_count = 0;
+            std::size_t batch_bytes = 0;
+
+            // 第一步：遍历队列，把每帧还没发完的“17B 帧头”和“Payload”依次挂进 iov 数组。
+            for (auto &item : frames_) {
+                // 1. 若 17B 帧头还没发完，把剩余帧头作为一段 iovec
+                if (item.sent < frame_header_size) {
+                    const std::size_t len = frame_header_size - item.sent;
+                    iov[iov_count++] = {item.header.data() + item.sent, len};
+                    batch_bytes += len;
+                    if (iov_count == kMaxIov)
+                        break;
+                }
+
+                // 2. 若有 Payload，把剩余未发的 Payload 作为下一段 iovec
+                if (!item.payload.empty()) {
+                    const std::size_t offset =
+                        (item.sent > frame_header_size) ? (item.sent - frame_header_size) : 0;
+                    const std::size_t len = item.payload.size() - offset;
+                    iov[iov_count++] = {item.payload.data() + offset, len};
+                    batch_bytes += len;
+                    if (iov_count == kMaxIov)
+                        break;
+                }
+            }
+
+            // 第二步：单次 ::writev() 系统调用将所有分散数据块一起写入内核。
+            auto n = socket.try_writev(iov.data(), iov_count);
+            if (!n || *n == 0)
+                break; // EAGAIN：内核发送缓冲区已满，等待下次 EPOLLOUT
+
+            // 第三步：根据实际发出的字节数 *n，从队头弹出已发完的帧，或推进部分写游标。
+            std::size_t rem = *n;
+            queued_bytes_ -= rem;
+
+            while (rem > 0 && !frames_.empty()) {
+                auto &front = frames_.front();
+                const std::size_t frame_left =
+                    (frame_header_size + front.payload.size()) - front.sent;
+
+                if (rem >= frame_left) {
+                    rem -= frame_left;
+                    frames_.pop_front(); // 整帧已发完，弹出并释放其 payload 内存
+                } else {
+                    front.sent += rem;   // 部分写（只发了一半）：推进游标，留待下次继续发
+                    rem = 0;
+                }
+            }
+
+            // 若本次未写完当前批次，说明内核发送缓冲区已满，直接退出避免多调一次必触发 EAGAIN 的系统调用。
+            if (*n < batch_bytes)
+                break;
+        }
+    }
+
+  private:
+    struct Item {
+        std::array<char, frame_header_size> header{};
+        std::string payload;
+        std::size_t sent{0}; // 当前帧已发送的总字节数（范围：0 .. 17 + payload.size()）
+    };
+
+    std::deque<Item> frames_;
+    std::size_t queued_bytes_{0};
+};
 
 // 每次只取一帧。半包留在输入缓冲区；非法长度立即报错，不按外部长度预分配。
 export std::optional<Frame> decode_frame(net::Buffer &in) {

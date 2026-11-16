@@ -137,29 +137,22 @@ class BenchConnection {
             slot.send_time = Clock::now();
             slot.in_use = true;
 
-            encode_frame(
-                Frame{
-                    .length = 0,
-                    .kind = Kind::request,
-                    .request_id = req_id,
-                    .method = req.method,
-                    .status = Status::ok,
-                    .payload = std::move(req.payload),
-                },
-                output_);
+            Frame frame{
+                .length = 0,
+                .kind = Kind::request,
+                .request_id = req_id,
+                .method = req.method,
+                .status = Status::ok,
+                .payload = std::move(req.payload),
+            };
+            (void)output_.enqueue(frame);
 
             ++inflight_;
         }
     }
 
     void flush_output() {
-        while (!output_.empty()) {
-            auto n = socket_.try_send(output_.data(), output_.readable_bytes());
-            if (!n || *n == 0) {
-                break;
-            }
-            output_.retrieve(*n);
-        }
+        output_.write(socket_);
     }
 
     void receive_responses(Workload &workload, Stats &stats, Clock::time_point warmup_end,
@@ -245,7 +238,7 @@ class BenchConnection {
 
     net::Socket socket_;
     net::Buffer input_{16384};
-    net::Buffer output_{16384};
+    FrameSendQueue output_;
 
     std::size_t max_inflight_{64};
     std::size_t inflight_{0};

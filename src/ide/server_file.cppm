@@ -254,10 +254,8 @@ void handle_workspace_read_file(Frame &frame) {
     auto &cache = service::global_workspace_cache();
     if (auto cached = cache.get_file(rel_path)) {
         const auto slice = detail::slice_file_content(*cached, offset, max_bytes);
-        const auto file_size = cached->file_size;
-        const auto revision = cached->revision;
         frame.status = Status::ok;
-        encode_workspace_read_file(frame, file_size, revision, std::move(cached), slice);
+        encode_workspace_read_file_into(cached->file_size, cached->revision, slice, frame.payload);
         return;
     }
 
@@ -344,13 +342,12 @@ void handle_workspace_read_file(Frame &frame) {
 
                 const auto slice = detail::slice_file_content(*cached, offset, max_bytes);
                 frame.status = Status::ok;
-                encode_workspace_read_file(frame, file_size, rev_after, std::move(cached), slice);
+                encode_workspace_read_file_into(file_size, rev_after, slice, frame.payload);
                 return;
             }
 
             write_be(content.data(), file_size);
             write_be(content.data() + 8, rev_after);
-            frame.clear_external_payload();
             frame.status = Status::ok;
             frame.payload = std::move(content);
             return;
