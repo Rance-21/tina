@@ -2,7 +2,7 @@
 
 import std;
 import net.buffer;
-import rpc.frame;
+import rpc.protocol;
 
 namespace {
 

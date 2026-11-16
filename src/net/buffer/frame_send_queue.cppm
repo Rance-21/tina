@@ -4,7 +4,7 @@ module;
 export module net.buffer.frame_send_queue;
 
 import std;
-import rpc.frame;
+import rpc.protocol;
 
 export namespace net {
 

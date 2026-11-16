@@ -1,7 +1,7 @@
 export module ide.protocol;
 
 import std;
-export import rpc.frame;
+export import rpc.protocol;
 
 // ping 的请求负载为空，成功响应是四个文本字节 PONG。
 export void handle_ping(Frame &frame) {

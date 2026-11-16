@@ -10,7 +10,7 @@ import net.socket;
 import net.buffer;
 import net.epoll;
 import net.event_loop;
-import rpc.frame;
+import rpc.protocol;
 
 namespace rpc {
 

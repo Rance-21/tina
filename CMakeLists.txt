@@ -99,7 +99,6 @@ set(NET_BUFFER_MODULES
     src/net/buffer/frame_send_queue.cppm
     src/rpc/protocol.cppm
     src/rpc/payload.cppm
-    src/rpc/frame.cppm
 )
 
 target_sources(test_buffer

@@ -4,7 +4,7 @@ import std;
 import net.buffer;
 import net.socket;
 import net.event_loop;
-import rpc.frame;
+import rpc.protocol;
 
 export namespace rpc {
 

@@ -6,7 +6,7 @@ import net.buffer;
 import net.epoll;
 import net.event_loop;
 import net.event_loop_thread_pool;
-import rpc.frame;
+import rpc.protocol;
 
 export namespace rpc {
 
