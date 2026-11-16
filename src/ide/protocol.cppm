@@ -100,9 +100,12 @@ static bool valid_header(const Frame &frame) {
 // 直接在输出 Buffer 尾部申请整帧连续空间（17 字节帧头 + Payload）并原地写入，
 // 消除栈上临时 header 数组的中转拷贝以及分两次 append 的开销。
 export void encode_frame(const Frame &frame, net::Buffer &out) {
-    const std::size_t payload_size = frame.payload.size();
-    if (payload_size > max_frame_length - min_frame_length || !valid_header(frame))
+    constexpr std::size_t max_payload = max_frame_length - min_frame_length;
+    const std::size_t head_size = frame.payload.size();
+    const std::size_t ext_size = frame.external_payload.size();
+    if (ext_size > max_payload || head_size > max_payload - ext_size || !valid_header(frame))
         throw std::invalid_argument("invalid RPC frame");
+    const std::size_t payload_size = head_size + ext_size;
 
     char *dst = out.begin_write(frame_header_size + payload_size);
     write_be(dst, min_frame_length + static_cast<std::uint32_t>(payload_size));
@@ -113,8 +116,10 @@ export void encode_frame(const Frame &frame, net::Buffer &out) {
     write_be(dst + 13, std::to_underlying(frame.method));
     write_be(dst + 15, std::to_underlying(frame.status));
 
-    if (payload_size > 0)
-        std::memcpy(dst + frame_header_size, frame.payload.data(), payload_size);
+    if (head_size > 0)
+        std::memcpy(dst + frame_header_size, frame.payload.data(), head_size);
+    if (ext_size > 0)
+        std::memcpy(dst + frame_header_size + head_size, frame.external_payload.data(), ext_size);
 }
 
 // 每次只取一帧。半包留在输入缓冲区；非法长度立即报错，不按外部长度预分配。

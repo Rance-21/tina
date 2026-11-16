@@ -135,5 +135,16 @@ export struct Frame {
     std::uint64_t request_id; // 请求非零；每个请求恰有一个响应，允许乱序，按原 ID 匹配；事件为零。
     Method method;
     Status status;       // 仅响应携带结果；请求与事件必须为零。
-    std::string payload; // 原样传输的负载字节流，具体格式由 Method 决定。
+    std::string payload; // 原样传输的负载字节流，或与 external_payload 拼接发送时的协议头字节。
+    std::shared_ptr<const void> payload_owner{}; // 零拷贝外置负载的所有权保活句柄。
+    std::string_view external_payload{};         // 紧随 payload 之后发送的零拷贝外部负载视图。
+
+    [[nodiscard]] std::size_t payload_size() const noexcept {
+        return payload.size() + external_payload.size();
+    }
+
+    void clear_external_payload() noexcept {
+        external_payload = {};
+        payload_owner.reset();
+    }
 };

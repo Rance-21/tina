@@ -43,13 +43,14 @@ inline std::string_view slice_file_content(const ReadFileResponse &cached, std::
     return std::string_view(cached.content).substr(static_cast<std::size_t>(offset), to_read);
 }
 
-// 从已打开的 fd 指定偏移读取最多 to_read 字节（处理 EINTR 与短读），成功返回 true。
-inline bool pread_range(int fd, std::uint64_t offset, std::size_t to_read, std::string &out,
-                        int &out_errno) {
-    out.resize(to_read);
+// 从已打开的 fd 指定偏移读取最多 to_read 字节并写入 out + out_offset 处（处理 EINTR 与短读）。
+// 调用方可通过 out_offset 预留协议头字节，避免读取后再二次拷贝拼接。
+inline bool pread_range_at(int fd, std::uint64_t offset, std::size_t to_read, std::string &out,
+                           std::size_t out_offset, int &out_errno) {
+    out.resize(out_offset + to_read);
     std::size_t total_read = 0;
     while (total_read < to_read) {
-        ssize_t n = ::pread(fd, out.data() + total_read, to_read - total_read,
+        ssize_t n = ::pread(fd, out.data() + out_offset + total_read, to_read - total_read,
                             static_cast<off_t>(offset + total_read));
         if (n < 0) {
             if (errno == EINTR)
@@ -61,8 +62,22 @@ inline bool pread_range(int fd, std::uint64_t offset, std::size_t to_read, std::
             break; // 遇到文件末尾（例如读取途中文件被截断）
         total_read += static_cast<std::size_t>(n);
     }
-    out.resize(total_read);
+    out.resize(out_offset + total_read);
     return true;
+}
+
+// 将目录结果写入响应帧，同时安全处理 rel_path（可能是 frame.payload 的切片视图）。
+inline void write_list_dir_response(Frame &frame, std::string_view rel_path,
+                                    const std::vector<DirEntry> &entries,
+                                    std::string *watched_dir) {
+    frame.status = Status::ok;
+    if (watched_dir != nullptr) {
+        *watched_dir = std::string(rel_path);
+        encode_workspace_list_dir_into(*watched_dir, entries, frame.payload);
+    } else {
+        std::string dir_copy(rel_path);
+        encode_workspace_list_dir_into(dir_copy, entries, frame.payload);
+    }
 }
 
 } // namespace detail
@@ -88,18 +103,18 @@ std::optional<Frame> build_workspace_list_dir_event(std::string_view rel_path) {
 
     cache.put_dir(rel_path, entries, epoch);
 
-    auto payload = encode_workspace_list_dir(rel_path, *entries);
-    if (payload.size() > max_frame_length - min_frame_length)
-        return std::nullopt;
-
-    return Frame{
+    Frame frame{
         .length = 0,
         .kind = Kind::event,
         .request_id = 0,
         .method = Method::workspace_list_dir,
         .status = Status::ok,
-        .payload = std::move(payload),
+        .payload = {},
     };
+    encode_workspace_list_dir_into(rel_path, *entries, frame.payload);
+    if (frame.payload.size() > max_frame_length - min_frame_length)
+        return std::nullopt;
+    return frame;
 }
 
 // ============================================================================
@@ -162,7 +177,7 @@ void handle_workspace_list_projects(Frame &frame) {
 
     std::ranges::sort(projects);
     frame.status = Status::ok;
-    frame.payload = encode_workspace_list_projects(projects);
+    encode_workspace_list_projects_into(projects, frame.payload);
 }
 
 // 处理 0x0202 (workspace_list_dir)：
@@ -187,11 +202,7 @@ void handle_workspace_list_dir(Frame &frame, std::string *watched_dir = nullptr)
 
     auto &cache = service::global_workspace_cache();
     if (auto cached = cache.get_dir(rel_path)) {
-        // 先提取或消费 rel_path，再覆盖 frame.payload（rel_path 是 frame.payload 的切片视图）。
-        if (watched_dir != nullptr)
-            *watched_dir = std::string(rel_path);
-        frame.status = Status::ok;
-        frame.payload = encode_workspace_list_dir(rel_path, *cached);
+        detail::write_list_dir_response(frame, rel_path, *cached, watched_dir);
         return;
     }
 
@@ -215,11 +226,7 @@ void handle_workspace_list_dir(Frame &frame, std::string *watched_dir = nullptr)
     }
 
     cache.put_dir(rel_path, entries, epoch);
-
-    if (watched_dir != nullptr)
-        *watched_dir = std::string(rel_path);
-    frame.status = Status::ok;
-    frame.payload = encode_workspace_list_dir(rel_path, *entries);
+    detail::write_list_dir_response(frame, rel_path, *entries, watched_dir);
 }
 
 // 处理 0x0203 (workspace_read_file)：
@@ -247,8 +254,10 @@ void handle_workspace_read_file(Frame &frame) {
     auto &cache = service::global_workspace_cache();
     if (auto cached = cache.get_file(rel_path)) {
         const auto slice = detail::slice_file_content(*cached, offset, max_bytes);
+        const auto file_size = cached->file_size;
+        const auto revision = cached->revision;
         frame.status = Status::ok;
-        frame.payload = encode_workspace_read_file(cached->file_size, cached->revision, slice);
+        encode_workspace_read_file(frame, file_size, revision, std::move(cached), slice);
         return;
     }
 
@@ -299,17 +308,19 @@ void handle_workspace_read_file(Frame &frame) {
         if (cacheable) {
             int err = 0;
             if (file_size > 0 &&
-                !detail::pread_range(fd.get(), 0, static_cast<std::size_t>(file_size), content,
-                                     err)) {
+                !detail::pread_range_at(fd.get(), 0, static_cast<std::size_t>(file_size), content,
+                                        0, err)) {
                 set_errno_error(frame, err, "failed to pread file");
                 return;
             }
-        } else if (offset < file_size) {
-            const auto readable = file_size - offset;
-            const auto to_read =
-                static_cast<std::size_t>(std::min<std::uint64_t>(readable, max_bytes));
+        } else {
+            // 超大文件不进缓存：头部预留 16 字节直读内容，校验通过后原地回填头并移动给 frame.payload。
+            const std::size_t to_read =
+                (offset < file_size)
+                    ? static_cast<std::size_t>(std::min<std::uint64_t>(file_size - offset, max_bytes))
+                    : 0;
             int err = 0;
-            if (!detail::pread_range(fd.get(), offset, to_read, content, err)) {
+            if (!detail::pread_range_at(fd.get(), offset, to_read, content, 16, err)) {
                 set_errno_error(frame, err, "failed to pread file");
                 return;
             }
@@ -333,12 +344,15 @@ void handle_workspace_read_file(Frame &frame) {
 
                 const auto slice = detail::slice_file_content(*cached, offset, max_bytes);
                 frame.status = Status::ok;
-                frame.payload = encode_workspace_read_file(file_size, rev_after, slice);
+                encode_workspace_read_file(frame, file_size, rev_after, std::move(cached), slice);
                 return;
             }
 
+            write_be(content.data(), file_size);
+            write_be(content.data() + 8, rev_after);
+            frame.clear_external_payload();
             frame.status = Status::ok;
-            frame.payload = encode_workspace_read_file(file_size, rev_after, content);
+            frame.payload = std::move(content);
             return;
         }
     }
@@ -386,7 +400,7 @@ void handle_workspace_write_file(Frame &frame) {
     const auto current_rev = file_revision(st_before);
     if (current_rev != req->expected_revision) {
         frame.status = Status::conflict;
-        frame.payload = encode_workspace_write_file(current_rev);
+        encode_workspace_write_file_into(current_rev, frame.payload);
         return;
     }
 
@@ -424,7 +438,7 @@ void handle_workspace_write_file(Frame &frame) {
     if (recheck_rev != req->expected_revision) {
         (void)::unlink(tmp_path.c_str());
         frame.status = Status::conflict;
-        frame.payload = encode_workspace_write_file(recheck_rev);
+        encode_workspace_write_file_into(recheck_rev, frame.payload);
         return;
     }
 
@@ -464,7 +478,7 @@ void handle_workspace_write_file(Frame &frame) {
 
     // 8. 函数退出自动释放路径锁，返回 OK 及 [u64 newRevision]。
     frame.status = Status::ok;
-    frame.payload = encode_workspace_write_file(new_rev);
+    encode_workspace_write_file_into(new_rev, frame.payload);
 }
 
 // 处理 0x0205 (workspace_close_dir)：
@@ -472,14 +486,15 @@ void handle_workspace_write_file(Frame &frame) {
 // 校验相对目录路径合法后，将目录相对路径写入 *unwatched_dir，供所属 I/O 线程在 DirWatcher 中执行
 // unwatch 释放 inotify 监听。
 void handle_workspace_close_dir(Frame &frame, std::string *unwatched_dir = nullptr) {
-    auto req = decode_workspace_close_dir(frame.payload);
-    if (!req) {
+    bool canonical_u16 = false;
+    auto req_path = decode_workspace_close_dir_view(frame.payload, &canonical_u16);
+    if (!req_path) {
         frame.status = Status::invalid_argument;
         frame.payload = "invalid workspace_close_dir payload";
         return;
     }
 
-    auto target_path = resolve_workspace_path(req->path);
+    auto target_path = resolve_workspace_path(*req_path);
     if (!target_path) {
         frame.status = Status::invalid_argument;
         frame.payload = "invalid workspace directory path";
@@ -487,9 +502,14 @@ void handle_workspace_close_dir(Frame &frame, std::string *unwatched_dir = nullp
     }
 
     frame.status = Status::ok;
-    frame.payload = encode_workspace_close_dir(req->path);
-    if (unwatched_dir != nullptr)
-        *unwatched_dir = std::move(req->path);
+    if (unwatched_dir != nullptr) {
+        unwatched_dir->assign(*req_path);
+        if (!canonical_u16)
+            encode_workspace_close_dir_into(*unwatched_dir, frame.payload);
+    } else if (!canonical_u16) {
+        std::string dir_copy(*req_path);
+        encode_workspace_close_dir_into(dir_copy, frame.payload);
+    }
 }
 
 // Workspace 模块请求统一分发入口（对应 MethodGroup::workspace 0x0200）。

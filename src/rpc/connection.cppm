@@ -92,7 +92,7 @@ class Connection {
     // output_。 分支逻辑：若在途计数异常为 0，或追加后输出缓冲区超过 max_output (4 MiB)
     // 上限，则返回 false 关闭连接。
     bool enqueue_response(const Frame &response) {
-        const auto frame_size = frame_header_size + response.payload.size();
+        const auto frame_size = frame_header_size + response.payload_size();
         if (pending_ == 0 || output_.readable_bytes() + frame_size > max_output)
             return false;
 
@@ -106,7 +106,7 @@ class Connection {
         if (peer_eof_ || draining_)
             return false;
 
-        const auto frame_size = frame_header_size + event.payload.size();
+        const auto frame_size = frame_header_size + event.payload_size();
         if (output_.readable_bytes() + frame_size > max_output)
             return false;
 

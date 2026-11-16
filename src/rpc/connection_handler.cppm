@@ -205,9 +205,11 @@ void handle_request(Frame request, const std::weak_ptr<Connection> &weak, int co
     try {
         dispatch_request(request, *kv, watched_dir, terminal_mgr.get(), conn_fd);
     } catch (const std::bad_alloc &) {
+        request.clear_external_payload();
         request.status = Status::resource_exhausted;
         request.payload = "out of memory";
     } catch (...) {
+        request.clear_external_payload();
         request.status = Status::internal;
         request.payload = "internal server error";
     }
