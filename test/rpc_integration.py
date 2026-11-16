@@ -265,6 +265,34 @@ def test_workspace_and_inotify(port, projects_root):
         assert req_id == 711 and status == 0 and payload[16:] == b"after-unwatch"
 
 
+def test_directory_broadcast(port, projects_root):
+    directory = os.path.join(projects_root, "broadcast")
+    os.makedirs(directory, exist_ok=True)
+    for index in range(64):
+        with open(os.path.join(directory, f"entry-{index:03d}.txt"), "wb") as file:
+            file.write(b"x")
+
+    request = struct.pack("!H", 9) + b"broadcast"
+    with connect(port) as first, connect(port) as second, connect(port) as third:
+        sockets = (first, second, third)
+        for index, sock in enumerate(sockets):
+            sock.sendall(frame(750 + index, 0x0202, request))
+            request_id, status, _ = recv_response(sock, 0x0202)
+            assert request_id == 750 + index and status == 0
+
+        with open(os.path.join(directory, "new.txt"), "wb") as file:
+            file.write(b"new")
+
+        payloads = []
+        for sock in sockets:
+            length, = struct.unpack("!I", recv_exact(sock, 4))
+            kind, request_id, method, status = struct.unpack("!BQHH", recv_exact(sock, 13))
+            assert (kind, request_id, method, status) == (3, 0, 0x0202, 0)
+            payloads.append(recv_exact(sock, length - 13))
+        assert payloads[0] == payloads[1] == payloads[2]
+        assert struct.pack("!BH", 0, 7) + b"new.txt" in payloads[0]
+
+
 def test_terminal(port):
     with connect(port) as sock:
         # 1. terminal_state (0x0303) 启动 Shell：payload = [u32 len=0][""]
@@ -524,6 +552,7 @@ def main():
                 ("pipelining", test_pipelining),
                 ("KV dispatch", test_kv_dispatch),
                 ("workspace & inotify", lambda p: test_workspace_and_inotify(p, projects_root)),
+                ("directory broadcast", lambda p: test_directory_broadcast(p, projects_root)),
                 ("terminal pty & tab", test_terminal),
                 ("git status, diff & log", lambda p: test_git(p, projects_root)),
                 ("invalid frames", test_invalid_frames),

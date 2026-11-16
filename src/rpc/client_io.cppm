@@ -10,7 +10,7 @@ import net.socket;
 import net.buffer;
 import net.epoll;
 import net.event_loop;
-import ide.protocol;
+import rpc.frame;
 
 namespace rpc {
 
@@ -128,7 +128,8 @@ void RpcClient::State::fail(std::exception_ptr error) noexcept {
 //   5. 立即发送与刷新：若已连接则先调 send_pending() 尝试当场发完，再调 refresh() 按需决定是否监听 EPOLLOUT。
 void RpcClient::State::send(Method method, std::string payload, Clock::time_point deadline,
                             Promise promise) {
-    if (closed || payload.size() > max_frame_length - min_frame_length || pendings.size() >= max_inflight ||
+    if (closed || payload.size() > max_frame_length - min_frame_length ||
+        pendings.size() >= max_inflight ||
         output.readable_bytes() + payload.size() + frame_header_size > max_output) {
         promise->set_exception(std::make_exception_ptr(
             std::runtime_error("RPC client closed or request limit exceeded")));

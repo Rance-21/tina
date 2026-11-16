@@ -266,8 +266,11 @@ int test_handlers_skip_filesystem_on_hit() {
     read_frame1.kind = Kind::response;
     server::handle_workspace_read_file(read_frame1);
     CHECK(read_frame1.status == Status::ok);
-    CHECK(read_frame1.payload.size() == 19);
-    CHECK(read_frame1.payload.substr(16) == "abc");
+    CHECK(read_frame1.payload.size() == 16);
+    CHECK(read_frame1.payload_size() == 19);
+    CHECK(read_frame1.external_payload == "abc");
+    CHECK(read_frame1.payload_owner.get() ==
+          service::global_workspace_cache().get_file("demo/note.txt").get());
 
     // 3. 删除磁盘上的目录和文件（不触发任何缓存失效），验证后续访问完全不走 Linux 文件系统。
     std::filesystem::remove_all(proj_dir, ec);
@@ -296,11 +299,27 @@ int test_handlers_skip_filesystem_on_hit() {
     };
     server::handle_workspace_read_file(read_hit);
     CHECK(read_hit.status == Status::ok);
-    CHECK(read_hit.payload.size() == 19);
-    CHECK(read_hit.payload.substr(16) == "def");
+    CHECK(read_hit.payload.size() == 16);
+    CHECK(read_hit.payload_size() == 19);
+    CHECK(read_hit.external_payload == "def");
+    CHECK(read_hit.external_payload.data() == read_frame1.external_payload.data() + 3);
+
+    Frame read_eof{
+        .kind = Kind::response,
+        .request_id = 7,
+        .method = Method::workspace_read_file,
+        .status = Status::ok,
+        .payload = encode_read_file_req("demo/note.txt", 100, 10),
+    };
+    server::handle_workspace_read_file(read_eof);
+    CHECK(read_eof.status == Status::ok && read_eof.payload_size() == 16);
+    CHECK(!read_eof.payload_owner && read_eof.external_payload.empty());
+    CHECK(read_be<std::uint64_t>(read_eof.payload.data()) == 6);
 
     // 4. 模拟 unwatch 淘汰后，再次访问会回落到 Linux 文件系统并返回 not_found。
     service::global_workspace_cache().invalidate_dir_and_files("demo");
+    CHECK(read_frame1.external_payload == "abc");
+    CHECK(read_hit.external_payload == "def");
 
     Frame list_miss{
         .kind = Kind::request,

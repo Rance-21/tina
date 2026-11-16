@@ -30,9 +30,8 @@ find_package(Threads REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 
 # 自动发现源码和模块。
-file(GLOB_RECURSE APP_SOURCES CONFIGURE_DEPENDS
-    "${PROJECT_SOURCE_DIR}/src/*.cpp"
-)
+set(APP_SOURCES "${PROJECT_SOURCE_DIR}/src/main.cppm")
+set_source_files_properties(${APP_SOURCES} PROPERTIES LANGUAGE CXX)
 file(GLOB_RECURSE APP_MODULE_CANDIDATES CONFIGURE_DEPENDS
     "${PROJECT_SOURCE_DIR}/src/*.cppm"
 )
@@ -50,8 +49,7 @@ foreach(MODULE_FILE IN LISTS APP_MODULE_CANDIDATES)
     endif()
 endforeach()
 
-add_executable(${PROJECT_NAME} ${APP_SOURCES}
-    src/net/event_loop_thread_poll.cppm)
+add_executable(${PROJECT_NAME} ${APP_SOURCES})
 
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(${PROJECT_NAME} PRIVATE
@@ -95,14 +93,33 @@ set_target_properties(test_buffer PROPERTIES
 )
 
 # 编译测试依赖的 net.buffer 模块。
+set(NET_BUFFER_MODULES
+    src/net/buffer.cppm
+    src/net/buffer/storage.cppm
+    src/net/buffer/frame_send_queue.cppm
+    src/rpc/protocol.cppm
+    src/rpc/payload.cppm
+    src/rpc/frame.cppm
+)
+
 target_sources(test_buffer
     PRIVATE
     FILE_SET CXX_MODULES
-    FILES src/net/buffer.cppm
+    FILES ${NET_BUFFER_MODULES}
 )
 
 # 注册测试。
 add_test(NAME buffer COMMAND test_buffer)
+
+add_executable(test_frame_send_queue test/frame_send_queue.cppm)
+set_source_files_properties(test/frame_send_queue.cppm PROPERTIES LANGUAGE CXX)
+set_target_properties(test_frame_send_queue PROPERTIES CXX_MODULE_STD ON)
+target_sources(test_frame_send_queue
+    PRIVATE
+    FILE_SET CXX_MODULES
+    FILES ${NET_BUFFER_MODULES}
+)
+add_test(NAME frame_send_queue COMMAND test_frame_send_queue)
 
 add_executable(test_workspace_cache test/workspace_cache.cpp)
 set_target_properties(test_workspace_cache PROPERTIES
@@ -112,17 +129,20 @@ target_sources(test_workspace_cache
     PRIVATE
     FILE_SET CXX_MODULES
     FILES
-        src/net/buffer.cppm
+        ${NET_BUFFER_MODULES}
         src/net/epoll.cppm
         src/net/event_loop.cppm
         src/runtime/log.cppm
-        src/rpc/protocol.cppm
         src/ide/protocol.cppm
         src/ide/server_protocol.cppm
         src/service/file.cppm
         src/service/workspace_cache.cppm
+        src/service/workspace_cache_lru.cppm
         src/service/file_watcher.cppm
         src/ide/server_file.cppm
+        src/ide/server_directory.cppm
+        src/ide/server_file_read.cppm
+        src/ide/server_file_write.cppm
 )
 target_link_libraries(test_workspace_cache PRIVATE
     Threads::Threads
@@ -165,10 +185,9 @@ target_sources(tina_bench
     PRIVATE
     FILE_SET CXX_MODULES
     FILES
-        src/net/buffer.cppm
+        ${NET_BUFFER_MODULES}
         src/net/socket.cppm
         src/net/epoll.cppm
-        src/rpc/protocol.cppm
         src/ide/protocol.cppm
         src/ide/client_protocol.cppm
         benchmark/stats.cppm

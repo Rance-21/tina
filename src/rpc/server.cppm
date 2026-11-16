@@ -20,6 +20,7 @@ import runtime.log;
 
 import rpc.connection;
 import rpc.handler;
+import service.dir_watcher;
 import ide.server_terminal;
 
 namespace {
@@ -104,7 +105,7 @@ void run_server(std::string_view port) {
         // 仅在对应的 I/O 线程中读写，供退出时枚举活跃连接。
         ConnectionMap connections;
         // 本 I/O 线程专属的 inotify 目录监听管理器（无全局监听表）。
-        std::shared_ptr<detail::DirWatcher> watcher;
+        std::shared_ptr<service::DirWatcher> watcher;
         // 本 I/O 线程专属的 PTY 终端管理器。
         std::shared_ptr<server::TerminalManager> terminal_mgr;
     };
@@ -118,28 +119,29 @@ void run_server(std::string_view port) {
     for (std::size_t i = 0; i < config.io_threads; ++i) {
         slots.push_back({&io_pool.next_loop(), {}, nullptr, nullptr});
         auto &slot = slots.back();
-        slot.watcher = detail::make_dir_watcher(*slot.loop, slot.connections, workers,
-                                                connection_counter);
+        slot.watcher =
+            detail::make_dir_watcher(*slot.loop, slot.connections, workers, connection_counter);
         slot.terminal_mgr =
             detail::make_terminal_manager(*slot.loop, slot.connections, connection_counter);
     }
 
     // 将每个 I/O 线程的 DirWatcher 以及全局 FileWatcher（挂载于 slots[0]）一次性启动并挂入 epoll。
     {
-        auto watchers_started = std::make_shared<std::latch>(static_cast<std::ptrdiff_t>(slots.size()));
+        auto watchers_started =
+            std::make_shared<std::latch>(static_cast<std::ptrdiff_t>(slots.size()));
         for (std::size_t i = 0; i < slots.size(); ++i) {
             auto &slot = slots[i];
-            if (!slot.loop->post_task([i, loop = slot.loop, watcher = slot.watcher,
-                                       watchers_started] {
-                    try {
-                        watcher->start();
-                        if (i == 0)
-                            detail::start_file_watcher(*loop);
-                    } catch (...) {
-                        runtime::log::error("startup: failed to start inotify watchers");
-                    }
-                    watchers_started->count_down();
-                })) {
+            if (!slot.loop->post_task(
+                    [i, loop = slot.loop, watcher = slot.watcher, watchers_started] {
+                        try {
+                            watcher->start();
+                            if (i == 0)
+                                detail::start_file_watcher(*loop);
+                        } catch (...) {
+                            runtime::log::error("startup: failed to start inotify watchers");
+                        }
+                        watchers_started->count_down();
+                    })) {
                 throw std::runtime_error("cannot start inotify watchers");
             }
         }

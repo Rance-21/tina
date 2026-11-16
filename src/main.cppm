@@ -103,8 +103,7 @@ int main(int argc, char *argv[]) {
 
             // 第二轮：同时提交 32 个 GET。
             for (int i = 0; i < count; ++i) {
-                futures.push_back(
-                    client.async_call(Method::kv_get, "async-" + std::to_string(i)));
+                futures.push_back(client.async_call(Method::kv_get, "async-" + std::to_string(i)));
             }
 
             // 每个 Future 必须返回对应 key 的 value。

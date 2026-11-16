@@ -74,14 +74,12 @@ export void refresh_connection(net::EventLoop &loop, ConnectionMap &connections,
     loop.modify_event(conn->fd(), interests(*conn));
 }
 
-export using DirWatcher = service::DirWatcher;
-
 // 创建绑定在本 I/O 线程上的 DirWatcher，并注入 refresh_connection 回调。
-export inline std::shared_ptr<DirWatcher> make_dir_watcher(net::EventLoop &loop,
-                                                           ConnectionMap &connections,
-                                                           runtime::WorkerPool &workers,
-                                                           ConnectionCounter &counter) {
-    return std::make_shared<DirWatcher>(
+export inline std::shared_ptr<service::DirWatcher> make_dir_watcher(net::EventLoop &loop,
+                                                                    ConnectionMap &connections,
+                                                                    runtime::WorkerPool &workers,
+                                                                    ConnectionCounter &counter) {
+    return std::make_shared<service::DirWatcher>(
         loop, connections, workers, counter,
         [&loop, &connections, &counter](const std::shared_ptr<Connection> &conn) {
             refresh_connection(loop, connections, counter, conn);
@@ -115,7 +113,7 @@ namespace {
 //      省去每次响应不必要触发的 epoll_ctl(EPOLL_CTL_MOD) 系统调用。
 void complete_response(const std::weak_ptr<Connection> &weak, net::EventLoop &loop,
                        ConnectionMap &connections, ConnectionCounter &counter,
-                       const std::shared_ptr<DirWatcher> &watcher, Frame &response,
+                       const std::shared_ptr<service::DirWatcher> &watcher, Frame &response,
                        const std::string &watched_dir) {
     auto conn = weak.lock();
     if (!conn)
@@ -198,16 +196,19 @@ void dispatch_request(Frame &request, KvState &kv, std::string &watched_dir,
 //   3. 业务执行完毕后，通过 loop.post_task 将响应帧投递回所属 I/O 线程执行 complete_response()。
 void handle_request(Frame request, const std::weak_ptr<Connection> &weak, int conn_fd,
                     net::EventLoop &loop, ConnectionMap &connections, ConnectionCounter &counter,
-                    const std::shared_ptr<KvState> &kv, const std::shared_ptr<DirWatcher> &watcher,
+                    const std::shared_ptr<KvState> &kv,
+                    const std::shared_ptr<service::DirWatcher> &watcher,
                     const std::shared_ptr<server::TerminalManager> &terminal_mgr) {
     request.kind = Kind::response;
     std::string watched_dir;
     try {
         dispatch_request(request, *kv, watched_dir, terminal_mgr.get(), conn_fd);
     } catch (const std::bad_alloc &) {
+        request.clear_external_payload();
         request.status = Status::resource_exhausted;
         request.payload = "out of memory";
     } catch (...) {
+        request.clear_external_payload();
         request.status = Status::internal;
         request.payload = "internal server error";
     }
@@ -223,7 +224,7 @@ void handle_request(Frame request, const std::weak_ptr<Connection> &weak, int co
 bool submit_request(Frame request, const std::weak_ptr<Connection> &weak, int conn_fd,
                     net::EventLoop &loop, ConnectionMap &connections, runtime::WorkerPool &workers,
                     ConnectionCounter &counter, const std::shared_ptr<KvState> &kv,
-                    const std::shared_ptr<DirWatcher> &watcher,
+                    const std::shared_ptr<service::DirWatcher> &watcher,
                     const std::shared_ptr<server::TerminalManager> &terminal_mgr) {
     return workers.try_submit([request = std::move(request), weak, conn_fd, &loop, &connections,
                                &counter, kv, watcher, terminal_mgr]() mutable {
@@ -245,7 +246,7 @@ void handle_connection_event(const std::shared_ptr<Connection> &conn,
                              const std::weak_ptr<Connection> &weak, net::EventLoop &loop,
                              ConnectionMap &connections, runtime::WorkerPool &workers,
                              ConnectionCounter &counter, const std::shared_ptr<KvState> &kv,
-                             const std::shared_ptr<DirWatcher> &watcher,
+                             const std::shared_ptr<service::DirWatcher> &watcher,
                              const std::shared_ptr<server::TerminalManager> &terminal_mgr,
                              net::EpollEvent event) {
     const int conn_fd = conn->fd();
@@ -288,7 +289,7 @@ void handle_connection_event(const std::shared_ptr<Connection> &conn,
 void register_connection(net::Socket socket, net::EventLoop &loop, ConnectionMap &connections,
                          runtime::WorkerPool &workers, ConnectionCounter &counter,
                          const std::shared_ptr<KvState> &kv,
-                         const std::shared_ptr<DirWatcher> &watcher,
+                         const std::shared_ptr<service::DirWatcher> &watcher,
                          const std::shared_ptr<server::TerminalManager> &terminal_mgr) {
     auto conn = std::make_shared<Connection>(std::move(socket));
     int fd = conn->fd();
@@ -316,7 +317,7 @@ export std::shared_ptr<server::TerminalManager> make_terminal_manager(net::Event
                                                                       ConnectionMap &connections,
                                                                       ConnectionCounter &counter) {
     return std::make_shared<server::TerminalManager>(
-        loop, [&loop, &connections, &counter](int conn_fd, const Frame &event) {
+        loop, [&loop, &connections, &counter](int conn_fd, Frame &&event) {
             auto it = connections.find(conn_fd);
             if (it == connections.end())
                 return;
@@ -326,7 +327,7 @@ export std::shared_ptr<server::TerminalManager> make_terminal_manager(net::Event
                 return;
 
             try {
-                if (!conn->enqueue_event(event)) {
+                if (!conn->enqueue_event(std::move(event))) {
                     close_connection(loop, connections, counter, conn->fd());
                     return;
                 }
@@ -343,7 +344,7 @@ export std::shared_ptr<server::TerminalManager> make_terminal_manager(net::Event
 export bool post_connection(net::Socket socket, net::EventLoop &loop, ConnectionMap &connections,
                             runtime::WorkerPool &workers, ConnectionCounter &counter,
                             std::shared_ptr<KvState> kv,
-                            std::shared_ptr<DirWatcher> watcher = nullptr,
+                            std::shared_ptr<service::DirWatcher> watcher = nullptr,
                             std::shared_ptr<server::TerminalManager> terminal_mgr = nullptr) {
     return loop.post_task([socket = std::move(socket), &loop, &connections, &workers, &counter,
                            kv = std::move(kv), watcher = std::move(watcher),

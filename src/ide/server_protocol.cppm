@@ -29,7 +29,8 @@ struct ReadFileRequestView {
 
 // 零拷贝解码 0x0202 (workspace_list_dir) 请求负载：
 // 格式：[u16 pathLength][path bytes]
-std::optional<ListDirRequestView> decode_workspace_list_dir_view(std::string_view payload) noexcept {
+std::optional<ListDirRequestView>
+decode_workspace_list_dir_view(std::string_view payload) noexcept {
     PayloadReader reader(payload);
     auto path_len = reader.read_int<std::uint16_t>();
     if (!path_len || *path_len == 0)
@@ -94,7 +95,8 @@ std::optional<WriteFileRequest> decode_workspace_write_file(std::string_view pay
 // 格式：[u16 pathLength][path bytes]（即 len + data，同时兼容 4 字节大端 len 编码）。
 // is_canonical_u16 非空时返回是否已满足标准 2 字节长度头，便于服务端原样零拷贝回传响应。
 std::optional<std::string_view>
-decode_workspace_close_dir_view(std::string_view payload, bool *is_canonical_u16 = nullptr) noexcept {
+decode_workspace_close_dir_view(std::string_view payload,
+                                bool *is_canonical_u16 = nullptr) noexcept {
     PayloadReader reader(payload);
     auto path_len = reader.read_int<std::uint16_t>();
     if (!path_len)
@@ -125,7 +127,8 @@ decode_workspace_close_dir_view(std::string_view payload, bool *is_canonical_u16
 
 // 原地编码 0x0201 (workspace_list_projects) 响应负载进 out（复用已有缓冲区，避免临时字符串）。
 // 每个项目编码为 [u16 nameLen][name bytes]，多个项目直接顺序流式拼接，不设数量头。
-void encode_workspace_list_projects_into(const std::vector<std::string> &projects, std::string &out) {
+void encode_workspace_list_projects_into(const std::vector<std::string> &projects,
+                                         std::string &out) {
     std::size_t total_size = 0;
     for (const auto &name : projects) {
         if (name.empty() || name.size() > std::numeric_limits<std::uint16_t>::max())
@@ -179,6 +182,20 @@ void encode_workspace_read_file_into(std::uint64_t file_size, std::uint64_t revi
     out.append(content);
 }
 
+// 只编码 16 字节文件头；复用缓存已有的控制块保活内容切片，直到 I/O 线程发送完毕。
+void encode_workspace_read_file(Frame &frame, std::shared_ptr<const ReadFileResponse> cached,
+                                std::string_view content) {
+    frame.payload.resize(16);
+    write_be(frame.payload.data(), cached->file_size);
+    write_be(frame.payload.data() + 8, cached->revision);
+    if (content.empty()) {
+        frame.clear_external_payload();
+    } else {
+        frame.payload_owner = std::move(cached);
+        frame.external_payload = content;
+    }
+}
+
 // 原地编码 0x0204 (workspace_write_file) 响应负载进 out：
 // 格式：[u64 revision]（写入成功时为 newRevision；版本冲突时为当前实际的 currentRevision）。
 void encode_workspace_write_file_into(std::uint64_t revision, std::string &out) {
@@ -198,21 +215,6 @@ void encode_workspace_close_dir_into(std::string_view dir_path, std::string &out
     append_be(out, static_cast<std::uint16_t>(dir_path.size()));
     out.append(dir_path);
 }
-
-using ::decode_terminal_input;
-using ::decode_terminal_on_tab;
-using ::decode_terminal_output;
-using ::decode_terminal_payload;
-using ::decode_terminal_payload_view;
-using ::decode_terminal_state;
-using ::decode_terminal_state_id;
-using ::decode_terminal_state_view;
-using ::encode_terminal_input;
-using ::encode_terminal_on_tab;
-using ::encode_terminal_output;
-using ::encode_terminal_payload;
-using ::encode_terminal_state;
-using ::encode_terminal_state_id;
 
 // 构造 0x0381 (terminal_output) 服务端推送 Event 帧。
 inline Frame make_terminal_output_event(std::uint32_t terminal_id, std::string_view text) {
@@ -237,14 +239,5 @@ inline Frame make_terminal_state_event(std::uint32_t terminal_id) {
         .payload = encode_terminal_state_id(terminal_id),
     };
 }
-
-using ::decode_git_diff_request;
-using ::decode_git_diff_request_view;
-using ::decode_git_log_request;
-using ::decode_git_path_request_view;
-using ::decode_git_status_request;
-using ::encode_git_diff_response;
-using ::encode_git_log_response;
-using ::encode_git_status_response;
 
 } // namespace server

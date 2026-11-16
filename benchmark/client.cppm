@@ -238,7 +238,7 @@ class BenchConnection {
 
     net::Socket socket_;
     net::Buffer input_{16384};
-    FrameSendQueue output_;
+    net::FrameSendQueue output_;
 
     std::size_t max_inflight_{64};
     std::size_t inflight_{0};

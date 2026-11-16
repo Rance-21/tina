@@ -41,3 +41,5 @@ build-release/
 ddns
 knowledge.md
 io_architecture_and_zerocopy.md
+docs/writev-performance.md
+tina_bench

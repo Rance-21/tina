@@ -52,8 +52,8 @@ export enum class Method : std::uint16_t {
                                            3), // 0x0203 请求：读取 UTF-8 文本，可按字节范围分段。
     workspace_write_file =
         make_method_code(MethodGroup::workspace, 4), // 0x0204 请求：保存完整的 UTF-8 文本文件。
-    workspace_close_dir = make_method_code(
-        MethodGroup::workspace, 5), // 0x0205 请求：关闭目录并取消服务端 inotify 监听。
+    workspace_close_dir = make_method_code(MethodGroup::workspace,
+                                           5), // 0x0205 请求：关闭目录并取消服务端 inotify 监听。
 
     // 0x03xx: Terminal 模块
     terminal_input =
@@ -136,4 +136,27 @@ export struct Frame {
     Method method;
     Status status;       // 仅响应携带结果；请求与事件必须为零。
     std::string payload; // 原样传输的负载字节流。
+    // 外置切片紧随 payload 发送，只引用不可变对象；复用其已有控制块保活。
+    std::shared_ptr<const void> payload_owner{};
+    std::string_view external_payload{};
+
+    [[nodiscard]] std::size_t payload_size() const noexcept {
+        return payload.size() + external_payload.size();
+    }
+
+    void clear_external_payload() noexcept {
+        external_payload = {};
+        payload_owner.reset();
+    }
+
+    // 仅在多连接广播时调用；负载只移动一次，各发送队列独立保活到发送完毕。
+    void share_payload() {
+        if (payload_owner || payload.empty())
+            return;
+
+        auto owner = std::make_shared<const std::string>(std::move(payload));
+        payload.clear();
+        external_payload = *owner;
+        payload_owner = std::move(owner);
+    }
 };

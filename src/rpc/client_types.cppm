@@ -6,7 +6,7 @@ import net.buffer;
 import net.epoll;
 import net.event_loop;
 import net.event_loop_thread_pool;
-import ide.protocol;
+import rpc.frame;
 
 export namespace rpc {
 
@@ -75,7 +75,7 @@ class RpcClient {
         int timer_fd{-1};
 
         net::Buffer input;
-        FrameSendQueue output;
+        net::FrameSendQueue output;
 
         // request_id -> Pending，目前单线程执行，没必要加锁
         std::unordered_map<std::uint64_t, Pending> pendings;

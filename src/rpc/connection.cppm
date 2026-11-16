@@ -4,7 +4,7 @@ import std;
 import net.buffer;
 import net.socket;
 import net.event_loop;
-import ide.protocol;
+import rpc.frame;
 
 export namespace rpc {
 
@@ -106,6 +106,13 @@ class Connection {
         return output_.enqueue(event, max_output);
     }
 
+    bool enqueue_event(Frame &&event) {
+        if (peer_eof_ || draining_)
+            return false;
+
+        return output_.enqueue(event, max_output);
+    }
+
     // 使用 ::writev() 将 output_ 队列中的“17B 帧头 + Payload”聚集写入内核 Socket 发送缓冲区。
     void write() {
         output_.write(socket_);
@@ -117,7 +124,7 @@ class Connection {
 
     net::Socket socket_;
     net::Buffer input_;
-    FrameSendQueue output_;
+    net::FrameSendQueue output_;
 
     // 已提交、但尚未收到业务执行结果的 RPC 数量。
     std::size_t pending_{0};

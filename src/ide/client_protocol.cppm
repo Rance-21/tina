@@ -210,27 +210,4 @@ std::optional<std::string> decode_workspace_close_dir(std::string_view payload) 
     return std::string(*path);
 }
 
-using ::decode_terminal_input;
-using ::decode_terminal_on_tab;
-using ::decode_terminal_output;
-using ::decode_terminal_payload;
-using ::decode_terminal_payload_view;
-using ::decode_terminal_state;
-using ::decode_terminal_state_id;
-using ::decode_terminal_state_view;
-using ::encode_terminal_input;
-using ::encode_terminal_on_tab;
-using ::encode_terminal_output;
-using ::encode_terminal_payload;
-using ::encode_terminal_state;
-using ::encode_terminal_state_id;
-
-using ::decode_git_diff_response;
-using ::decode_git_diff_response_view;
-using ::decode_git_log_response;
-using ::decode_git_status_response;
-using ::encode_git_diff_request;
-using ::encode_git_log_request;
-using ::encode_git_status_request;
-
 } // namespace client
