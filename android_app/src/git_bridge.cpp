@@ -294,10 +294,12 @@ void FfiClientBridge::fetchGitStatus() {
 void FfiClientBridge::openGitFileDiff(int index) {
     if (index < 0 || index >= gitStatus_.size()) return;
     // 同名引用按当前服务端协议代表 worktree 对 HEAD；文件范围在客户端提取。
-    openGitDiff(QStringLiteral("HEAD"), QStringLiteral("HEAD"), gitStatus_[index].toMap().value("path").toString());
+    const auto entry = gitStatus_[index].toMap();
+    openGitDiff(QStringLiteral("HEAD"), QStringLiteral("HEAD"), entry.value("path").toString(),
+                entry.value("status").toString());
 }
 
-void FfiClientBridge::openGitDiff(const QString &base, const QString &target, const QString &file) {
+void FfiClientBridge::openGitDiff(const QString &base, const QString &target, const QString &file, const QString &status) {
     WorkspaceDocument *document = nullptr;
     for (auto *candidate : documents_) {
         if (candidate->preview_ && candidate->gitRepository_ == gitRepository_
@@ -316,6 +318,7 @@ void FfiClientBridge::openGitDiff(const QString &base, const QString &target, co
         documents_.append(document); tabs_.append(document);
         emit documentsChanged(); emit tabsChanged();
     }
+    document->gitStatus_ = status;
     selectDocument(documents_.indexOf(document));
     fetchGitDiff(document);
     emit fileOpened();
@@ -329,7 +332,6 @@ void FfiClientBridge::fetchGitDiff(WorkspaceDocument *document) {
                          + document->gitTarget_.toUtf8();
     request(GitDiff, payload, [this, document, generation](quint16 status, const QByteArray &payload) {
         if (generation != document->loadGeneration_) return;
-        document->refreshing_ = false;
         QStringDecoder decoder(QStringDecoder::Utf8, QStringConverter::Flag::Stateless);
         QString text = decoder(payload);
         const bool failed = status || decoder.hasError() || text.contains(QChar::Null);
@@ -339,16 +341,95 @@ void FfiClientBridge::fetchGitDiff(WorkspaceDocument *document) {
             document->stale_ = true;
             setMessage(text);
         } else {
-            if (!document->gitFile_.isEmpty()) text = filePatch(text, document->gitFile_);
+            text.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+            if (!document->gitFile_.isEmpty()) {
+                text = filePatch(text, document->gitFile_);
+                const auto metadata = text.section(QStringLiteral("\n@@ "), 0, 0);
+                if (!metadata.contains(QStringLiteral("Binary files ")) && !metadata.contains(QStringLiteral("GIT binary patch"))) {
+                    if (metadata.contains(QStringLiteral("\n+++ /dev/null"))
+                        || metadata.contains(QStringLiteral("\ndeleted file mode "))) {
+                        const auto diff = buildInlineDiff(text, {});
+                        if (diff.valid) {
+                            document->stale_ = false;
+                            document->setPreviewText(diff.text, diff.lines, true);
+                            return;
+                        }
+                    } else {
+                        auto transfer = std::make_shared<ReadTransfer>();
+                        transfer->generation = generation;
+                        readGitWorktree(document, text, transfer);
+                        return;
+                    }
+                }
+            }
             if (text.isEmpty()) text = document->gitFile_.isEmpty() ? QStringLiteral("没有差异。")
                 : QStringLiteral("%1\n没有可显示的文本差异（未跟踪文件不会出现在 git diff HEAD 中）。")
                       .arg(document->gitFile_);
             document->stale_ = false;
         }
-        document->loaded_ = true;
-        document->savedText_ = text;
-        document->setText(text);
-        emit document->stateChanged();
+        document->setPreviewText(text);
+    });
+}
+
+void FfiClientBridge::readGitWorktree(WorkspaceDocument *document, const QString &patch,
+                                     std::shared_ptr<ReadTransfer> transfer) {
+    // 复用现有文件 RPC；不打开可编辑标签，也不使用本地未保存的编辑缓冲区。
+    const auto path = document->gitRepository_ + '/' + document->gitFile_;
+    if (document->gitRepository_.isEmpty() || path.toUtf8().size() > 65535) {
+        document->stale_ = true;
+        document->setPreviewText(QStringLiteral("请先在文件浏览器中选择项目，再打开完整文件差异。\n\n") + patch);
+        return;
+    }
+    auto payload = lengthString(path) + QByteArray(12, '\0');
+    qToBigEndian(quint64(transfer->bytes.size()), reinterpret_cast<uchar *>(payload.data() + payload.size() - 12));
+    qToBigEndian(quint32(256 * 1024), reinterpret_cast<uchar *>(payload.data() + payload.size() - 4));
+    request(0x0203, payload, [this, document, patch, transfer](quint16 status, const QByteArray &payload) {
+        if (transfer->generation != document->loadGeneration_) return;
+        const auto fail = [&](const QString &reason) {
+            document->stale_ = true;
+            document->setPreviewText(reason + QStringLiteral("\n请刷新 @GIT worktree 后重新打开。\n\n") + patch);
+            setMessage(reason);
+        };
+        if (status || payload.size() < 16) {
+            fail(QStringLiteral("无法读取完整工作区文件：") + QString::fromUtf8(payload));
+            return;
+        }
+        const auto *data = reinterpret_cast<const uchar *>(payload.constData());
+        const auto size = qFromBigEndian<quint64>(data);
+        const auto revision = qFromBigEndian<quint64>(data + 8);
+        const auto chunk = payload.mid(16);
+        if (!transfer->bytes.isEmpty() && (size != transfer->size || revision != transfer->revision)) {
+            if (++transfer->restarts > 2) { fail(QStringLiteral("文件持续变化，无法获取一致的完整差异")); return; }
+            transfer->bytes.clear();
+            readGitWorktree(document, patch, transfer);
+            return;
+        }
+        if (size > 8 * 1024 * 1024 || chunk.size() > 256 * 1024
+            || quint64(transfer->bytes.size() + chunk.size()) > size
+            || (chunk.isEmpty() && quint64(transfer->bytes.size()) < size)) {
+            fail(QStringLiteral("完整文件超过 8 MiB 上限或分段格式无效"));
+            return;
+        }
+        transfer->size = size;
+        transfer->revision = revision;
+        transfer->bytes += chunk;
+        if (quint64(transfer->bytes.size()) < size) {
+            readGitWorktree(document, patch, transfer);
+            return;
+        }
+        QStringDecoder decoder(QStringDecoder::Utf8, QStringConverter::Flag::Stateless);
+        QString text = decoder(transfer->bytes);
+        if (decoder.hasError() || text.contains(QChar::Null)) {
+            fail(QStringLiteral("二进制或无效 UTF-8 文件，无法展示文本差异"));
+            return;
+        }
+        text.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+        auto normalizedPatch = patch;
+        normalizedPatch.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+        const auto diff = buildInlineDiff(normalizedPatch, text, document->gitStatus_ == QStringLiteral("??"));
+        if (!diff.valid) { fail(QStringLiteral("文件内容已变化，与 Git 差异不一致")); return; }
+        document->stale_ = false;
+        document->setPreviewText(diff.text, diff.lines, true);
     });
 }
 } // namespace tina::ui

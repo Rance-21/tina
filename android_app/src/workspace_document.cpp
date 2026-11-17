@@ -13,11 +13,40 @@ namespace tina::ui {
 WorkspaceDocument::WorkspaceDocument(QString path, QObject *parent)
     : QObject(parent), path_(std::move(path)) {}
 
+bool WorkspaceDocument::markdown() const {
+    return !preview_ && (path_.endsWith(QStringLiteral(".md"), Qt::CaseInsensitive)
+                        || path_.endsWith(QStringLiteral(".markdown"), Qt::CaseInsensitive));
+}
+
+void WorkspaceDocument::setMarkdownPreview(bool preview) {
+    if (markdownPreview_ == preview) return;
+    markdownPreview_ = preview;
+    emit stateChanged();
+}
+
 void WorkspaceDocument::setText(const QString &text) {
     if (text_ == text)
         return;
     text_ = text;
     emit textChanged();
+    emit stateChanged();
+}
+
+void WorkspaceDocument::setPreviewText(const QString &text, QVector<DiffLine> lines, bool fullDiff) {
+    preview_ = readOnly_ = true;
+    fullDiff_ = fullDiff;
+    diffLines_ = std::move(lines);
+    savedText_ = text;
+    loaded_ = true;
+    refreshing_ = false;
+    if (quickDocument_) {
+        delete highlighter_;
+        highlighter_ = new CodeHighlighter(quickDocument_->textDocument(), fullDiff ? gitFile_ : path_);
+        highlighter_->setParent(this);
+    }
+    setText(text);
+    ++layoutRevision_;
+    emit layoutChanged();
     emit stateChanged();
 }
 
@@ -30,7 +59,7 @@ void WorkspaceDocument::attach(QQuickTextDocument *document) {
     }
     delete highlighter_;
     quickDocument_ = document;
-    highlighter_ = new CodeHighlighter(document->textDocument(), path_);
+    highlighter_ = new CodeHighlighter(document->textDocument(), fullDiff_ ? gitFile_ : path_);
     // 由本文档管理生命周期，编辑器提前销毁时高亮器会自动解除文档关联。
     highlighter_->setParent(this);
     const auto changed = [this] { ++layoutRevision_; emit layoutChanged(); };
@@ -57,8 +86,18 @@ QVariantList WorkspaceDocument::visibleLines(qreal top, qreal height) const {
         if (rect.bottom() < top || !block.layout()->lineCount())
             continue;
         const auto line = block.layout()->lineAt(0);
-        lines.append(QVariantMap{{"number", block.blockNumber() + 1},
-                                 {"baseline", rect.y() + line.y() + line.ascent()}});
+        const auto index = block.blockNumber();
+        const auto diff = diffLines_.value(index);
+        const auto text = block.text();
+        const int patchChange = preview_ && !fullDiff_
+            ? (text.startsWith('+') && !text.startsWith("+++") ? 1
+               : text.startsWith('-') && !text.startsWith("---") ? -1 : 0) : 0;
+        lines.append(QVariantMap{{"number", index + 1},
+                                 {"baseline", rect.y() + line.y() + line.ascent()},
+                                 {"top", rect.top()}, {"height", rect.height()},
+                                 {"oldNumber", fullDiff_ ? diff.oldNumber : index + 1},
+                                 {"newNumber", fullDiff_ ? diff.newNumber : index + 1},
+                                 {"change", fullDiff_ ? diff.change : patchChange}});
     }
     return lines;
 }

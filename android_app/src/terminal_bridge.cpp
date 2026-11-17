@@ -168,6 +168,8 @@ void FfiClientBridge::terminalError(TerminalSession *terminal, const QString &me
 
 void FfiClientBridge::startTerminal(TerminalSession *terminal) {
     terminal->starting_ = true;
+    terminal->available_ = false;
+    terminal->initializing_ = true;
     terminal->terminalId_ = 0;
     terminal->decoder_.resetState();
     terminal->escape_ = TerminalSession::Escape::None;
@@ -176,9 +178,10 @@ void FfiClientBridge::startTerminal(TerminalSession *terminal) {
             [this, terminal = QPointer(terminal)](quint16 status, const QByteArray &payload) {
         if (!terminal)
             return;
-        terminal->starting_ = false;
         quint32 id{};
         if (status || !decodeTerminalState(payload, id) || findTerminal(id)) {
+            terminal->starting_ = false;
+            terminal->initializing_ = false;
             terminalError(terminal, QStringLiteral("启动终端失败：") + terminalErrorText(payload));
             // 超时后服务端是否已创建 Shell 无法确定，断开以回收该连接下的会话。
             if (status == 12)
@@ -186,7 +189,23 @@ void FfiClientBridge::startTerminal(TerminalSession *terminal) {
         } else {
             terminal->terminalId_ = id;
             terminal->available_ = true;
+            terminal->initializing_ = false;
             terminal->appendOutput(earlyTerminalOutput_.take(id));
+            terminal->initializing_ = true;
+            // 保留服务端的命令完成标记；只额外发送用户名、主机与真实 PWD。
+            // PS1 仍为空，避免 Readline 补全把提示符混进输入。
+            request(TerminalInput, terminalPayload(id, TerminalSession::promptSetupCommand()),
+                    [this, terminal](quint16 setupStatus, const QByteArray &reply) {
+                if (!terminal) return;
+                terminal->starting_ = !setupStatus && terminal->initializing_;
+                if (setupStatus) {
+                    terminal->initializing_ = false;
+                    terminalError(terminal, QStringLiteral("终端提示符初始化失败：") + terminalErrorText(reply));
+                }
+                emit terminal->stateChanged();
+                if (std::none_of(terminals_.cbegin(), terminals_.cend(), [](auto *t) { return t->starting_; }))
+                    earlyTerminalOutput_.clear();
+            });
         }
         if (std::none_of(terminals_.cbegin(), terminals_.cend(), [](auto *t) { return t->starting_; })) {
             earlyTerminalOutput_.clear();
@@ -240,6 +259,7 @@ void FfiClientBridge::invalidateTerminals() {
     earlyTerminalOutput_.clear();
     for (auto *terminal : std::as_const(terminals_)) {
         terminal->available_ = terminal->starting_ = terminal->busy_ = false;
+        terminal->initializing_ = false;
         terminal->completing_ = terminal->submitting_ = false;
         terminalError(terminal, QStringLiteral("连接断开；恢复后将启动新 Shell，历史输出保留"));
         emit terminal->stateChanged();
@@ -256,6 +276,8 @@ void FfiClientBridge::handleTerminalEvent(quint16 method, const QByteArray &payl
         if (method == TerminalOutput)
             terminal->appendOutput(QByteArrayView(payload).sliced(8));
         else {
+            terminal->initializing_ = false;
+            terminal->starting_ = false;
             terminal->busy_ = false;
             emit terminal->stateChanged();
         }
@@ -282,6 +304,7 @@ bool FfiClientBridge::submitCommand(const QString &command) {
         terminalError(terminal, QStringLiteral("命令超过终端请求上限"));
         return false;
     }
+    if (!command.contains(QChar(3))) terminal->beginInput();
     terminal->busy_ = terminal->submitting_ = true;
     emit terminal->stateChanged();
     request(TerminalInput, terminalPayload(terminal->terminalId_, bytes),
@@ -301,7 +324,7 @@ bool FfiClientBridge::submitCommand(const QString &command) {
 
 void FfiClientBridge::completeTerminalInput() {
     auto *terminal = activeTerminal();
-    if (!terminal || !terminal->available_ || terminal->busy_ || terminal->completing_)
+    if (!terminal || !terminal->available() || terminal->busy_ || terminal->completing_)
         return;
     const auto revision = terminal->draftRevision_;
     terminal->completing_ = true;

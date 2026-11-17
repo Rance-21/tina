@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QObject>
+#include <QByteArray>
 #include <QStringConverter>
 #include <QTimer>
 #include <array>
@@ -19,6 +20,8 @@ class TerminalSession : public QObject {
     Q_PROPERTY(QString title READ title CONSTANT)
     Q_PROPERTY(quint32 terminalId READ terminalId NOTIFY stateChanged)
     Q_PROPERTY(QString output READ output NOTIFY outputChanged)
+    Q_PROPERTY(QString richOutput READ richOutput NOTIFY outputChanged)
+    Q_PROPERTY(QString prompt READ prompt NOTIFY promptChanged)
     Q_PROPERTY(QString draft READ draft WRITE setDraft NOTIFY draftChanged)
     Q_PROPERTY(bool available READ available NOTIFY stateChanged)
     Q_PROPERTY(bool starting READ starting NOTIFY stateChanged)
@@ -34,29 +37,36 @@ class TerminalSession : public QObject {
     QString title() const { return QStringLiteral("Terminal %1").arg(sessionId_); }
     quint32 terminalId() const { return terminalId_; }
     QString output() const;
+    QString richOutput() const;
+    QString prompt() const { return identity_ + directory_ + QStringLiteral(" $ "); }
     QString draft() const { return draft_; }
     void setDraft(const QString &draft);
-    bool available() const { return available_; }
+    bool available() const { return available_ && !starting_; }
     bool starting() const { return starting_; }
     bool busy() const { return busy_; }
     bool completing() const { return completing_; }
     bool submitting() const { return submitting_; }
     void appendOutput(QByteArrayView bytes);
+    void beginInput();
+    static QByteArray promptSetupCommand();
     Q_INVOKABLE void clear();
 
   signals:
     void stateChanged();
     void outputChanged();
     void draftChanged();
+    void promptChanged();
 
   private:
     friend class FfiClientBridge;
     enum class Escape { None, Start, Csi, Osc, OscEnd, Charset };
-    void put(QChar ch);
+    void put(QChar ch, bool prompt = false);
     void dropFirst();
     void finishCsi(QChar final);
     void scheduleOutput();
+    void finishOsc();
     std::array<QChar, BufferCapacity> buffer_{};
+    std::array<bool, BufferCapacity> promptStyle_{};
     quint64 first_{};
     quint64 end_{};
     quint64 lineStart_{};
@@ -65,6 +75,10 @@ class TerminalSession : public QObject {
     QStringDecoder decoder_{QStringDecoder::Utf8};
     Escape escape_{Escape::None};
     QString parameters_;
+    QString osc_;
+    QString identity_{QStringLiteral("rance@fedora")};
+    QString directory_{QStringLiteral("~")};
+    bool initializing_{};
     QTimer outputTimer_;
     const int sessionId_;
     QString draft_;

@@ -163,8 +163,10 @@ class FfiClientBridge : public QObject {
     void updateGitRepository();
     void fetchGitLog();
     void fetchGitStatus();
-    void openGitDiff(const QString &base, const QString &target, const QString &file = {});
+    void openGitDiff(const QString &base, const QString &target, const QString &file = {}, const QString &status = {});
     void fetchGitDiff(WorkspaceDocument *document);
+    void readGitWorktree(WorkspaceDocument *document, const QString &patch,
+                         std::shared_ptr<ReadTransfer> transfer);
 
     QTcpSocket socket_;
     QTimer pollTimer_;

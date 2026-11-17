@@ -77,7 +77,15 @@ Window {
         readonly property real leftColumnWidth: 108
         readonly property real codeLeftMargin: leftColumnWidth + 10
         readonly property real codeRightMargin: 20
-        readonly property real bottomMargin: 18
+        // Android 输入法出现时会呼出导航栏，额外留出触控间距。
+        readonly property real bottomMargin: Qt.platform.os === "android" ? 52 : 28
+        readonly property var inputMethod: Qt.inputMethod
+        readonly property real keyboardOverlap: {
+            const rect = inputMethod.keyboardRectangle
+            return inputMethod.visible && rect.height > 0
+                    ? Math.max(0, mainWindow.height - rect.y) : 0
+        }
+        readonly property real bottomInset: bottomMargin + keyboardOverlap
 
         ListModel { id: editorDocuments }
 
@@ -157,8 +165,18 @@ Window {
                         required property int index
                         anchors.fill: parent
                         bridge: ffiBridge
-                        active: index === ffiBridge.activeIndex
-                        bottomOverlayHeight: rootCanvas.bottomMargin + bottomDialogBar.height
+                        active: !ffiBridge.terminalActive && index === ffiBridge.activeIndex
+                        bottomOverlayHeight: rootCanvas.bottomInset + bottomDialogBar.height
+                    }
+                }
+                Repeater {
+                    model: ffiBridge.terminals
+                    delegate: TerminalView {
+                        required property var modelData
+                        anchors.fill: parent
+                        terminal: modelData
+                        active: ffiBridge.terminalActive && terminal === ffiBridge.activeTerminal
+                        bottomOverlayHeight: rootCanvas.bottomInset + bottomDialogBar.height
                     }
                 }
             }
@@ -546,7 +564,7 @@ Window {
             }
         }
 
-        // 底部对话框直接作为终端；顶部手柄可向上拖高。
+        // 固定单行输入，输出在中央终端标签中查看。
         TerminalPanel {
             id: bottomDialogBar
             objectName: "bottomDialogBar"
@@ -555,7 +573,7 @@ Window {
             anchors.bottom: parent.bottom
             anchors.leftMargin: rootCanvas.codeLeftMargin
             anchors.rightMargin: rootCanvas.codeRightMargin
-            anchors.bottomMargin: rootCanvas.bottomMargin
+            anchors.bottomMargin: rootCanvas.bottomInset
             bridge: ffiBridge
             blurSource: backgroundAndCodeScene
             folderOpen: rootCanvas.popupMode === "folder"

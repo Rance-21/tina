@@ -5,6 +5,7 @@
 #include <QQuickTextDocument>
 #include <QVariantList>
 #include <QtQmlIntegration/qqmlintegration.h>
+#include "git_diff.hpp"
 
 namespace tina::ui {
 
@@ -28,6 +29,9 @@ class WorkspaceDocument : public QObject {
     Q_PROPERTY(bool readOnly READ readOnly NOTIFY stateChanged)
     Q_PROPERTY(QString remoteText READ remoteText NOTIFY stateChanged)
     Q_PROPERTY(bool preview READ preview CONSTANT)
+    Q_PROPERTY(bool fullDiff READ fullDiff NOTIFY stateChanged)
+    Q_PROPERTY(bool markdown READ markdown CONSTANT)
+    Q_PROPERTY(bool markdownPreview READ markdownPreview WRITE setMarkdownPreview NOTIFY stateChanged)
     Q_PROPERTY(int layoutRevision READ layoutRevision NOTIFY layoutChanged)
 
   public:
@@ -44,10 +48,15 @@ class WorkspaceDocument : public QObject {
     bool loaded() const { return loaded_; }
     bool readOnly() const { return readOnly_ || !loaded_; }
     bool preview() const { return preview_; }
+    bool fullDiff() const { return fullDiff_; }
+    bool markdown() const;
+    bool markdownPreview() const { return markdownPreview_; }
+    void setMarkdownPreview(bool preview);
     int layoutRevision() const { return layoutRevision_; }
     void setText(const QString &text);
     Q_INVOKABLE void attach(QQuickTextDocument *document);
     Q_INVOKABLE QVariantList visibleLines(qreal top, qreal height) const;
+    void setPreviewText(const QString &text, QVector<DiffLine> lines = {}, bool fullDiff = false);
 
   signals:
     void textChanged();
@@ -62,8 +71,11 @@ class WorkspaceDocument : public QObject {
     QString text_;
     QString savedText_;
     // Diff 复用只读代码标签，但不参与远程文件读写及断线重读。
-    QString displayName_, gitRepository_, gitBase_, gitTarget_, gitFile_;
+    QString displayName_, gitRepository_, gitBase_, gitTarget_, gitFile_, gitStatus_;
     bool preview_{};
+    bool fullDiff_{};
+    bool markdownPreview_{true};
+    QVector<DiffLine> diffLines_;
     int layoutRevision_{};
     quint64 revision_{}; // 留在 C++，避免 QML double 丢失 64 位 revision 精度。
     quint64 loadGeneration_{};

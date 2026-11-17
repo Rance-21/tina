@@ -2,6 +2,8 @@
 #include "code_highlighter.hpp"
 
 #include <QGuiApplication>
+#include <QProcess>
+#include <QProcessEnvironment>
 #include <QQmlApplicationEngine>
 #include <QQmlComponent>
 #include <QQuickItem>
@@ -171,6 +173,11 @@ class FakeServer : public QObject {
         case 0x0301: {
             const auto id = qFromBigEndian<quint32>(reinterpret_cast<const uchar *>(call.payload.constData() + 4));
             respond(call, 0, terminalPayload(id, "OK"));
+            if (call.payload.mid(8).startsWith("PROMPT_COMMAND=")) {
+                terminalEvent(0x0381, terminalPayload(id, "setup echo hidden\r\n\x1b]778;rance@fedora;/home/rance\a"));
+                terminalEvent(0x0303, terminalState(id));
+                break;
+            }
             terminalEvent(0x0381, terminalPayload(id, call.payload.mid(8) + "\r\n"));
             terminalEvent(0x0303, terminalState(id));
             break;
@@ -244,8 +251,133 @@ QQuickItem *findVisualItem(QQuickItem *root, const QString &name) {
 class WorkspaceTest : public QObject {
     Q_OBJECT
   private slots:
+    void promptSetupUsesShellWorkingDirectory() {
+        QProcess shell;
+        auto environment = QProcessEnvironment::systemEnvironment();
+        environment.insert("USER", "rance");
+        environment.insert("HOSTNAME", "fedora.example");
+        environment.insert("PROMPT_COMMAND", "printf '\\033]777;__TINA_DONE__\\007'");
+        shell.setProcessEnvironment(environment);
+        const auto script = QString::fromUtf8(TerminalSession::promptSetupCommand())
+                            + QStringLiteral("; cd /tmp; eval \"$PROMPT_COMMAND\"");
+        shell.start("/bin/bash", {"--norc", "--noprofile", "-c", script});
+        QVERIFY(shell.waitForFinished(3000));
+        QCOMPARE(shell.exitCode(), 0);
+        const auto output = shell.readAllStandardOutput();
+        QVERIFY(output.startsWith("\x1b]778;rance@fedora;/tmp\a"));
+        QVERIFY(output.endsWith("\x1b]777;__TINA_DONE__\a"));
+    }
+
+    void inlineDiffKeepsWholeFile() {
+        const auto diff = buildInlineDiff("@@ -2,2 +2,3 @@\n-old\n+new\n+\n middle\n"
+                                          "@@ -5 +6 @@\n-tail-old\n+tail-new\n",
+                                          "start\nnew\n\nmiddle\nunchanged\ntail-new\nend\n");
+        QVERIFY(diff.valid);
+        QCOMPARE(diff.text, QString("start\nold\nnew\n\nmiddle\nunchanged\ntail-old\ntail-new\nend"));
+        QCOMPARE(diff.lines[1].change, -1);
+        QCOMPARE(diff.lines[2].change, 1);
+        QCOMPARE(diff.lines[3].change, 1); // 新增空白行也必须有绿色整行背景。
+        QCOMPARE(diff.lines.last().oldNumber, 6);
+        QCOMPARE(diff.lines.last().newNumber, 7);
+        QVERIFY(!buildInlineDiff("@@ -1 +1 @@\n-old\n+new\n", "changed meanwhile\n").valid);
+        QVERIFY(!buildInlineDiff("@@ -1,2 +1 @@\n-old\n+new\n", "new\n").valid);
+        const auto deleted = buildInlineDiff("@@ -1,2 +0,0 @@\n-one\n-two\n", {});
+        QVERIFY(deleted.valid);
+        QCOMPARE(deleted.text, QString("one\ntwo"));
+        QCOMPARE(deleted.lines.last().newNumber, 0);
+        const auto inserted = buildInlineDiff("@@ -0,0 +1 @@\n+first\n", "first\n");
+        QVERIFY(inserted.valid);
+        QCOMPARE(inserted.lines[0].oldNumber, 0);
+        const auto noNewline = buildInlineDiff("@@ -1 +1 @@\n-old\n\\ No newline at end of file\n+new\n"
+                                               "\\ No newline at end of file\n", "new");
+        QVERIFY(noNewline.valid);
+        const auto untracked = buildInlineDiff({}, "new file\n\n", true);
+        QVERIFY(untracked.valid);
+        QCOMPARE(untracked.lines.size(), 2);
+        QCOMPARE(untracked.lines[1].change, 1);
+    }
+
+    void previewComponentsWithoutNetwork() {
+        qmlRegisterType<FfiClientBridge>("TinaIde", 1, 0, "FfiClientBridge");
+        qmlRegisterUncreatableType<WorkspaceDocument>("TinaIde", 1, 0, "WorkspaceDocument", "test");
+        qmlRegisterUncreatableType<TerminalSession>("TinaIde", 1, 0, "TerminalSession", "test");
+        QQmlEngine engine;
+        QList<QQmlError> warnings;
+        connect(&engine, &QQmlEngine::warnings, &engine, [&](const QList<QQmlError> &errors) { warnings += errors; });
+        FfiClientBridge bridge;
+        WorkspaceDocument diffDocument("test.diff");
+        const auto diff = buildInlineDiff("@@ -2 +2,2 @@\n-old\n+new\n+\n", "start\nnew\n\nend\n");
+        QVERIFY(diff.valid);
+        diffDocument.setPreviewText(diff.text, diff.lines, true);
+        QQuickWindow window;
+        window.resize(1100, 700);
+        window.setColor(QColor("#101726"));
+        window.show();
+        QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(TINA_QML_SOURCE_DIR "/CodePane.qml")));
+        std::unique_ptr<QObject> object(component.createWithInitialProperties({
+            {"document", QVariant::fromValue(&diffDocument)}, {"bridge", QVariant::fromValue(&bridge)}, {"active", true}}));
+        QVERIFY2(object, qPrintable(component.errorString()));
+        auto *pane = qobject_cast<QQuickItem *>(object.get());
+        pane->setParentItem(window.contentItem());
+        pane->setSize(window.size());
+        QQuickItem *removed = nullptr, *addedBlank = nullptr;
+        QTRY_VERIFY((removed = findVisualItem(pane, "diffLine:test.diff:2")));
+        QTRY_VERIFY((addedBlank = findVisualItem(pane, "diffLine:test.diff:4")));
+        QCOMPARE(removed->width(), pane->width());
+        QCOMPARE(addedBlank->width(), pane->width());
+        QVERIFY(removed->property("color").value<QColor>().red() > removed->property("color").value<QColor>().green());
+        QVERIFY(addedBlank->property("color").value<QColor>().green() > addedBlank->property("color").value<QColor>().red());
+        QTest::qWait(160);
+        window.grabWindow().save(QStringLiteral("full-diff-preview.png"));
+        WorkspaceDocument markdown("demo/README.md");
+        const QString source = "# Tina\n\n**Bold** and `code`\n\n- [x] Task\n\n| A | B |\n|---|---|\n| 1 | 2 |\n";
+        markdown.setText(source);
+        object.reset();
+        object.reset(component.createWithInitialProperties({
+            {"document", QVariant::fromValue(&markdown)}, {"bridge", QVariant::fromValue(&bridge)}, {"active", true}}));
+        QVERIFY2(object, qPrintable(component.errorString()));
+        pane = qobject_cast<QQuickItem *>(object.get());
+        pane->setParentItem(window.contentItem());
+        pane->setSize(window.size());
+        QQuickItem *content = nullptr;
+        QTRY_VERIFY((content = findVisualItem(pane, "markdownContent:demo/README.md")));
+        auto *quickDocument = qvariant_cast<QQuickTextDocument *>(content->property("textDocument"));
+        QVERIFY(quickDocument);
+        QVERIFY(quickDocument->textDocument()->toPlainText().startsWith("Tina\n"));
+        QCOMPARE(markdown.text(), source); // 阅读排版不回写、不转换源码。
+        QTest::qWait(160);
+        window.grabWindow().save(QStringLiteral("markdown-preview.png"));
+        markdown.setMarkdownPreview(false);
+        auto *editor = findVisualItem(pane, "editor:demo/README.md");
+        QVERIFY(editor && editor->isVisible());
+        QCOMPARE(editor->property("text").toString(), source);
+        markdown.setMarkdownPreview(true);
+        QTRY_VERIFY(findVisualItem(pane, "markdownContent:demo/README.md"));
+        TerminalSession terminal(1);
+        terminal.appendOutput("\x1b]778;rance@fedora;/home/rance/projects/tina\a");
+        terminal.beginInput();
+        terminal.appendOutput("pwd\r\n/home/rance/projects/tina\r\n");
+        object.reset();
+        QQmlComponent terminalComponent(&engine, QUrl::fromLocalFile(QStringLiteral(TINA_QML_SOURCE_DIR "/TerminalView.qml")));
+        object.reset(terminalComponent.createWithInitialProperties({{"terminal", QVariant::fromValue(&terminal)}, {"active", true}}));
+        QVERIFY2(object, qPrintable(terminalComponent.errorString()));
+        pane = qobject_cast<QQuickItem *>(object.get());
+        pane->setParentItem(window.contentItem());
+        pane->setSize(window.size());
+        QTest::qWait(160);
+        window.grabWindow().save(QStringLiteral("terminal-pane-preview.png"));
+        object.reset(); // 文档和终端须晚于视图析构。
+        for (const auto &warning : warnings) qWarning() << warning;
+        QVERIFY(warnings.isEmpty());
+    }
+
     void gitProtocolGraphAndDiff() {
         FakeServer server;
+        server.files["demo/main.cpp"] = "new\n";
+        server.files["demo/space name.cpp"] = "after\n";
+        server.files["demo/new.cpp"] = "renamed unchanged file\n";
+        server.files["demo/tab\tname.cpp"] = "y\n";
+        server.files["demo/untracked.txt"] = "untracked content\n";
         FfiClientBridge bridge;
         bridge.connectToServer("127.0.0.1", server.server.serverPort());
         QTRY_VERIFY(bridge.connected());
@@ -275,17 +407,17 @@ class WorkspaceTest : public QObject {
             QVERIFY(!doc->dirty());
             const auto text = doc->text();
             if (i == 0) {
-                QVERIFY(text.contains("+new")); QVERIFY(!text.contains("+after"));
+                QCOMPARE(text, QString("old\nnew")); QVERIFY(doc->fullDiff());
                 QVERIFY(!text.contains("other.cpp")); // 块内的伪文件头不串入当前文件。
             }
-            if (i == 1) { QVERIFY(text.contains("+after")); QVERIFY(!text.contains("+new")); }
-            if (i == 2) QVERIFY(text.contains("rename to new.cpp"));
+            if (i == 1) QCOMPARE(text, QString("before\nafter"));
+            if (i == 2) QCOMPARE(text, QString("renamed unchanged file"));
             if (i == 3) QVERIFY(text.contains("Binary files"));
-            if (i == 4) QVERIFY(text.contains("+y"));
-            if (i == 5) QVERIFY(text.contains(QStringLiteral("未跟踪文件")));
+            if (i == 4) QCOMPARE(text, QString("x\ny"));
+            if (i == 5) QCOMPARE(text, QString("untracked content"));
             bridge.saveCurrent();
         }
-        QCOMPARE(server.count(0x0203), 0);
+        QCOMPARE(server.count(0x0203), 5);
         QCOMPARE(server.count(0x0204), 0);
         QVERIFY(bridge.handleGitCommand("@GIT diff Feature/KeepCase main"));
         QTRY_VERIFY(document(bridge, 6)->loaded());
@@ -316,7 +448,7 @@ class WorkspaceTest : public QObject {
         bridge.connectToServer("127.0.0.1", server.server.serverPort());
         QTRY_VERIFY(bridge.connected());
         QTRY_VERIFY(bridge.activeTerminal()->available());
-        QCOMPARE(server.count(0x0203), 0);
+        QCOMPARE(server.count(0x0203), 5);
         QCOMPARE(server.count(0x0403), logCount + 1);
     }
 
@@ -385,6 +517,15 @@ class WorkspaceTest : public QObject {
         QVERIFY(!terminal.output().contains('x'));
         terminal.clear();
         QCOMPARE(terminal.output(), QString());
+        // 元数据跨分片，路径可含分号；命令文本须转义为 HTML 字面量。
+        for (const auto byte : QByteArray("\x1b]778;rance@fedora;/home/rance/a;b\a"))
+            terminal.appendOutput(QByteArray(1, byte));
+        QCOMPARE(terminal.prompt(), QString("rance@fedora/home/rance/a;b $ "));
+        terminal.beginInput();
+        terminal.appendOutput("echo '<b>hello</b>'\r\n");
+        QVERIFY(terminal.richOutput().contains("font-weight:700"));
+        QVERIFY(terminal.richOutput().contains("&lt;b&gt;hello&lt;/b&gt;"));
+        QVERIFY(terminal.output().startsWith(terminal.prompt()));
     }
 
     void terminalSessionsCompletionAndReconnect() {
@@ -431,7 +572,8 @@ class WorkspaceTest : public QObject {
         QTRY_VERIFY_WITH_TIMEOUT(first->available(), 5000);
         QVERIFY(first->terminalId() != previousId);
         QCOMPARE(first->sessionId(), 1); // 用户编号独立于重连后重新分配的 RPC ID。
-        QCOMPARE(server.count(0x0301), inputCalls);
+        QTRY_VERIFY(second->available());
+        QCOMPARE(server.count(0x0301), inputCalls + 2); // 两个新 Shell 只设置提示信息，不重放用户命令。
         QVERIFY(second->output().contains("background"));
         QCOMPARE(first->draft(), QString("new"));
         bridge.closeTerminal(0);
@@ -510,6 +652,7 @@ class WorkspaceTest : public QObject {
                 return true;
             }
             if (call.method == 0x0301) {
+                if (call.payload.mid(8).startsWith("PROMPT_COMMAND=")) return false;
                 server.respond(call, 11, terminalPayload(42, "busy"));
                 return true;
             }
@@ -522,7 +665,7 @@ class WorkspaceTest : public QObject {
         QVERIFY(bridge.submitCommand("one-shot"));
         QTRY_VERIFY(!bridge.activeTerminal()->submitting());
         QTest::qWait(800); // 超过首个读请求的重试间隔。
-        QCOMPARE(server.count(0x0301), 1);
+        QCOMPARE(server.count(0x0301), 2); // 一次初始化，一次用户输入。
         QVERIFY(bridge.activeTerminal()->output().contains("busy"));
     }
 
@@ -1015,20 +1158,8 @@ class WorkspaceTest : public QObject {
                  QPointF(bar->width(), bar->height()));
         QCOMPARE(submitButton->width(), 43.0);
         QCOMPARE(submitButton->height(), 43.0);
-        auto *resizeHandle = findVisualItem(window->contentItem(), "terminalResizeHandle");
-        QVERIFY(resizeHandle);
-        const auto handleCenter = resizeHandle->mapToScene(QPointF(resizeHandle->width() / 2, 8)).toPoint();
+        QVERIFY(!findVisualItem(window->contentItem(), "terminalResizeHandle"));
         const auto originalHeight = bar->height();
-        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, handleCenter);
-        QTest::mouseMove(window, handleCenter - QPoint(0, 200), 30);
-        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, handleCenter - QPoint(0, 200));
-        QTRY_COMPARE(bar->height(), originalHeight + 200);
-        const auto newHandleCenter = resizeHandle->mapToScene(QPointF(resizeHandle->width() / 2, 8)).toPoint();
-        QTest::mousePress(window, Qt::LeftButton, Qt::NoModifier, newHandleCenter);
-        QTest::mouseMove(window, newHandleCenter + QPoint(0, 230), 30);
-        QTest::mouseRelease(window, Qt::LeftButton, Qt::NoModifier, newHandleCenter + QPoint(0, 230));
-        QTRY_COMPARE(bar->height(), originalHeight);
-        bar->setProperty("requestedHeight", originalHeight);
         QTRY_VERIFY(bridge->activeTerminal() && bridge->activeTerminal()->available());
         command->forceActiveFocus();
         command->setProperty("text", "echo terminal");
@@ -1041,10 +1172,9 @@ class WorkspaceTest : public QObject {
                                        "[3/3] Build finished\r\n";
         server.terminalEvent(0x0381, terminalPayload(bridge->activeTerminal()->terminalId(), outputLines.toUtf8()));
         QTRY_VERIFY(bridge->activeTerminal()->output().contains("Build finished"));
-        bar->setProperty("requestedHeight", 360);
         QTest::qWait(100);
         window->grabWindow().save(QStringLiteral("terminal-preview.png"));
-        bar->setProperty("requestedHeight", originalHeight);
+        QCOMPARE(bar->height(), originalHeight);
         command->setProperty("text", "com");
         QTest::keyClick(window, Qt::Key_Tab);
         QTRY_COMPARE(command->property("text").toString(), QString("completed"));

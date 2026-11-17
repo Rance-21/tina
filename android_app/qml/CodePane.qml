@@ -25,11 +25,73 @@ Item {
             Qt.callLater(focusEditor)
         }
     }
-    function focusEditor() { editor.forceActiveFocus() }
+    readonly property bool readingMarkdown: document.markdown && document.markdownPreview
+    function focusEditor() {
+        if (!readingMarkdown) editor.forceActiveFocus()
+    }
+
+    RowLayout {
+        id: markdownToolbar
+        anchors.top: parent.top
+        anchors.right: parent.right
+        visible: pane.document.markdown
+        height: visible ? 38 : 0
+        Button {
+            id: readButton
+            objectName: "markdownReadButton:" + pane.document.path
+            text: "阅读"
+            flat: true
+            highlighted: pane.readingMarkdown
+            palette.buttonText: "#c7d9f1"
+            palette.windowText: "#c7d9f1"
+            palette.highlightedText: "#ffffff"
+            background: Rectangle {
+                radius: 6
+                color: readButton.highlighted ? "#70304b70" : "#28101726"
+            }
+            onClicked: pane.document.markdownPreview = true
+        }
+        Button {
+            id: sourceButton
+            objectName: "markdownSourceButton:" + pane.document.path
+            text: "源码"
+            flat: true
+            highlighted: !pane.readingMarkdown
+            palette.buttonText: "#c7d9f1"
+            palette.windowText: "#c7d9f1"
+            palette.highlightedText: "#ffffff"
+            background: Rectangle {
+                radius: 6
+                color: sourceButton.highlighted ? "#70304b70" : "#28101726"
+            }
+            onClicked: {
+                pane.document.markdownPreview = false
+                pane.focusEditor()
+            }
+        }
+    }
+
+    Item {
+        id: previewHeader
+        anchors.top: markdownToolbar.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        height: pane.document.preview ? 32 : 0
+        visible: pane.document.preview
+        Label {
+            anchors.fill: parent
+            leftPadding: 8
+            verticalAlignment: Text.AlignVCenter
+            text: pane.document.name + (pane.document.fullDiff ? " · 完整文件 · 只读" : " · 只读")
+                  + (pane.document.refreshing ? " · 获取中…" : "")
+            color: "#b6c8e4"
+            elide: Text.ElideMiddle
+        }
+    }
 
     ColumnLayout {
         id: conflictBar
-        anchors.top: parent.top
+        anchors.top: previewHeader.bottom
         anchors.left: parent.left
         anchors.right: parent.right
         visible: pane.document.conflict
@@ -59,9 +121,11 @@ Item {
 
     Item {
         id: gutter
+        visible: !pane.readingMarkdown
         anchors.top: conflictBar.bottom
         anchors.bottom: parent.bottom
-        width: Math.max(48, metrics.advanceWidth(String(editor.lineCount)) + 20)
+        width: pane.document.fullDiff ? Math.max(96, 2 * metrics.advanceWidth(String(editor.lineCount)) + 36)
+                                     : Math.max(48, metrics.advanceWidth(String(editor.lineCount)) + 20)
         clip: true
         readonly property var lines: {
             // 显式依赖排版版本；字号、文本或文档高度变化时重新取可见行的真实基线。
@@ -77,16 +141,39 @@ Item {
                 x: 0
                 y: editor.topPadding + modelData.baseline - baselineOffset - flick.contentY
                 width: gutter.width - 10
-                text: modelData.number
+                text: pane.document.fullDiff
+                      ? (modelData.oldNumber || "") + "  " + (modelData.newNumber || "") : modelData.number
                 font: editor.font
-                color: "#6983a5"
+                color: modelData.change > 0 ? "#8cdaa4" : modelData.change < 0 ? "#f19494" : "#6983a5"
                 horizontalAlignment: Text.AlignRight
+            }
+        }
+    }
+
+    // 背景固定覆盖可见整行，横向滚动和空白行也保持完整的红 / 绿底色。
+    Item {
+        anchors.top: conflictBar.bottom
+        anchors.bottom: parent.bottom
+        width: parent.width
+        visible: !pane.readingMarkdown && pane.document.preview
+        clip: true
+        z: -1
+        Repeater {
+            model: gutter.lines
+            delegate: Rectangle {
+                required property var modelData
+                objectName: "diffLine:" + pane.document.path + ":" + modelData.number
+                y: editor.topPadding + modelData.top - flick.contentY
+                width: parent.width
+                height: modelData.height
+                color: modelData.change > 0 ? "#493ba55b" : modelData.change < 0 ? "#55c44848" : "transparent"
             }
         }
     }
 
     Flickable {
         id: flick
+        visible: !pane.readingMarkdown
         objectName: "codeViewport:" + pane.document.path
         anchors.top: conflictBar.bottom
         anchors.bottom: parent.bottom
@@ -153,15 +240,27 @@ Item {
         }
     }
 
+    Loader {
+        anchors.top: conflictBar.bottom
+        anchors.bottom: parent.bottom
+        anchors.left: parent.left
+        anchors.right: parent.right
+        active: pane.readingMarkdown
+        visible: active
+        sourceComponent: MarkdownPane {
+            document: pane.document
+            bottomOverlayHeight: pane.bottomOverlayHeight
+        }
+    }
+
     // 只在有状态时显示提示，不再为文件名和常驻标题栏占用代码高度。
     Label {
         anchors.top: conflictBar.bottom
-        anchors.right: parent.right
+        anchors.left: parent.left
         anchors.margins: 8
         text: pane.document.saving ? "保存中…" : pane.document.refreshing ? "获取中…"
-              : pane.document.preview ? pane.document.name + " · 只读"
               : pane.document.readOnly ? "只读" : ""
-        visible: text.length > 0
+        visible: !pane.document.preview && text.length > 0
         color: "#b6c8e4"
         padding: 4
         background: Rectangle { color: "#d0101726"; radius: 4 }

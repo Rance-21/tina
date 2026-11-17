@@ -12,6 +12,11 @@ TerminalSession::TerminalSession(int sessionId, QObject *parent)
     connect(&outputTimer_, &QTimer::timeout, this, &TerminalSession::outputChanged);
 }
 
+QByteArray TerminalSession::promptSetupCommand() {
+    return "PROMPT_COMMAND='printf \"\\033]778;%s@%s;%s\\007\" "
+           "\"${USER:-rance}\" \"${HOSTNAME%%.*}\" \"$PWD\"; '\"$PROMPT_COMMAND\"";
+}
+
 void TerminalSession::setDraft(const QString &draft) {
     if (draft_ == draft)
         return;
@@ -35,6 +40,51 @@ QString TerminalSession::output() const {
     return result;
 }
 
+QString TerminalSession::richOutput() const {
+    QString result = QStringLiteral("<pre style=\"white-space:pre-wrap; margin:0\">");
+    bool styled = false;
+    QString run;
+    for (auto i = first_; i < end_; ++i) {
+        if (i == first_ && buffer_[i % BufferCapacity].isLowSurrogate()) continue;
+        const bool next = promptStyle_[i % BufferCapacity];
+        if (next != styled) {
+            result += run.toHtmlEscaped();
+            run.clear();
+            result += next ? QStringLiteral("<span style=\"color:#63d68b; font-weight:700\">")
+                           : QStringLiteral("</span>");
+            styled = next;
+        }
+        run += buffer_[i % BufferCapacity];
+    }
+    result += run.toHtmlEscaped();
+    if (styled) result += QStringLiteral("</span>");
+    return result + QStringLiteral("</pre>");
+}
+
+void TerminalSession::beginInput() {
+    if (end_ > lineStart_) put('\n');
+    for (const auto ch : prompt()) put(ch, true);
+    scheduleOutput();
+}
+
+void TerminalSession::finishOsc() {
+    if (!osc_.startsWith(QStringLiteral("778;"))) return;
+    const auto separator = osc_.indexOf(';', 4);
+    if (separator < 0) return;
+    const auto identity = osc_.mid(4, separator - 4);
+    const auto directory = osc_.mid(separator + 1);
+    if (identity.isEmpty() || !directory.startsWith('/')) return;
+    identity_ = identity;
+    directory_ = directory;
+    const bool wasInitializing = initializing_;
+    initializing_ = false;
+    if (wasInitializing) {
+        starting_ = false;
+        emit stateChanged();
+    }
+    emit promptChanged();
+}
+
 void TerminalSession::scheduleOutput() {
     if (!outputTimer_.isActive())
         outputTimer_.start();
@@ -54,7 +104,7 @@ void TerminalSession::dropFirst() {
     cursor_ = std::max(cursor_, first_);
 }
 
-void TerminalSession::put(QChar ch) {
+void TerminalSession::put(QChar ch, bool prompt) {
     if (ch == '\n') {
         cursor_ = end_;
         ++lines_;
@@ -64,6 +114,7 @@ void TerminalSession::put(QChar ch) {
             dropFirst();
         ++end_;
     }
+    promptStyle_[cursor_ % BufferCapacity] = prompt;
     buffer_[cursor_++ % BufferCapacity] = ch;
     if (ch == '\n')
         lineStart_ = cursor_;
@@ -96,15 +147,18 @@ void TerminalSession::appendOutput(QByteArrayView bytes) {
     const QString text = decoder_(bytes);
     for (const auto ch : text) {
         if (escape_ == Escape::Osc || escape_ == Escape::OscEnd) {
-            if (ch == '\a' || (escape_ == Escape::OscEnd && ch == '\\'))
+            if (ch == '\a' || (escape_ == Escape::OscEnd && ch == '\\')) {
+                finishOsc();
                 escape_ = Escape::None;
-            else
+            } else {
+                if (osc_.size() < 16384 && ch.unicode() != 0x1b) osc_.append(ch);
                 escape_ = ch.unicode() == 0x1b ? Escape::OscEnd : Escape::Osc;
+            }
             continue;
         }
         if (escape_ == Escape::Csi) {
             if (ch.unicode() >= 0x40 && ch.unicode() <= 0x7e) {
-                finishCsi(ch);
+                if (!initializing_) finishCsi(ch);
                 escape_ = Escape::None;
             } else if (parameters_.size() < 64) {
                 parameters_.append(ch);
@@ -119,8 +173,10 @@ void TerminalSession::appendOutput(QByteArrayView bytes) {
             escape_ = ch == '[' ? Escape::Csi : ch == ']' ? Escape::Osc
                       : (ch == '(' || ch == ')') ? Escape::Charset : Escape::None;
             parameters_.clear();
+            osc_.clear();
             continue;
         }
+        if (initializing_ && ch.unicode() != 0x1b) continue;
         switch (ch.unicode()) {
         case 0x1b: escape_ = Escape::Start; break;
         case '\r': cursor_ = lineStart_; break;
