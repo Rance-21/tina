@@ -48,16 +48,9 @@ class Connection {
     }
 
     // 非阻塞读取 Socket 数据，切出完整 RPC 请求帧并提交给 WorkerPool。
-    // 返回 false 表示协议非法、并发超限或任务队列已满，调用方应立即关闭连接。
-    // 分支逻辑：
-    //   1. draining_ 为 true：处于停机排空阶段，不再读取新数据，直接返回 true。
-    //   2. 循环最多读 8 次（上限 64 KiB）：防止单条活跃连接饥饿同一 I/O 线程上的其他连接。
-    //      - !n (EAGAIN)：内核接收缓冲区已读空，正常返回 true 等待下次 EPOLLIN。
-    //      - *n == 0 (EOF)：对端发送 FIN 关闭写端；若 input_ 还有未凑齐的半包则视为协议错误返回
-    //      false。
-    //      - *n > 0：追加到 input_ 并循环 decode_frame() 拆包；若非 request 帧、在途请求达到
-    //        max_inflight (64) 或 WorkerPool 拒绝接收任务，则返回 false 关闭连接。
-    template <typename Submit> bool read(Submit &&submit) {
+    // 若 fast_handle 返回 true（如小文件命中缓存），则直接在当前 I/O 线程入队响应，跳过 WorkerPool。
+    template <typename FastHandle, typename Submit>
+    bool read(FastHandle &&fast_handle, Submit &&submit) {
         if (draining_)
             return true;
 
@@ -78,14 +71,30 @@ class Connection {
             input_.commit_write(*n);
 
             while (auto request = decode_frame(input_)) {
-                if (request->kind != Kind::request || pending_ >= max_inflight ||
-                    !submit(std::move(*request)))
+                if (request->kind != Kind::request)
+                    return false;
+                if (fast_handle(*request)) {
+                    if (!enqueue_direct_response(*request))
+                        return false;
+                    continue;
+                }
+                if (pending_ >= max_inflight || !submit(std::move(*request)))
                     return false;
                 ++pending_;
             }
         }
 
         return true;
+    }
+
+    // I/O 线程快路径直接复用 FrameSendQueue::enqueue(Frame &)，不消耗 pending_。
+    bool enqueue_direct_response(Frame &response) {
+        if (output_.readable_bytes() >= 256 * 1024)
+            output_.write(socket_);
+        if (output_.enqueue(response, max_output))
+            return true;
+        output_.write(socket_);
+        return output_.enqueue(response, max_output);
     }
 
     // Worker 算完响应后由所属 I/O 线程调用：

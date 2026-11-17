@@ -58,6 +58,7 @@ class FrameSendQueue {
     }
 
     // 使用 ::writev() 将队列中待发的“17B 帧头”和“Payload”聚集写入非阻塞 Socket。
+    // 高负载能自己减少 syscall 陷入内核
     template <typename Socket> void write(const Socket &socket) {
         constexpr int kMaxIov = 64;
         std::array<struct iovec, kMaxIov> iov;
@@ -125,7 +126,8 @@ class FrameSendQueue {
                 }
             }
 
-            // 若本次未写完当前批次，说明内核发送缓冲区已满，直接退出避免多调一次必触发 EAGAIN 的系统调用。
+            // 若本次未写完当前批次，说明内核发送缓冲区已满，直接退出避免多调一次必触发 EAGAIN
+            // 的系统调用。
             if (*n < batch_bytes)
                 break;
         }
@@ -145,4 +147,4 @@ class FrameSendQueue {
     std::size_t queued_bytes_{0};
 };
 
-}
+} // namespace net

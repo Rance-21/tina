@@ -1,34 +1,9 @@
 # Tina 性能优化与架构改进清单 (Optimization Notes)
 
 ## 一、 系统调用与 Epoll 事件驱动优化
-
-### 3. `Connection::write()` 与 `send_pending()` 的循环语义及 `writev` 聚集写（新增）
-- **现状**：`write()` 外层写了 `for (int i = 0; i < 8 && wants_write(); ++i)`，
-但内部直接传入了整个连续缓冲区 `output_.readable_bytes()`。
-  若内核缓冲区够大，第 1 次就全发完；若不够大（部分写），第 2 次必然立即触发 `EAGAIN` 退出，8 次循环形同虚设。
-- **优化方案**：去掉无意义的外层循环（只调一次 `try_send`）；
-  更进一步，在编码响应帧时无需把固定 17B 帧头和大 Payload 拼进同一个 `output_` 连续内存，
-  可用 `::writev(fd, iov, iovcnt)` 直接将帧头与 Payload 聚集发送。
-
-### 4. `run_server` 对同一次 `accept_epoll.wait()` 结果的双重遍历
-- **现状**：`src/rpc/server.cppm` 主循环每次 `accept_epoll.wait()` 返回后，先 `for` 遍历一遍找 `signals.fd()`，再 `for` 遍历第二遍找 `listener->native_handle()`。
-- **优化方案**：合并为单次 `for` 循环，在循环内若遇到 `event.fd == signals.fd()` 直接 `signals.consume(); stopping = true; break;`，否则处理 `listener` 接受连接（事实上 `accept_epoll` 里总共就这 2 个 fd）。
-
 ---
 
 ## 二、 内存分配、拷贝与零拷贝（Zero-Copy）优化
-
-### 5. `Connection::read()` 接收路径拷贝过多
-- **现状**：当前数据流为：`内核 Socket 缓冲 -> 栈上 8KB chunk -> input_ (Buffer) -> decode_frame 构造 Frame::payload (std::string)`，仅收包阶段就经历了 **1 次内核态到用户态拷贝 + 2 次用户态内存拷贝**。
-- **优化方案**：
-  - 给 `net::Buffer` 提供 `writable_bytes()` / `ensure_writable()` 接口，直接将 `Buffer` 尾部空闲空间传给 `recv()`，省去栈上 `chunk` 中转拷贝；
-  - 或使用 `::readv()` 配合栈上 `extrabuf`（Muduo 经典双缓冲技巧）：平时只用 `Buffer` 现有容量接收，装不下时溢出到栈数组再 `append`。
-
-### 6. `std::string` 过多堆区分配（Heap Allocation）
-- **现状**：每个请求/响应的 `Frame::payload`、`KvService` 分割键值時的 `substr()`、日志拼接等都在频繁触发堆内存 `malloc/free`。
-- **优化方案**：
-  - 协议解析与 `KvService::handle()` 入参改用 `std::string_view` 切片零拷贝传递，只在真正落入哈希表存储时分配一次内存；
-  - 对小负载请求利用 SSO（Small String Optimization），或引入针对固定尺寸帧的 Arena / 对象池复用 `Frame` 缓冲。
 
 ### 7. 大文件/大负载传输的零拷贝（`sendfile` / `MSG_ZEROCOPY`）
 - **现状**：Remote IDE 后续涉及 `workspace_read_file` 等大文件读取，

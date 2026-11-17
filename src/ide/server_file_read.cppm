@@ -51,7 +51,34 @@ inline bool pread_range_at(int fd, std::uint64_t offset, std::size_t to_read, st
     return true;
 }
 
+// 尝试命中 WorkspaceCache 文件缓存并编码响应；切片长度超过 max_slice_bytes 时返回 false。
+inline bool respond_from_file_cache(Frame &frame, std::string_view rel_path, std::uint64_t offset,
+                                    std::uint32_t max_bytes, std::size_t max_slice_bytes) {
+    if (auto cached = service::global_workspace_cache().get_file(rel_path)) {
+        const auto slice = slice_file_content(*cached, offset, max_bytes);
+        if (slice.size() > max_slice_bytes)
+            return false;
+
+        frame.kind = Kind::response;
+        frame.status = Status::ok;
+        encode_workspace_read_file(frame, std::move(cached), slice);
+        return true;
+    }
+    return false;
+}
+
 } // namespace detail
+
+// I/O 线程快路径入口：仅当请求合法、命中缓存且切片 <= max_slice_bytes 时在当前线程消化。
+bool try_handle_cached_read_file(Frame &frame, std::size_t max_slice_bytes) {
+    auto req = decode_workspace_read_file_view(frame.payload);
+    if (!req || !service::file::is_valid_workspace_rel_path(req->path) ||
+        !service::file::has_projects_root_env()) {
+        return false;
+    }
+    return detail::respond_from_file_cache(frame, req->path, req->offset, req->max_bytes,
+                                           max_slice_bytes);
+}
 
 // 处理 0x0203 (workspace_read_file)：
 // 按 [offset, maxBytes] 分段读取 UTF-8 文件内容。
@@ -77,10 +104,8 @@ void handle_workspace_read_file(Frame &frame) {
     }
 
     auto &cache = service::global_workspace_cache();
-    if (auto cached = cache.get_file(rel_path)) {
-        const auto slice = detail::slice_file_content(*cached, offset, max_bytes);
-        frame.status = Status::ok;
-        encode_workspace_read_file(frame, std::move(cached), slice);
+    if (detail::respond_from_file_cache(frame, rel_path, offset, max_bytes,
+                                        std::numeric_limits<std::size_t>::max())) {
         return;
     }
 

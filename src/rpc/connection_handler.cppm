@@ -220,6 +220,9 @@ void handle_request(Frame request, const std::weak_ptr<Connection> &weak, int co
     });
 }
 
+// I/O 线程直接消化缓存命中 read_file 请求的切片字节数上限（0 表示关闭快路径，全部走 WorkerPool）。
+inline constexpr std::size_t kIoFastReadThresholdBytes = 32768;
+
 // 将拆包得到的完整请求帧封装为任务提交给 WorkerPool 异步执行。
 bool submit_request(Frame request, const std::weak_ptr<Connection> &weak, int conn_fd,
                     net::EventLoop &loop, ConnectionMap &connections, runtime::WorkerPool &workers,
@@ -236,9 +239,10 @@ bool submit_request(Frame request, const std::weak_ptr<Connection> &weak, int co
 // 客户端连接在所属 I/O 线程上的 epoll 事件主回调。
 // 分支逻辑：
 //   1. event.error()：Socket 发生底层 EPOLLERR，立即关闭连接。
-//   2. 可读/对端关闭分支：连接未处于半关闭或停机排空时，调用 conn->read() 读数据、拆帧并提交给
-//   Worker；
-//      若帧格式非法、在途请求超限、Worker 队列满或 EOF 时残留半包（!ok），立即关闭连接。
+//   2. 可读/对端关闭分支：连接未处于半关闭或停机排空时，调用 conn->read() 零拷贝预览请求：
+//      - 命中 I/O 快路径（缓存命中/ping）直接在当前线程入队响应，随后由 conn->write() 聚集发出；
+//      - 未命中快路径则提交给 WorkerPool 异步执行。
+//      若帧格式非法、在途请求超限、Worker 队列满、发送上限溢出或 EOF 时残留半包（!ok），立即关闭连接。
 //   3. 可写分支（conn->wants_write()）：将 output_ 中积压的响应数据非阻塞写入内核缓冲区。
 //   4. 末尾调用 refresh_connection()：根据最新状态决定关闭连接、静默等待 Worker 还是重装 epoll
 //   事件。
@@ -264,10 +268,19 @@ void handle_connection_event(const std::shared_ptr<Connection> &conn,
     try {
         if (!conn->peer_eof() && !conn->draining() &&
             (event.readable() || event.peer_closed() || event.hangup())) {
-            bool ok = conn->read([&](Frame request) {
-                return submit_request(std::move(request), weak, conn_fd, loop, connections, workers,
-                                      counter, kv, watcher, terminal_mgr);
-            });
+            bool ok = conn->read(
+                [](Frame &request) {
+                    if constexpr (kIoFastReadThresholdBytes > 0) {
+                        if (request.method == Method::workspace_read_file)
+                            return server::try_handle_cached_read_file(request,
+                                                                       kIoFastReadThresholdBytes);
+                    }
+                    return false;
+                },
+                [&](Frame request) {
+                    return submit_request(std::move(request), weak, conn_fd, loop, connections,
+                                          workers, counter, kv, watcher, terminal_mgr);
+                });
 
             if (!ok) {
                 close_conn();
