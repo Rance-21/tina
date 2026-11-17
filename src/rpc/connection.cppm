@@ -47,8 +47,16 @@ class Connection {
         return (peer_eof_ || draining_) && pending_ == 0 && output_.empty();
     }
 
-    // 非阻塞读取 Socket 数据，切出完整 RPC 请求帧并提交给 WorkerPool。
-    // 若 fast_handle 返回 true（如小文件命中缓存），则直接在当前 I/O 线程入队响应，跳过 WorkerPool。
+    // 非阻塞读取 Socket 数据，逐帧解析完整 RPC 请求并分流处理：
+    //   1. draining_ 为 true：处于停机排空阶段，不再读取新数据，直接返回 true。
+    //   2. 循环最多接收 8 次（单次缓冲按 8 KiB 扩容），防止单条高活跃连接饿死同一 I/O 线程上的其他连接。
+    //   3. 每拆出一帧完整 request，先执行 fast_handle(*request)：
+    //      - 返回 true（快路径命中，如小文件 read_file 命中内存缓存）：
+    //        直接在当前 I/O 线程将响应入队 output_，不经过 WorkerPool、不自增 pending_，
+    //        随后在本轮 read 结束后的 conn->write() 中统一用 ::writev() 聚集发出；
+    //      - 返回 false（慢路径，如缓存未命中需读盘、切片超出阈值或写/终端/Git 请求）：
+    //        检查在途请求数未超 max_inflight (64) 后投递给 WorkerPool 异步处理，并递增 pending_。
+    // 返回 false 表示协议非法、在途并发超限、发送缓冲满、Worker 队列满或 EOF 时残留半包，调用方将关闭连接。
     template <typename FastHandle, typename Submit>
     bool read(FastHandle &&fast_handle, Submit &&submit) {
         if (draining_)
@@ -87,7 +95,11 @@ class Connection {
         return true;
     }
 
-    // I/O 线程快路径直接复用 FrameSendQueue::enqueue(Frame &)，不消耗 pending_。
+    // I/O 线程快路径直接响应入队（直接复用 FrameSendQueue::enqueue，不占用 pending_ 计数）：
+    //   - 当单条连接在一次 read() 流水线中连续命中多条快路径请求时，先发响应会暂存在 output_ 中；
+    //   - 为避免突发大流量在尚未退出 read() 循环前就撑爆 4 MiB 的 max_output 上限，
+    //     在积压达到 256 KiB 或首次 enqueue 放不下时，立即尝试一次非阻塞 ::writev() 刷出数据再入队；
+    //   - 若刷写后依然超出 max_output（说明对端读太慢且内核发送缓冲区已满），返回 false 断开慢连接。
     bool enqueue_direct_response(Frame &response) {
         if (output_.readable_bytes() >= 256 * 1024)
             output_.write(socket_);

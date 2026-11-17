@@ -51,7 +51,12 @@ inline bool pread_range_at(int fd, std::uint64_t offset, std::size_t to_read, st
     return true;
 }
 
-// 尝试命中 WorkspaceCache 文件缓存并编码响应；切片长度超过 max_slice_bytes 时返回 false。
+// 从 WorkspaceCache 文件缓存中尝试命中并直接编码响应（与 Worker 慢路径共用同一份缓存切片逻辑）：
+//   - 先通过 get_file() 获取不可变缓存条目（shared_ptr<const ReadFileResponse>），并切片出本次请求范围；
+//   - 若切片大小超出 max_slice_bytes（例如 I/O 线程快路径设置的 32 KiB 阈值），则放弃快路径返回 false，
+//     交由 WorkerPool 处理，避免大响应写回及发送队列背压阻塞同一 I/O 线程上的其他连接；
+//   - 命中且在阈值内时：直接原地改写 frame 为响应帧，仅编码 16B 元数据头进 frame.payload，
+//     大块文件内容通过 frame.payload_owner + external_payload 零拷贝挂载后返回 true。
 inline bool respond_from_file_cache(Frame &frame, std::string_view rel_path, std::uint64_t offset,
                                     std::uint32_t max_bytes, std::size_t max_slice_bytes) {
     if (auto cached = service::global_workspace_cache().get_file(rel_path)) {
@@ -69,7 +74,12 @@ inline bool respond_from_file_cache(Frame &frame, std::string_view rel_path, std
 
 } // namespace detail
 
-// I/O 线程快路径入口：仅当请求合法、命中缓存且切片 <= max_slice_bytes 时在当前线程消化。
+// I/O 线程快路径专用入口（针对 0x0203 workspace_read_file）：
+// 在把请求提交给 WorkerPool 之前先试探一次内存缓存，仅在同时满足以下条件时由当前 I/O 线程直接消化：
+//   1. 请求格式与工作区相对路径合法（非法请求仍交由 Worker 统一返回错误帧，保持错误路径简单）；
+//   2. 目标文件已命中 WorkspaceCache（完全无需 open/fstat/pread 等磁盘系统调用）；
+//   3. 切片大小 <= max_slice_bytes（阈值以内由 I/O 线程直接入队 ::writev()，省去两次线程切换与 eventfd 唤醒）。
+// 注意：返回 false 时绝不修改 frame 的内容与状态，保证后续仍可原封不动投递给 WorkerPool。
 bool try_handle_cached_read_file(Frame &frame, std::size_t max_slice_bytes) {
     auto req = decode_workspace_read_file_view(frame.payload);
     if (!req || !service::file::is_valid_workspace_rel_path(req->path) ||

@@ -30,6 +30,7 @@ find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 Network)
 
 qt_standard_project_setup(REQUIRES 6.5)
 if(Qt6_VERSION VERSION_GREATER_EQUAL 6.8)
+    qt_policy(SET QTP0002 NEW)
     qt_policy(SET QTP0004 NEW)
 endif()
 
@@ -80,6 +81,8 @@ set_target_properties(tina_ide_client PROPERTIES
 )
 
 if(ANDROID)
+    set_property(TARGET tina_ide_client PROPERTY QT_ANDROID_PACKAGE_SOURCE_DIR
+        "${CMAKE_CURRENT_SOURCE_DIR}/android")
     # 工作区 RPC 需要网络权限；使用 Qt Android arm64-v8a Kit 构建平板版本。
     set_property(TARGET tina_ide_client APPEND PROPERTY
         QT_ANDROID_PERMISSIONS android.permission.INTERNET)
