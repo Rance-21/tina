@@ -21,4 +21,13 @@ class CodeHighlighter : public QSyntaxHighlighter {
     QRegularExpression tokens_;
 };
 
+// 在 Qt 已解析的 Markdown 文档上配色，保留链接、表格、字号和原始源码。
+class MarkdownHighlighter : public QSyntaxHighlighter {
+  public:
+    explicit MarkdownHighlighter(QTextDocument *document) : QSyntaxHighlighter(document) {}
+
+  protected:
+    void highlightBlock(const QString &text) override;
+};
+
 } // namespace tina::ui

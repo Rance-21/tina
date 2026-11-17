@@ -51,6 +51,7 @@ struct BenchSummary {
 
     std::vector<std::uint64_t> per_second_qps;
     std::vector<LatencyBucket> histogram;
+    std::string workload_details;
 };
 
 // Stats：统计完成量、延迟、错误和吞吐。
@@ -105,6 +106,10 @@ class Stats {
 
     [[nodiscard]] inline std::uint64_t errors() const noexcept {
         return errors_;
+    }
+
+    void record_event_bytes(std::size_t bytes) noexcept {
+        bytes_received_ += bytes;
     }
 
     [[nodiscard]] BenchSummary summarize(std::string_view workload_name, std::string_view host,
@@ -316,6 +321,9 @@ std::string format_report(const BenchSummary &s) {
         }
         out << "\n";
     }
+
+    if (!s.workload_details.empty())
+        out << "[6. Mixed Workload Details]\n" << s.workload_details << "\n";
 
     out << "====================================================================\n";
     return out.str();

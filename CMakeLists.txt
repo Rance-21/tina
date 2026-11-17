@@ -192,9 +192,18 @@ target_sources(tina_bench
         benchmark/stats.cppm
         benchmark/workload.cppm
         benchmark/client.cppm
+        benchmark/mixed_fixture.cppm
+        benchmark/ide_mixed.cppm
+        src/service/workspace_cache.cppm
+        src/service/workspace_cache_lru.cppm
 )
 
 target_link_libraries(tina_bench PRIVATE
     Threads::Threads
 )
+
+add_test(NAME benchmark_mixed
+    COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/test/benchmark_mixed.py"
+            "$<TARGET_FILE:tina>" "$<TARGET_FILE:tina_bench>")
+set_tests_properties(benchmark_mixed PROPERTIES TIMEOUT 120 RUN_SERIAL TRUE)
 

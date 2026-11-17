@@ -13,6 +13,7 @@ enum class WorkloadType : std::uint8_t {
     file_read = 4,
     list_dir = 5,
     fs_mixed = 6, // 仅 workspace_read_file + workspace_list_dir 的混合负载（遍历大型目录树）
+    ide_mixed = 7, // 文件读写、目录与真实 PTY 命令，由独立的有状态 runner 驱动。
 };
 
 [[nodiscard]] constexpr std::string_view workload_name(WorkloadType type) noexcept {
@@ -31,6 +32,8 @@ enum class WorkloadType : std::uint8_t {
         return "list_dir";
     case WorkloadType::fs_mixed:
         return "fs_mixed";
+    case WorkloadType::ide_mixed:
+        return "ide_mixed";
     }
     return "unknown";
 }
@@ -50,6 +53,8 @@ enum class WorkloadType : std::uint8_t {
         return WorkloadType::list_dir;
     if (text == "fs_mixed")
         return WorkloadType::fs_mixed;
+    if (text == "ide_mixed")
+        return WorkloadType::ide_mixed;
     throw std::invalid_argument("unknown workload type: " + std::string(text));
 }
 
@@ -78,6 +83,8 @@ struct WorkloadConfig {
     std::size_t fs_max_files{65536};
     // list_dir 请求占比（百分比），其余为 read_file。
     std::uint32_t fs_list_dir_percent{50};
+    std::uint32_t fs_hot_percent{70};
+    std::string fs_scratch_root{"."}; // 相对 ~/projects；必须位于被测源码树之外。
 };
 
 // Workload：生成 Ping、KV、文件操作等请求，并校验服务端响应。
@@ -139,6 +146,8 @@ class Workload {
 
         case WorkloadType::fs_mixed:
             return make_fs_mixed(seq);
+        case WorkloadType::ide_mixed:
+            throw std::logic_error("ide_mixed requires MixedRunner");
         }
 
         return WorkloadRequest{.method = Method::system_ping, .payload = {}};

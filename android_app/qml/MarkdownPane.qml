@@ -7,9 +7,12 @@ Flickable {
     id: view
     required property WorkspaceDocument document
     property real bottomOverlayHeight: 0
+    property real zoomFactor: 1
+    signal zoomRequested(real factor)
     objectName: "markdownViewport:" + document.path
     clip: true
     boundsBehavior: Flickable.StopAtBounds
+    interactive: !markdownZoom.active
     contentWidth: width
     contentHeight: Math.max(height, content.height)
     ScrollBar.vertical: ScrollBar {}
@@ -29,9 +32,18 @@ Flickable {
         wrapMode: TextEdit.Wrap
         color: "#e2ecff"
         selectionColor: "#8058a6ff"
-        font.pixelSize: 18
+        font.pixelSize: Math.round(18 * view.zoomFactor)
+        Component.onCompleted: view.document.attachMarkdown(textDocument)
         onLinkActivated: function(link) {
             if (/^https?:\/\//i.test(link) || /^mailto:/i.test(link)) Qt.openUrlExternally(link)
         }
+    }
+    TextZoom {
+        id: markdownZoom
+        objectName: "markdownZoom:" + view.document.path
+        viewport: view
+        textItem: content
+        zoomFactor: view.zoomFactor
+        onZoomRequested: function(factor) { view.zoomRequested(factor) }
     }
 }

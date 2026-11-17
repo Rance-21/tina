@@ -1,0 +1,29 @@
+# 参照 cpu_info.txt，Dmitry Vyukov 等开源
+
+IO Pool:
+绑定 Core 0 2 4 8（P core），关闭 SMT，
+如果遇到需要给 Worker 的任务，会 dispatch 给 Worker
+
+Worker Pool:
+绑定 8 个 E-core， 在 config.cppm 设置默认的 k，
+k 代表非阻塞（只有 > 32 KB 的文件从 cache 搬运到内核）任务 thread 数量
+也可以传参自定义 k，你来
+./tina_bench --workload ide_mixed --port 3490 --connections 4 --inflight 64
+直接穷举最佳 k
+每个 worker 有自己的队列（下文有细说）
+
+dispatch:
+任务“窃取”在这个过程发生
+使用原子变量表示每个 Worker 的 task 队列长度
+Blocking 线程队列长度为 0, 且在休眠，可以给 Blocking 线程 非 Blocking task
+给予任务遵循 task 长度趋向于相同的原则
+
+IO -> Worker Queue:
+需注意：
+CAS / Fetch-and-Add
+Acquire / Release
+Cache Line 对齐
+False Sharing
+预分配内存
+位运算寻址
+

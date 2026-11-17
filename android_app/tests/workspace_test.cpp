@@ -251,6 +251,127 @@ QQuickItem *findVisualItem(QQuickItem *root, const QString &name) {
 class WorkspaceTest : public QObject {
     Q_OBJECT
   private slots:
+    void markdownColorsPreserveFormatting() {
+        QTextDocument doc;
+        doc.setMarkdown("# Heading one\n\n## Heading two\n\nNormal **strong** and *emphasis* and `inline` "
+                        "with [link](https://example.com).\n\n> Quoted paragraph\n\n```cpp\nint answer = 42;\n```\n");
+        const auto before = doc.toPlainText();
+        MarkdownHighlighter highlighter(&doc);
+        highlighter.rehighlight();
+        const auto formatOf = [&](const QString &word) {
+            const int position = doc.toPlainText().indexOf(word);
+            const auto block = doc.findBlock(position);
+            for (const auto &range : block.layout()->formats())
+                if (position - block.position() >= range.start && position - block.position() < range.start + range.length)
+                    return range.format;
+            return QTextCharFormat();
+        };
+        QCOMPARE(formatOf("Heading one").foreground().color(), QColor("#91bfff"));
+        QCOMPARE(formatOf("Heading two").foreground().color(), QColor("#78dcb3"));
+        QCOMPARE(formatOf("strong").foreground().color(), QColor("#c5b5f5"));
+        QCOMPARE(formatOf("emphasis").foreground().color(), QColor("#8dd8c9"));
+        QCOMPARE(formatOf("inline").foreground().color(), QColor("#f1c68d"));
+        QCOMPARE(formatOf("link").foreground().color(), QColor("#73c8ff"));
+        QCOMPARE(formatOf("Quoted").foreground().color(), QColor("#91b6c3"));
+        QCOMPARE(formatOf("answer").foreground().color(), QColor("#e7c590"));
+        QVERIFY(formatOf("inline").hasProperty(QTextFormat::BackgroundBrush));
+        QTextCursor cursor(&doc);
+        cursor.setPosition(before.indexOf("link"));
+        cursor.movePosition(QTextCursor::NextCharacter, QTextCursor::KeepAnchor);
+        QCOMPARE(cursor.charFormat().anchorHref(), QString("https://example.com"));
+        QCOMPARE(doc.toPlainText(), before);
+    }
+
+    void pinchZoomKeepsCodePositionAndMarkdownScale() {
+        qmlRegisterType<FfiClientBridge>("TinaIde", 1, 0, "FfiClientBridge");
+        qmlRegisterUncreatableType<WorkspaceDocument>("TinaIde", 1, 0, "WorkspaceDocument", "test");
+        qmlRegisterUncreatableType<TerminalSession>("TinaIde", 1, 0, "TerminalSession", "test");
+        QQmlEngine engine;
+        QList<QQmlError> warnings;
+        connect(&engine, &QQmlEngine::warnings, &engine, [&](const QList<QQmlError> &errors) { warnings += errors; });
+        FfiClientBridge bridge;
+        WorkspaceDocument document("demo/zoom.md");
+        QString source;
+        for (int i = 1; i <= 400; ++i)
+            source += QString("line %1: text and **bold** and `code` ").arg(i) + QString(160, 'x') + "\n\n";
+        document.setText(source);
+        document.setMarkdownPreview(false);
+        QQuickWindow window;
+        window.resize(1100, 700);
+        window.show();
+        QQmlComponent component(&engine, QUrl::fromLocalFile(QStringLiteral(TINA_QML_SOURCE_DIR "/CodePane.qml")));
+        std::unique_ptr<QObject> object(component.createWithInitialProperties({
+            {"document", QVariant::fromValue(&document)}, {"bridge", QVariant::fromValue(&bridge)}, {"active", true}}));
+        QVERIFY2(object, qPrintable(component.errorString()));
+        auto *pane = qobject_cast<QQuickItem *>(object.get());
+        pane->setParentItem(window.contentItem());
+        pane->setSize(window.size());
+        auto *editor = findVisualItem(pane, "editor:demo/zoom.md");
+        auto *viewport = findVisualItem(pane, "codeViewport:demo/zoom.md");
+        QVERIFY(editor && viewport);
+        QTest::qWait(180);
+        viewport->setProperty("contentY", 2000.0);
+        const QPoint center(580, 350);
+        const auto positionAtCenter = [&] {
+            const auto local = editor->mapFromScene(center);
+            int position = -1;
+            if (!QMetaObject::invokeMethod(editor, "positionAt", Q_RETURN_ARG(int, position),
+                                          Q_ARG(qreal, local.x()), Q_ARG(qreal, local.y()))) qFatal("positionAt unavailable");
+            return position;
+        };
+        auto *touch = QTest::createTouchDevice();
+        const auto pinch = [&](int from, int to) {
+            QTest::touchEvent(&window, touch).press(0, center - QPoint(from, 0)).press(1, center + QPoint(from, 0));
+            QTest::qWait(20);
+            for (int step = 1; step <= 10; ++step) {
+                const int radius = from + (to - from) * step / 10;
+                QTest::touchEvent(&window, touch).move(0, center - QPoint(radius, 0)).move(1, center + QPoint(radius, 0));
+                QTest::qWait(20);
+            }
+            QTest::touchEvent(&window, touch).release(0, center - QPoint(to, 0)).release(1, center + QPoint(to, 0));
+            QTest::qWait(50);
+        };
+        const int before = positionAtCenter();
+        pinch(60, 145);
+        const int enlarged = editor->property("font").value<QFont>().pixelSize();
+        QVERIFY(enlarged > 16 && enlarged <= 40);
+        const auto *gesture = pane->findChild<QObject *>("codeZoom:demo/zoom.md");
+        QVERIFY(gesture);
+        QVERIFY2(std::abs(positionAtCenter() - before) <= 2,
+                 qPrintable(QString("before=%1 after=%2 content=(%3,%4) anchor=%5 focal=(%6,%7) size=%8")
+                            .arg(before).arg(positionAtCenter()).arg(viewport->property("contentX").toReal())
+                            .arg(viewport->property("contentY").toReal()).arg(gesture->property("anchorPosition").toInt())
+                            .arg(gesture->property("focalScenePosition").toPointF().x())
+                            .arg(gesture->property("focalScenePosition").toPointF().y()).arg(enlarged)));
+        const auto quick = qvariant_cast<QQuickTextDocument *>(editor->property("textDocument"));
+        const int line = quick->textDocument()->findBlock(positionAtCenter()).blockNumber() + 1;
+        QQuickItem *number = nullptr;
+        QTRY_VERIFY((number = findVisualItem(pane, QString("lineNumber:demo/zoom.md:%1").arg(line))));
+        QCOMPARE(number->property("font").value<QFont>().pixelSize(), enlarged);
+        pinch(180, 30);
+        const int reduced = editor->property("font").value<QFont>().pixelSize();
+        QVERIFY(reduced < enlarged && reduced >= 10);
+        QVERIFY(viewport->property("interactive").toBool());
+        document.setMarkdownPreview(true);
+        QQuickItem *markdown = nullptr;
+        QTRY_VERIFY((markdown = findVisualItem(pane, "markdownContent:demo/zoom.md")));
+        const int oldMarkdownSize = markdown->property("font").value<QFont>().pixelSize();
+        pinch(60, 120);
+        QVERIFY(markdown->property("font").value<QFont>().pixelSize() > oldMarkdownSize);
+        const auto factor = pane->property("zoomFactor").toReal();
+        document.setMarkdownPreview(false);
+        document.setMarkdownPreview(true);
+        QTRY_VERIFY((markdown = findVisualItem(pane, "markdownContent:demo/zoom.md")));
+        QCOMPARE(markdown->property("font").value<QFont>().pixelSize(), qRound(18 * factor));
+        QCOMPARE(document.text(), source);
+        pane->setProperty("active", false);
+        pane->setProperty("active", true);
+        QCOMPARE(pane->property("zoomFactor").toReal(), factor);
+        object.reset();
+        for (const auto &warning : warnings) qWarning() << warning;
+        QVERIFY(warnings.isEmpty());
+    }
+
     void promptSetupUsesShellWorkingDirectory() {
         QProcess shell;
         auto environment = QProcessEnvironment::systemEnvironment();

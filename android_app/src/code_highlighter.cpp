@@ -2,6 +2,8 @@
 
 #include <QFileInfo>
 #include <QSet>
+#include <QTextBlock>
+#include <QTextFragment>
 
 namespace tina::ui {
 
@@ -96,6 +98,46 @@ void CodeHighlighter::highlightBlock(const QString &text) {
         } else if (position < text.size() && text.at(position) == '(') {
             setFormat(start, match.capturedLength(), QColor(QStringLiteral("#e6d797")));
         }
+    }
+}
+
+void MarkdownHighlighter::highlightBlock(const QString &text) {
+    const auto block = currentBlock();
+    const auto blockFormat = block.blockFormat();
+    const int heading = blockFormat.headingLevel();
+    const bool codeBlock = blockFormat.hasProperty(QTextFormat::BlockCodeFence)
+                           || blockFormat.nonBreakableLines();
+    QTextCharFormat base;
+    if (codeBlock) {
+        base.setForeground(QColor("#e7c590"));
+        base.setBackground(QColor("#1b2d43"));
+        setFormat(0, text.size(), base);
+        return;
+    }
+    if (heading > 0) {
+        static const QColor colors[]{"#91bfff", "#78dcb3", "#c4adf0", "#e6c38a", "#8dcbd9", "#b0bfd8"};
+        base.setForeground(colors[std::min(heading, 6) - 1]);
+    } else if (blockFormat.intProperty(QTextFormat::BlockQuoteLevel) > 0) {
+        base.setForeground(QColor("#91b6c3"));
+    }
+    setFormat(0, text.size(), base);
+    for (auto it = block.begin(); !it.atEnd(); ++it) {
+        const auto fragment = it.fragment();
+        if (!fragment.isValid()) continue;
+        const auto original = fragment.charFormat();
+        auto format = base;
+        if (original.isAnchor()) {
+            format.setForeground(QColor("#73c8ff"));
+            format.setUnderlineStyle(QTextCharFormat::SingleUnderline);
+        } else if (original.fontFixedPitch()) {
+            format.setForeground(QColor("#f1c68d"));
+            format.setBackground(QColor("#23374d"));
+        } else if (!heading && original.fontWeight() >= QFont::Bold) {
+            format.setForeground(QColor("#c5b5f5"));
+        } else if (!heading && original.fontItalic()) {
+            format.setForeground(QColor("#8dd8c9"));
+        }
+        setFormat(fragment.position() - block.position(), fragment.length(), format);
     }
 }
 

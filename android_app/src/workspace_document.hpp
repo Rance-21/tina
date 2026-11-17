@@ -55,6 +55,7 @@ class WorkspaceDocument : public QObject {
     int layoutRevision() const { return layoutRevision_; }
     void setText(const QString &text);
     Q_INVOKABLE void attach(QQuickTextDocument *document);
+    Q_INVOKABLE void attachMarkdown(QQuickTextDocument *document);
     Q_INVOKABLE QVariantList visibleLines(qreal top, qreal height) const;
     void setPreviewText(const QString &text, QVector<DiffLine> lines = {}, bool fullDiff = false);
 

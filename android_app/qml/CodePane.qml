@@ -10,6 +10,7 @@ Item {
     required property FfiClientBridge bridge
     property bool active: false
     property real bottomOverlayHeight: 0
+    property real zoomFactor: 1
     visible: active
 
     // 只动画透明度和 8 像素位移，不截图、不对编辑器做模糊或缩放。
@@ -181,13 +182,14 @@ Item {
         anchors.right: parent.right
         clip: true
         boundsBehavior: Flickable.StopAtBounds
+        interactive: !codeZoom.active
         contentWidth: Math.max(width, editor.contentWidth + 24)
         contentHeight: Math.max(height, editor.height)
         ScrollBar.vertical: ScrollBar {}
         ScrollBar.horizontal: ScrollBar {}
 
         function ensureCursorVisible() {
-            if (!pane.active || !editor.activeFocus)
+            if (!pane.active || !editor.activeFocus || codeZoom.active || codeZoom.adjusting)
                 return
             const rect = editor.cursorRectangle
             if (rect.x < contentX) contentX = rect.x
@@ -214,7 +216,7 @@ Item {
             selectionColor: "#8058a6ff"
             selectedTextColor: "#ffffff"
             font.family: "monospace"
-            font.pixelSize: 16
+            font.pixelSize: Math.round(16 * pane.zoomFactor)
             wrapMode: TextEdit.NoWrap
             selectByMouse: true
             selectByKeyboard: true
@@ -240,6 +242,16 @@ Item {
         }
     }
 
+    TextZoom {
+        id: codeZoom
+        objectName: "codeZoom:" + pane.document.path
+        viewport: flick
+        textItem: editor
+        enabled: pane.active && !pane.readingMarkdown
+        zoomFactor: pane.zoomFactor
+        onZoomRequested: function(factor) { pane.zoomFactor = factor }
+    }
+
     Loader {
         anchors.top: conflictBar.bottom
         anchors.bottom: parent.bottom
@@ -250,6 +262,8 @@ Item {
         sourceComponent: MarkdownPane {
             document: pane.document
             bottomOverlayHeight: pane.bottomOverlayHeight
+            zoomFactor: pane.zoomFactor
+            onZoomRequested: function(factor) { pane.zoomFactor = factor }
         }
     }
 

@@ -50,6 +50,12 @@ void WorkspaceDocument::setPreviewText(const QString &text, QVector<DiffLine> li
     emit stateChanged();
 }
 
+void WorkspaceDocument::attachMarkdown(QQuickTextDocument *document) {
+    if (!document || document->textDocument()->findChild<QObject *>(QStringLiteral("markdownColors"))) return;
+    auto *highlighter = new MarkdownHighlighter(document->textDocument());
+    highlighter->setObjectName(QStringLiteral("markdownColors"));
+}
+
 void WorkspaceDocument::attach(QQuickTextDocument *document) {
     if (!document || document == quickDocument_)
         return;
