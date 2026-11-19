@@ -29,11 +29,13 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
     using RefreshConnFn = std::function<void(const std::shared_ptr<rpc::Connection> &)>;
 
     DirWatcher(net::EventLoop &loop, rpc::ConnectionMap &connections, runtime::WorkerPool &workers,
-               rpc::ConnectionCounter &counter, RefreshConnFn refresh_conn = {},
+               rpc::ConnectionCounter &counter, std::size_t io_id = 0,
+               RefreshConnFn refresh_conn = {},
                WorkspaceCache *cache = &global_workspace_cache(),
                FileWatcher *file_watcher = &global_file_watcher())
         : loop_(loop), connections_(connections), workers_(workers), counter_(counter),
-          refresh_conn_(std::move(refresh_conn)), cache_(cache), file_watcher_(file_watcher) {
+          io_id_(io_id), refresh_conn_(std::move(refresh_conn)), cache_(cache),
+          file_watcher_(file_watcher) {
     }
 
     ~DirWatcher() {
@@ -203,6 +205,7 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
     rpc::ConnectionMap &connections_;
     runtime::WorkerPool &workers_;
     rpc::ConnectionCounter &counter_;
+    std::size_t io_id_{0};
     RefreshConnFn refresh_conn_;
     WorkspaceCache *cache_{nullptr};
     FileWatcher *file_watcher_{nullptr};

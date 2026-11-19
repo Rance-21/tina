@@ -1,61 +1,83 @@
 export module runtime.config;
+
 import std;
-/*
-8 (P-core) * 2 + 16(E-core) logical cpus
 
-支持 128 位（16 字节）原子比较并交换指令。
-在无锁队列/无锁栈中，可以把“64 位指针 + 64 位版本号标签”打包成 128 位结构体做单指令原子 CAS，
-从硬件层面根治指针复用的 ABA 问题
-
-waitpkg（UMONITOR / UMWAIT / TPAUSE）：
-现代 Intel 引入的用户态低功耗等待指令。当必须做极短自旋等待某个内存地址变化时，
-可以让核心进入轻量级浅睡眠节能状态，避免死循环把超线程兄弟核的执行单元彻底堵死
-
-修复了 Meltdown 漏洞
-
-$$\text{容量} = \text{Sets} \times \text{Ways} \times \text{Line Size} =
- 64 \times 12 \times 64\text{ B} = 49152\text{ B} = 48\text{ KiB}$$
-
- 单路处理器，只有一个本地内存节点（NUMA Node 0），
- 所有 32 个逻辑核心访问这 15691 MB（16 GB）内存的物理延迟完全一致
-
- 每一对相邻的偶数与奇数逻辑核（0 和 1、2 和 3……一直到 14 和 15）都拥有完全相同的物理 CORE
-编号以及完全相同的 L1d:L1i:L2 缓存编号 （例如 CPU 0 和 CPU 1 都是
-0:0:0:0）。它们在硅片上是同一颗核心，绑核时如果把两个重负载线程同时绑在 0 和 1 上，
- 会互相争抢同一套执行单元和 L1/L2 缓存；只绑偶数号（0, 2, 4, 6, 8, 10, 12,
-14）才能让每个线程独享整颗大核
-
- CPU 16 ~ 31
-独立物理结构： 对应物理 CORE 8 ~ 23（共 16 颗独立物理小核）。E 核不支持超线程，因此 1 个逻辑 CPU
-编号严格对应 1 颗独立的物理核心。 频率与算力定位： MAXMHZ 统一为 4100 MHz
-
-绝大多数 P 核的 MAXMHZ 为 5600 MHz，唯独 CPU 8 ~ 11（对应物理 CORE 4 和 CORE 5）最高睿频达到 5800
-MHz
-
-4 个 E-core 组成一个集群，共享 L2 Cache。而同一 P-core 上的两个逻辑 CPU 则共享更多核心内部资源
-*/
 export namespace runtime {
+
+// ============================================================================
+// Server 运行时配置（WorkerPool V2 与 4P+8E 核绑定默认参数）
+// ============================================================================
+// 目标拓扑（Intel Core i9-14900HX）：
+//   - I/O EventLoop 线程：4 个，绑定至 P-core 偶数逻辑核心 {0, 2, 4, 8}
+//     （对应 SMT siblings {1, 3, 5, 9} 建议压测前由 scripts/smt_ctl.sh 下线或隔离）；
+//   - Worker 线程：8 个，绑定至 E-core 物理核心 {16, 17, 18, 19, 20, 21, 22, 23}
+//     其中 [0, normal_workers) 为 Normal Worker，[normal_workers, 8) 为 Blocking Worker；
+//   - 其余 4P+8E 留给操作系统、Benchmark client 等，Acceptor 与异步 Logger 共享 Worker E-core
+//   集合。
 struct ServerConfig {
-    // 每个 I/O 线程维护自己的 EventLoop。
-    std::size_t io_threads{2};
-    std::size_t worker_threads{2};
+    // 4 个 EventLoop 绑定的 Linux logical CPU ID 列表。
+    std::vector<unsigned> io_cpus{0, 2, 4, 8};
 
-    // WorkerPool 中最多允许排队的任务数。
-    std::size_t max_pending_tasks{4096};
+    // 8 个 Worker 绑定的 Linux logical CPU ID 列表（每个核心独占一个 E-core）。
+    std::vector<unsigned> worker_cpus{16, 17, 18, 19, 20, 21, 22, 23};
 
-    // 验证合法性
+    // Normal Worker 数量 k（1 <= k < worker_cpus.size()）；Blocking Worker 数为 8 - k。
+    std::size_t non_blk_worker_cnt{3};
+
+    // 每条 Per-producer SPSC lane 的槽位容量（2 的幂，>= 2）。
+    // 默认 8 * 4 * 128 = 4096 总容量。
+    std::size_t queue_cap{128};
+
+    // EventLoop 内联处理 Cache Hit 的最大响应阈值（固定 32 KiB）。
+    std::size_t io_inline_threshold{32 * 1024};
+
+    // 是否启用 CPU 拓扑校验与绑核（默认开启；绑核失败明确报错）。
+    bool enable_cpu_affinity{true};
+
+    // 返回 I/O 线程总数。
+    [[nodiscard]] std::size_t inline io_threads_cnt() const noexcept {
+        return io_cpus.size();
+    }
+
+    // 返回 Worker 线程总数（Normal + Blocking）。
+    // 每个 Worker 对应 worker_cpus 中的一个核心，数量直接等于 worker_cpus.size()。
+    [[nodiscard]] std::size_t inline worker_threads() const noexcept {
+        return worker_cpus.size();
+    }
+
+    // 计算 Blocking Worker 数量
+    [[nodiscard]] inline std::size_t blocking_workers() const noexcept {
+        return worker_cpus.size() - non_blk_worker_cnt;
+    }
+
+    // 在启动前做纯数值层面的配置合法性检查（硬件核是否在线由 cpu_affinity 负责检查）。
+    // 【原理】依次检查：
+    //   1. I/O 核非空、Worker 核至少 2 个（保证 Normal 和 Blocking 至少各有 1 个）；
+    //   2. 1 <= k < 总 Worker 数；
+    //   3. 队列容量 >= 2 且是 2 的幂（通过 n & (n - 1) == 0 判断，方便环形队列用位与替代取模）；
+    //   4. 把 io_cpus 和 worker_cpus 合并排序后查相邻元素，确保没有任何 CPU ID 被重复分配。
     void validate() const {
-        if (io_threads == 0) {
-            throw std::invalid_argument("io_threads must be > 0");
+        if (io_cpus.empty())
+            throw std::invalid_argument("io_cpus must not be empty");
+
+        if (worker_cpus.size() < 2)
+            throw std::invalid_argument("worker_cpus must have at least 2 CPUs");
+
+        if (non_blk_worker_cnt < 1 || non_blk_worker_cnt >= worker_cpus.size()) {
+            throw std::invalid_argument("normal_workers must satisfy 1 <= k < worker_cpus.size()");
         }
 
-        if (worker_threads == 0) {
-            throw std::invalid_argument("worker_threads must be > 0");
-        }
+        if (queue_cap < 2 || (queue_cap & (queue_cap - 1)) != 0)
+            throw std::invalid_argument("queue_capacity must be a power of 2 and >= 2");
 
-        if (max_pending_tasks == 0) {
-            throw std::invalid_argument("max_pending_tasks must be > 0");
-        }
+        // 检查配置列表内部及两组之间不存在重复的 logical CPU ID。
+        std::vector<unsigned> all;
+        all.reserve(io_cpus.size() + worker_cpus.size());
+        all.insert(all.end(), io_cpus.begin(), io_cpus.end());
+        all.insert(all.end(), worker_cpus.begin(), worker_cpus.end());
+        std::ranges::sort(all);
+        if (std::ranges::adjacent_find(all) != all.end())
+            throw std::invalid_argument("duplicate CPU ID found across io_cpus and worker_cpus");
     }
 };
 

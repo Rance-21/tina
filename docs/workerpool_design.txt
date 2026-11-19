@@ -1,5 +1,5 @@
 Tina Performance / WorkerPool V2
-实现说明（供 Agent 执行）
+实现说明（已更新为 SPSC 游标缓存 + 批量唤醒 + fetch_add 预留版）
 ============================================================
 
 0. 目标与范围
@@ -7,11 +7,10 @@ Tina Performance / WorkerPool V2
 在现有 Remote IDE RPC Runtime 的基础上改造 WorkerPool。
 不改 RPC 协议、Android 前端、Cache 策略及已有文件一致性语义。
 使用固定 CPU 资源、任务分类、提交阶段主动分流、Per-producer
-SPMC 队列，消除全局任务队列、全局 head/tail 和全局调度锁。
-
-请先阅读本地最新 src/、cpu_info.txt、config.cppm、现有 benchmark
-及 Cache 实现。远端 main 可能落后于本地工作树；不要以旧 KV
-版本覆盖最新 Remote IDE 功能。本文件仅为设计，不是已验证实现。
+SPSC 环形队列矩阵、无 CAS 普通预留与批量按需唤醒，消除全局任务
+队列、全局 head/tail、全局调度锁与冗余 futex 唤醒。
+性能剖析交由外部 perf 工具采集，不在服务端热路径嵌入计时统计，
+不再维护旧版共享队列 WorkerPool。
 
 1. CPU 拓扑与配置
 ------------------------------------------------------------
@@ -19,56 +18,47 @@ SPMC 队列，消除全局任务队列、全局 head/tail 和全局调度锁。
 以下均指 Linux logical CPU ID，而非 lscpu 的 CORE 列编号。
 
 EventLoop：4 个线程，绑定 CPU 0、2、4、8。
-对应 SMT siblings：CPU 1、3、5、9，压测时下线或彻底隔离。
+对应 SMT siblings：CPU 1、3、5、9，压测时由独立脚本下线或彻底隔离。
 Worker：8 个线程，分别绑定 CPU 16~23。
 其余 4P + 8E 留给 Fedora、Benchmark client 等。
-Acceptor、Logger 暂时共享 Tina 的 E-core 集合，不占独立核心。
+Acceptor、Logger 共享 Tina 的 E-core 集合，不占独立核心。
 连接分配沿用单 Acceptor 普通 Round Robin，不加权。
 
 启动前验证 CPU online、affinity mask、SMT sibling/topology。
 不要假定不同机器 CPU 编号相同。绑核失败明确报错。
-Tina 本身不申请 root；SMT 离线与恢复交由独立可选脚本，记录原
-online 状态，仅改动上述 sibling，结束时恢复。taskset/affinity
-不是独占；正式压测尽量通过 cpuset 隔离 server 与 client/系统。
-Git 子进程继承父线程 affinity，保持对照实验一致。
+Tina 本身不申请 root；SMT 离线与恢复交由 scripts/smt_ctl.sh，
+记录原 online 状态，仅改动 1/3/5/9，结束时严格按原状态恢复。
 
-config.cppm 建议默认配置：
+config.cppm 默认配置：
     io_cpus = {0, 2, 4, 8}
     worker_cpus = {16,17,18,19,20,21,22,23}
-    normal_workers = 3             // k
-    blocking_workers = 8 - k      // 派生值，不独立配置
-    queue_capacity = 128           // 每条 lane，2 的幂
-    inline_cache_threshold = 32 * 1024
+    non_blk_worker_cnt = 3         // k
+    blocking_workers() = 8 - k     // 派生值，不独立配置
+    queue_cap = 128                // 每条 SPSC lane，2 的幂
+    io_inline_threshold = 32 * 1024
 
-增加 server 参数 --normal-workers <k>（1 <= k <= 7）。
-默认 k=3；穷举后依据实测决定是否改默认值。
-保留原有 server 参数、默认端口和其他功能，不破坏兼容性。
+支持 server 参数 --normal-workers <k>（1 <= k <= 7），默认 k=3；
+穷举后依据实测决定是否改默认值。保留原有 server 参数与兼容性。
 
 2. 任务分类
 ------------------------------------------------------------
 Inline：ping、目录/小文件 Cache Hit（<= 32 KiB，沿用现有阈值
 判定口径）。直接由原 EventLoop 执行，不进 WorkerPool。
-Normal：>32 KiB 文件 Cache Hit 的响应数据搬运/处理，不做 fork、
-磁盘 I/O 或其他可能长期阻塞的操作。
+Normal：>32 KiB 文件 Cache Hit 的响应数据准备/纯内存工作，不做
+fork、磁盘 I/O 或其他可能长期阻塞的操作。
 Blocking：Cache Miss 后文件系统读写、目录扫描、Git 子进程、
 需要等待的终端/其他阻塞任务。按实际执行路径分类，不只看 method。
 
-32 KiB 是现有实测阈值，本阶段固定，不重新调参。
-大文件仍然缓存，不要将大文件绕过 Cache。
-缓存命中数据必须持有安全生命周期的引用/快照，避免淘汰时 UAF。
-保持现有 revision、inotify、文件写锁及读写顺序要求；不能用
-队列 FIFO 代替业务一致性约束。尤其不能让 inline read 越过
-应先完成的 write 或返回已失效的 Cache。
+32 KiB 固定不调参；大文件仍走 Cache 并通过 shared_ptr 快照保活，
+避免淘汰时 UAF。保持现有 revision、inotify、文件写锁及同连接
+写后读顺序（in-flight write 登记，防止 inline read 越过未完成 write）。
 
 Socket ownership：原 EventLoop 继续拥有 connection/fd、epoll
-注册、发送队列、partial write 和 EPOLLOUT。Normal Worker 处理
-大响应的既有安全 offload 路径；若最终 write/writev 仍由
-EventLoop 调用，则用户态到内核态的实际拷贝仍发生在 EventLoop。
-禁止为实现“搬运到内核”而直接令多个线程并发写同一 socket。
-若最新代码尚无安全的发送所有权交接，本阶段只 offload 响应准备，
-由原 EventLoop 发送，并在实验报告说明这一限制；不擅自重构网络层。
+注册、发送队列、partial write 和 EPOLLOUT。Normal Worker 仅
+offload 响应准备，完成后经 EventLoop::post_task 回所属 I/O 线程发送，
+禁止多线程并发写同一 socket。
 
-3. 队列结构：Per-producer SPMC matrix
+3. 队列结构：Per-producer SPSC 环形队列矩阵（带双端游标缓存）
 ------------------------------------------------------------
 每个 Worker 逻辑上拥有自己的 inbox；按生产者 IO id 拆成 4 lanes。
 
@@ -78,237 +68,142 @@ EventLoop 调用，则用户态到内核态的实际拷贝仍发生在 EventLoop
     ...
     Worker 7        Q[7][0]   Q[7][1]   Q[7][2]   Q[7][3]
 
-总计 32 条独立有界环形队列，每条 128 slots，总容量 4096。
-每条 lane 只由对应的 IO 线程 push。Worker 扫描自己的 4 条 lane，
-按本地轮询游标取任务；成功后从下一条 lane 开始，防止饿死。
-没有全局游标，也没有 Worker -> Worker 任务迁移。
-非 IO 来源的提交不得直接写进其他 IO 的 lane；必须通过合法
-生产者/现有 EventLoop 提交路径或单独明确设计的通道。
+总计 32 条独立有界 SPSC 环形队列，每条 128 slots（2 的幂），总容量 4096。
+每条 lane 严格只有 1 个生产者（对应 IO 线程）和 1 个消费者（所属 Worker），
+彻底移除逐槽位 seq 原子变量与消费者 CAS 轮询循环，全队列 0 次 CAS / RMW。
 
-队列实现采用 SPMC 接口，当前只有 owner Worker 消费，实际使用
-是 SPSC；保留消费者 CAS 以便对照和未来扩展，但不启用跨 inbox
-窃取。不要误称当前队列严格 lock-free；预留后被抢占可影响进度。
-
-核心结构（伪代码，按现有 C++23 Modules 实现）：
-    struct Slot {
-        atomic<uint64_t> seq;
-        Task task;
-    };
-    alignas(64) uint64_t tail = 0;       // 仅 producer 访问
-    alignas(64) atomic<uint64_t> head = 0;
-    alignas(64) array<Slot, Capacity> slots;
-
-Capacity >= 2 且为 2 的幂。初始化 slots[i].seq = i。
-所有 Slot 在启动时一次分配；Task 可以使用 move_only_function<void()>，
-但不保证其捕获对象无堆分配。本阶段不做 Task allocator。
-head/tail/state/wake_epoch 的不同写热点注意 Cache Line 分隔；
-不要盲目给所有 Slot padding，先测 sizeof/false sharing。
-Folly stride 映射可作为之后的对照，不是第一版必要条件。
+核心布局（Cache Line 64B 对齐，消除伪共享）：
+    struct alignas(64) Slot { optional<Task> item; }; // 消除相邻 tail/head 槽位伪共享
+    // 缓存行 0（只读元数据）：capacity_, mask_, slots_
+    // 缓存行 1（生产者独占写热点）：
+    alignas(64) atomic<uint64_t> tail_{0};
+    uint64_t cached_head_{0};          // 仅在 (tail - cached_head_) >= capacity_ 时刷新
+    // 缓存行 2（消费者独占写热点）：
+    alignas(64) atomic<uint64_t> head_{0};
+    uint64_t cached_tail_{0};          // 仅在 head == cached_tail_ 时刷新
 
 try_push(Task&& task)：
-    pos = tail
-    slot = slots[pos & (Capacity-1)]
-    if slot.seq.load(acquire) != pos: return false
-    slot.task = move(task)
-    slot.seq.store(pos+1, release)
-    tail = pos+1
+    t = tail_.load(relaxed)
+    if (t - cached_head_) >= capacity_:
+        cached_head_ = head_.load(acquire)
+        if (t - cached_head_) >= capacity_: return false  // 失败不移动/消耗 task
+    slots_[t & mask_].item.emplace(move(task))
+    tail_.store(t + 1, release)
     return true
 
-try_pop(Task& task)：
-    pos = head.load(relaxed)
-    loop:
-        slot = slots[pos & (Capacity-1)]
-        seq = slot.seq.load(acquire)
-        diff = signed_modular_difference(seq, pos+1)
-        if diff == 0:
-            if head.CAS_weak(pos, pos+1, relaxed):
-                task = move(slot.task)
-                slot.seq.store(pos+Capacity, release)
-                return true
-            // CAS 失败会更新 pos，重新检查
-        else if diff < 0:
-            return false
-        else:
-            pos = head.load(relaxed)
+try_pop(Task& out)：
+    h = head_.load(relaxed)
+    if h == cached_tail_:
+        cached_tail_ = tail_.load(acquire)
+        if h == cached_tail_: return false
+    out = move(*slots_[h & mask_].item)
+    slots_[h & mask_].item.reset()     // 立即释放槽位内捕获对象
+    head_.store(h + 1, release)
+    return true
 
-seq 表示本轮可写/可读/已释放状态。使用 uint64_t 模运算处理
-计数回绕；差值比较须有明确的半区间假设，不能引入 signed overflow。
-Task move 必须 noexcept；成功发布前不能抛异常造成永久空洞。
-失败入队不得移动/消耗 task，便于尝试其他 lane。
-tail 非原子仅限唯一生产者私有访问，其他线程不可直接读取。
-消费者 CAS 负责唯一领取，seq acquire/release 负责 Task 的发布及
-槽位回收。不能只用 head/tail 推断 Task 已经就绪。
-不追求全局 FIFO；只保证单 lane 领取顺序。任务完成顺序由现有
-RPC request_id 和业务同步机制处理。
+使用 uint64_t 无符号差值与 2 的幂位与，天然支持跨 UINT64_MAX 回绕。
+Worker 按线程私有轮询游标扫描 4 条 lane，取到后移向下一条，防止高负载
+单 lane 饿死其他 lane。无全局游标，无 Worker -> Worker 任务迁移。
 
-4. Dispatcher：提交阶段主动借用
+4. Dispatcher：提交阶段主动借用与无 CAS 普通预留
 ------------------------------------------------------------
-Dispatcher 不创建线程，是 4 个 IO 线程调用的模块。
-不加全局 mutex，不做 Worker 主动窃取、不迁移已经入队的任务。
-Normal Worker [0,k)，Blocking Worker [k,8)。
+Dispatcher 不创建线程，是 4 个 IO 线程直接调用的无锁分诊台。
+Normal Worker [0, k)，Blocking Worker [k, 8)。
 
-每个 Worker 独立、Cache Line 对齐的原子 state：
-    bit 63 = idle_advertised
-    bit 0~62 = outstanding（reserved + queued + running）
-另设独立 wake_epoch（见第 5 节）。
+每个 Worker 独立、64B Cache Line 隔离的原子 state：
+    bit 63     = kIdleBit（已宣告空闲可借用）
+    bit 0~62   = outstanding（reserved + queued + running 任务总数）
 
-outstanding 不是纯 pending；正在等待 Git/disk 的 Worker 即使
-queue empty，也仍然是 busy。负载统计可用 relaxed，但不能使用
-非 atomic 共享计数，也不能让近似值承担正确性保证。
+新语义：允许 kIdleBit 与 outstanding > 0 同时存在：
+    state == kIdleBit               : 已宣告空闲，允许借用
+    state == (kIdleBit | count>0)   : 已有任务预留，不可借用
+    state == count (> 0)            : 正在工作，不可借用
+    state == 0                      : 空载尚未挂牌，不可借用
 
-状态不变量：count > 0 时 idle bit 必须为 0。
-Worker 只有在 count==0 且没有可取任务时，以 CAS 从 0 -> IDLE
-宣告可借用；IDLE 只是进入可休眠阶段，不要求已在内核睡眠。
-普通提交使用 CAS 同时清 idle bit 并加 count；不允许先发布 Task
-再增加 count，也不要无条件 fetch_add 保留 idle bit。
-Normal 借用 Blocking Worker 只允许 CAS(IDLE, 1) 成功。
-多个 IO 同时借用同一个 Worker 时只允许一个成功。
-任务实际执行结束（含异常处理）后 fetch_sub(1, relaxed)。
-入队失败也必须撤回 reservation（fetch_sub）；唤醒 epoch 更新
-见第 5 节。不允许下溢、双减、漏减。
+关键操作：
+  1. 普通 Normal / Blocking 预留：无需 CAS 自旋，直接单条 wait-free：
+       slot.state.fetch_add(1, seq_cst);
+     即使此时 bit 63 为 1，加 1 后变为 (kIdleBit | 1) != kIdleBit，
+     立刻自动阻止其他 IO 借用该 Worker。
+  2. 仅借用空闲 Blocking Worker 时使用精确 CAS：
+       uint64_t expected = kIdleBit;
+       slot.state.compare_exchange_strong(expected, 1, seq_cst, relaxed);
+     保证多个 IO 并发借用同一 IDLE Blocking Worker 时至多 1 人成功。
+  3. Worker 开始执行任务前，按需清除 kIdleBit（稳态连续执行时位已为 0，零写开销）：
+       if (slot.state.load(relaxed) & kIdleBit)
+           slot.state.fetch_and(kCountMask, seq_cst);
+  4. 任务执行结束（含异常 RAII 守卫）或入队失败回滚时：
+       slot.state.fetch_sub(1, acq_rel);
 
 分配策略：
-    Blocking:
-        只在 Blocking Worker 中选 outstanding 最小者。
-    Normal:
-        在 Normal Worker 中找 outstanding 最小者。
-        如果存在空闲 Normal（count==0），优先正常分配。
-        如果全部 Normal 忙，优先尝试借用 IDLE Blocking Worker。
-        借用失败或不存在空闲 Blocking，则选最轻的 Normal。
-    同等负载用每个 IO 私有的 round-robin 起点打散竞争。
-    不扫描每个 slot，只扫描 8 个 Worker 状态（固定小规模）。
+    Blocking：只在 Blocking Worker [k, 8) 中选 outstanding 最小者。
+    Normal：先在 Normal Worker [0, k) 找最轻者；若 count==0 直接选用；
+            若全忙则扫描 Blocking 区寻找 state == kIdleBit 尝试借用；
+            借用失败或无空闲 Blocking 时，退回最轻 Normal Worker。
+    同等负载用每个 IO 私有（64B 对齐）的 round-robin 游标打散竞争。
 
-try_submit(io_id, type, task)：
-    读状态，选候选 Worker
-    CAS reserve（借用时必须精确满足 IDLE）
-    尝试 Q[worker_id][io_id].try_push(move(task))
-    成功：发布后唤醒，返回 true
-    失败：撤销 reservation，通知 epoch，尝试其他合法候选
-    有限次重试后返回 overload/false，交由现有背压机制处理
-
-禁止 IO 跑无限 CAS 重试、阻塞等 slot、同步等待 Worker。
-不得把普通任务无限塞给 Blocking Worker；每次借用仅允许一个
-已宣告空闲的 Worker 接一个 Normal Task。之后 Blocking Task
-可正常提交；不承诺抢占已执行的 Normal。
-队列满不等于整个池满；允许尝试其他合法 Worker。
-不要动态增减线程，不做 weighted dispatch，不引进复杂全局统计。
-若普通任务负载预测不准，这是启发式策略，需 benchmark 证明。
-
-5. Worker 获取任务、休眠、退出
+5. Worker 执行、批量合并唤醒、按需休眠与优雅退出
 ------------------------------------------------------------
-每个 Worker round-robin 扫描自己的四条 lane，取到 Task 后执行，
-执行结束才减少 outstanding；不得持队列资源执行 task。
-任务错误要生成现有错误响应或按现有机制处理，并保证计数回收。
-Blocking Worker 可执行借用来的 Normal；Normal Worker 绝不执行
-Blocking。任务一旦成功入队，不再重新分配。
+每个 Worker 拥有独立 64B 缓存行的 atomic<uint64_t> wake_epoch：
+    bit 0      = kSleepingBit（Worker 准备休眠前置 1，被唤醒或退出休眠时清 0）
+    bit 1~63   = 单调递增唤醒纪元（步长 kEpochStep = 2）
 
-第一版用每 Worker 独立的 atomic<uint64_t> wake_epoch 与
-atomic::wait / notify_one；不做自适应 spin 或复杂 futex。
-wake_epoch 与队列发布是独立同步：每次成功 enqueue 后一定
-fetch_add(1, release) + notify_one。失败 reservation 被撤销时
-同样通知（可能有 Worker 等待该 reservation 被完成）。
-shutdown 时也增加 epoch 并通知全部目标 Worker。
+批量合并唤醒（SubmitBatchGuard）：
+  - 每个 IO 线程的私有 IoDispatchContext 维护 pending_wake_mask（uint64_t 位图）
+    和 batch_depth；
+  - 在一轮 conn->read() 或 inotify 批次外层挂 RAII SubmitBatchGuard：
+    期间每次 SPSC try_push 成功只需 1 条本地位或指令标记目标 Worker，
+    不碰 wake_epoch、不做栅栏、不调 notify_one()；
+  - 离开作用域时（flush_submit_batch），若位图非空，整批仅执行 1 次
+    atomic_thread_fence(seq_cst)，再用 countr_zero 遍历触达的 Worker，
+    且仅当目标挂有 kSleepingBit 时才 CAS 清除睡眠位、纪元 +2 并调 notify_one()；
+    已经在干活的 Worker 全程 0 次 futex 通知、0 次 wake_epoch 写争用。
 
-休眠循环参考：
-    epoch = wake_epoch.load(acquire)    // 必须在扫描之前取快照
-    if any lane has task: execute, continue
-    if shutdown && no accepted/reserved work: exit
-    if state == 0: CAS(0, IDLE)          // 宣告可借用
-    再扫一次自己的 lane，检查退出条件
-    if no task:
-        wake_epoch.wait(epoch, acquire)
-    // 回到循环重新验证队列、状态和停止条件
+Worker 主循环（热路径 0 睡眠检查、冷路径 Dekker 双栅栏防丢唤醒）：
+    loop:
+      if pop_from_lanes(task):
+          if (state.load(relaxed) & kIdleBit) state.fetch_and(kCountMask, seq_cst)
+          execute(task) + CountGuard::fetch_sub(1, acq_rel)
+          continue
+      if stopping && (state & kCountMask) == 0: return
+      if !stopping && state == 0: CAS(0, kIdleBit)
+      parked = wake_epoch.fetch_or(kSleepingBit, acq_rel) | kSleepingBit
+      atomic_thread_fence(seq_cst)           // 与生产者 flush 栅栏配对，杜绝丢唤醒
+      if pop_from_lanes(task): clear_sleeping_bit(); execute; continue
+      if stopping && (state & kCountMask) == 0: clear_sleeping_bit(); return
+      wake_epoch.wait(parked, acquire)
+      clear_sleeping_bit()
 
-重点：如果 outstanding>0 但暂时取不到任务，可能生产者已 reserve
-尚未 publish；可以等待 epoch，但不能把它当空闲可借用。
-如果 enqueue 恰好发生在 wait 之前，epoch 改变使 wait 不睡死。
-不可单凭 idle bit 决定是否通知，除非后续单独证明不会 lost wakeup。
-不要用空队列直接判断 shutdown；关闭提交后等待所有已接受任务及
-reservation 完成（保持原有 graceful shutdown 顺序）。
-先停止/冻结 IO 请求提交，再关闭 WorkerPool admission、排空任务，
-最后让 IO 发送完成的响应并回收。队列和 Connection 生命周期需安全。
-所有加入池的 task 要恰好执行一次或按现有取消协议明确终结，
-禁止静默丢弃。启动失败应回收已创建线程。
+五阶段优雅停机保持不变：停监听 -> 冻结 IO 读与新提交 -> shutdown 排空
+WorkerPool（含已预留未发布任务）-> 等待发完响应（超时强关）-> join IO 线程。
 
-6. 模块与实现顺序
+6. 模块清单与验证测试
 ------------------------------------------------------------
-建议文件（若本地目录结构变化，按同等职责调整）：
+核心文件（C++23 Modules，单文件 <= 500 行，无额外第三方依赖）：
     src/runtime/config.cppm
     src/runtime/cpu_affinity.cppm
-    src/runtime/spmc_queue.cppm
+    src/runtime/spsc_queue.cppm
     src/runtime/dispatcher.cppm
     src/runtime/worker_pool.cppm
 
-使用 C++23 Modules，不新增 .h/.hpp，不引入 Folly 等大型依赖。
-先独立实现/测试队列，再接入 WorkerPool，接入 RPC 分类与 Cache
-Fast Path，最后绑核、压测。避免无关重构。
-保留基线/旧版测试方式，便于 A/B。实际签名应适配最新代码，
-本文伪代码不是可直接复制编译的完整实现。
+正确性与回归测试：
+    - test/spsc_queue.cpp          : 容量 2/4/128、绕环/游标缓存、满队不消耗 task、
+                                     UINT64_MAX 回绕、高并发 1P1C 严格 FIFO 与对象析构
+    - test/worker_pool.cpp         : 拓扑与 SMT 冲突检测、4 IO 批量唤醒并发混合提交、
+                                     kIdleBit|count 禁借与 Worker 懒清除、精准借用 CAS、
+                                     满队回滚与异常自愈、延迟发布与 shutdown 竞态、lane 公平性
+    - test/queue_microbench.cpp    : 对比 mutex+deque 与 SpscQueue128 / WorkerPool V2 (SPSC+Batch)
+    - test/workerpool_integration.py: 端到端回归（Inline/Normal/Blocking、inotify、读写顺序、SIGTERM）
+    - ASAN+UBSAN 与 TSAN 分别验证零内存错误与零数据竞争。
 
-正确性测试：
-    queue 容量 2/4/128，绕环、满/空、失败后 task 仍有效；
-    单 producer 多 consumer，唯一 ID 验证无重复、无丢失；
-    4 IO 并发提交，所有 Worker 均能唤醒，idle 借用 CAS 冲突；
-    reserve 后延迟 publish，满队列 rollback，shutdown race；
-    Blocking 忙时 pending=0 不得被误借用；
-    每 lane 公平轮询、跨池禁止方向、文件读写顺序和缓存一致性；
-    连接断开、任务异常、服务退出、慢客户端。
-    能运行 TSAN/ASAN 时分别验证；报告任何工具链限制。
-    用独立 queue microbenchmark 对比旧 mutex+deque 和新队列，
-    但不把 microbenchmark 提升当作端到端 RPC 提升。
-
-7. Parameter sweep / benchmark
+7. Parameter sweep / benchmark（配合外部 perf）
 ------------------------------------------------------------
-在本地最新版本构建并运行；每次重启 Server，改变 k，其他不变。
+使用 scripts/sweep_normal_workers.sh 在固定 4P+8E 下交错穷举 k=1..7：
 
     ./tina server 3490 --normal-workers <k>
-    ./tina_bench --workload ide_mixed --port 3490 --connections 4 --inflight 64
+    taskset -c 6,10,12,14,24-31 ./tina_bench --workload ide_mixed --port 3490 --connections 4 --inflight 64
 
-k=1,2,3,4,5,6,7，分别对应 1:7 到 7:1。
-默认测试：10s warmup + 50s measure；若 benchmark CLI 已有参数，
-复用实际参数，不臆造选项。确认 inflight 在现有实现中的含义。
-Agent 在可访问实机时直接跑 sweep，若环境没有该 CPU/benchmark/
-workspace，则不要伪造最佳 k，提供可在 Fedora 本地执行的脚本。
-脚本仅结束自己创建的 server PID，使用 readiness check、trap、
-记录退出状态；不要杀掉占用端口的其他进程。
-
-固定以下条件：4P+8E、SMT 策略、server/client CPU 集合、供电/
-频率策略、Cache 32 KiB 阈值、请求比例和 seed、预热、连接数、
-inflight、测试时长。每轮 Cache 初始状态一致；沿用现有混合
-workload 清理规则，保证 Linux 内核项目在 write/rm/touch 后不变。
-若存在 4 条 TCP 连接，确认普通 RR 使其覆盖 4 个 EventLoop。
-先测旧共享队列同样 4P+8E 基线；再测 V2 7 种 k。
-为减少热漂移可交错运行 k 顺序并对候选前三重复 >=3 次。
-记录全部原始输出，失败/超时/拒绝率不隐藏。
-
-保留现有 tina_bench 输出格式，附加（能可靠采集时）：
-    k, QPS, throughput bytes/s
-    overall and per-class p50/p95/p99（含 Inline/Normal/Blocking）
-    成功率、overload、timeout、错误数
-    每 Worker busy ratio、executed count、peak outstanding
-    borrow count、queue full count、dispatch retry count
-    dispatch time / queue wait time（采样或低开销 thread-local 统计）
-    可选 perf: task-clock, cycles, instructions, context-switches,
-               cpu-migrations, 分核心 PMU
-不要在热路径加入全局 atomic 统计热点；区分统计开关与最终性能。
-选择最佳 k：在无正确性错误、拒绝/超时率可比、各类 P99 无明显
-退化的候选中优先看 QPS；若有吞吐/延迟冲突，保留 Pareto 候选，
-报告取舍，不以全局 QPS 一项强行宣称最优。给出环境及误差范围。
-
-8. 参考（仅借鉴设计，不要求照搬代码）
-------------------------------------------------------------
-Meta Folly MPMCQueue:
-https://github.com/facebook/folly/blob/main/folly/MPMCQueue.h
-    有界槽位、ticket/turn、stride、缓存行与等待机制。
-Meta Folly TurnSequencer:
-https://github.com/facebook/folly/blob/main/folly/detail/TurnSequencer.h
-    独立槽位的轮次与 acquire/release 同步；本阶段不复刻 futex。
-moodycamel ConcurrentQueue:
-https://github.com/cameron314/concurrentqueue
-    Per-producer subqueue，避免生产者共享 tail；不导入库。
-Vyukov bounded MPMC:
-https://www.1024cores.net/home/lock-free-algorithms/queues/bounded-mpmc-queue
-    seq 环形槽位及消费者 CAS；本方案只保留单生产者的私有 tail。
-
-验收产物：可编译实现、队列/调度正确性测试、k sweep 脚本与
-真实 benchmark 结果（有实机时），注明实际改动、局限和最终 k。
+可选传入 --perf 使用 perf stat 采集服务端硬件与调度事件（task-clock、cycles、
+instructions、context-switches、cpu-migrations、cache-misses），压测端自动输出
+总体与分类（Inline / Normal / Blocking）P50/P95/P99 延迟并汇总为 CSV。
+脚本通过端口占用检查、readiness check 与 trap 保障进程安全，绝不误杀无关进程。

@@ -57,8 +57,19 @@ class Connection {
     //      - 返回 false（慢路径，如缓存未命中需读盘、切片超出阈值或写/终端/Git 请求）：
     //        检查在途请求数未超 max_inflight (64) 后投递给 WorkerPool 异步处理，并递增 pending_。
     // 返回 false 表示协议非法、在途并发超限、发送缓冲满、Worker 队列满或 EOF 时残留半包，调用方将关闭连接。
+    // 【作用】read() 兼容重载：无需内联响应后置钩子时，转发到三参数版本。
     template <typename FastHandle, typename Submit>
     bool read(FastHandle &&fast_handle, Submit &&submit) {
+        return read(std::forward<FastHandle>(fast_handle), [](const Frame &) {},
+                    std::forward<Submit>(submit));
+    }
+
+    // 【作用】三参数版 read()：在内联快路径响应成功入队 output_ 后，回调 on_inline_enqueued
+    //         （例如目录缓存内联命中后顺手在当前 I/O 线程注册 DirWatcher 的 inotify 监听）。
+    // 【原理】单次最多 recv 8 轮防饿死其他连接；每拆出一帧完整请求先试 fast_handle，命中直接入队并触发
+    //         on_inline_enqueued；未命中则检查在途数上限 max_inflight 后交给 submit 异步提交并 ++pending_。
+    template <typename FastHandle, typename OnInlineEnqueued, typename Submit>
+    bool read(FastHandle &&fast_handle, OnInlineEnqueued &&on_inline_enqueued, Submit &&submit) {
         if (draining_)
             return true;
 
@@ -84,6 +95,7 @@ class Connection {
                 if (fast_handle(*request)) {
                     if (!enqueue_direct_response(*request))
                         return false;
+                    on_inline_enqueued(*request);
                     continue;
                 }
                 if (pending_ >= max_inflight || !submit(std::move(*request)))
@@ -139,13 +151,48 @@ class Connection {
         output_.write(socket_);
     }
 
+    // 【作用】检查当前连接上是否还有尚未完成的同路径写请求（workspace_write_file）。
+    // 【原理】Connection 只在所属单个 I/O 线程访问（无需加锁）；绝大多数时候 inflight_writes_ 为空，
+    //         直接一次 empty() 判断返回 false，避免内联 read 越过同连接已提交的 write 读到旧缓存。
+    [[nodiscard]] bool has_inflight_write(std::string_view path) const noexcept {
+        return std::ranges::any_of(inflight_writes_,
+                                   [&](const auto &item) { return item.path == path; });
+    }
+
+    // 【作用】登记一条已成功提交到 WorkerPool 的写文件请求。
+    // 【原理】把 (request_id, path) 追加到本连接私有 vector，等待响应返回时按 request_id 核销。
+    void track_inflight_write(std::uint64_t request_id, std::string_view path) {
+        inflight_writes_.push_back(InflightWrite{
+            .request_id = request_id,
+            .path = std::string(path),
+        });
+    }
+
+    // 【作用】在写文件响应回到 I/O 线程时撤销对应的在途写登记。
+    // 【原理】按 request_id 找到记录后与末尾元素交换并 pop_back()（O(1) 删除，无需维持顺序）。
+    void finish_inflight_write(std::uint64_t request_id) noexcept {
+        for (auto it = inflight_writes_.begin(); it != inflight_writes_.end(); ++it) {
+            if (it->request_id == request_id) {
+                *it = std::move(inflight_writes_.back());
+                inflight_writes_.pop_back();
+                return;
+            }
+        }
+    }
+
   private:
+    struct InflightWrite {
+        std::uint64_t request_id{0};
+        std::string path;
+    };
+
     static constexpr std::size_t max_inflight = 64;
     static constexpr std::size_t max_output = 4 * 1024 * 1024;
 
     net::Socket socket_;
     net::Buffer input_;
     net::FrameSendQueue output_;
+    std::vector<InflightWrite> inflight_writes_;
 
     // 已提交、但尚未收到业务执行结果的 RPC 数量。
     std::size_t pending_{0};

@@ -149,6 +149,47 @@ target_link_libraries(test_workspace_cache PRIVATE
 )
 add_test(NAME workspace_cache COMMAND test_workspace_cache)
 
+add_executable(test_spsc_queue test/spsc_queue.cpp)
+set_target_properties(test_spsc_queue PROPERTIES CXX_MODULE_STD ON)
+target_sources(test_spsc_queue
+    PRIVATE
+    FILE_SET CXX_MODULES
+    FILES src/runtime/spsc_queue.cppm
+)
+target_link_libraries(test_spsc_queue PRIVATE Threads::Threads)
+add_test(NAME spsc_queue COMMAND test_spsc_queue)
+
+add_executable(test_worker_pool test/worker_pool.cpp)
+set_target_properties(test_worker_pool PROPERTIES CXX_MODULE_STD ON)
+target_sources(test_worker_pool
+    PRIVATE
+    FILE_SET CXX_MODULES
+    FILES
+        src/runtime/config.cppm
+        src/runtime/cpu_affinity.cppm
+        src/runtime/spsc_queue.cppm
+        src/runtime/dispatcher.cppm
+        src/runtime/worker_pool.cppm
+        src/runtime/log.cppm
+)
+target_link_libraries(test_worker_pool PRIVATE Threads::Threads spdlog::spdlog)
+add_test(NAME worker_pool COMMAND test_worker_pool)
+
+add_executable(queue_microbench test/queue_microbench.cpp)
+set_target_properties(queue_microbench PROPERTIES CXX_MODULE_STD ON)
+target_sources(queue_microbench
+    PRIVATE
+    FILE_SET CXX_MODULES
+    FILES
+        src/runtime/config.cppm
+        src/runtime/cpu_affinity.cppm
+        src/runtime/spsc_queue.cppm
+        src/runtime/dispatcher.cppm
+        src/runtime/worker_pool.cppm
+        src/runtime/log.cppm
+)
+target_link_libraries(queue_microbench PRIVATE Threads::Threads spdlog::spdlog)
+
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 add_test(
@@ -160,6 +201,19 @@ add_test(
 )
 
 set_tests_properties(rpc_integration PROPERTIES
+    TIMEOUT 20
+    RUN_SERIAL TRUE
+)
+
+add_test(
+    NAME workerpool_integration
+    COMMAND
+        "${Python3_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/test/workerpool_integration.py"
+        "$<TARGET_FILE:tina>"
+)
+
+set_tests_properties(workerpool_integration PROPERTIES
     TIMEOUT 20
     RUN_SERIAL TRUE
 )
@@ -193,6 +247,7 @@ target_sources(tina_bench
         benchmark/workload.cppm
         benchmark/client.cppm
         benchmark/mixed_fixture.cppm
+        benchmark/mixed_stats.cppm
         benchmark/ide_mixed.cppm
         src/service/workspace_cache.cppm
         src/service/workspace_cache_lru.cppm

@@ -109,8 +109,12 @@ void DirWatcher::on_event(net::EpollEvent event) {
             changed_wds.insert(wd);
     }
 
-    for (int wd : changed_wds)
-        schedule_refresh(wd);
+    if (!changed_wds.empty()) {
+        // 本轮 inotify 可能同时命中多个目录变更，使用批量守卫合并唤醒沉睡 Blocking Worker。
+        runtime::WorkerPool::SubmitBatchGuard wake_batch(workers_, io_id_);
+        for (int wd : changed_wds)
+            schedule_refresh(wd);
+    }
 }
 
 // 把目录扫描扔到 Worker 线程
@@ -135,7 +139,7 @@ void DirWatcher::schedule_refresh(int wd) {
     const std::string rel_path = entry.rel_path;
     std::weak_ptr<DirWatcher> weak = shared_from_this();
 
-    if (!workers_.try_submit([weak, wd, rel_path]() {
+    if (!workers_.try_submit(io_id_, runtime::TaskClass::blocking, [weak, wd, rel_path]() {
             auto event_frame = server::build_workspace_list_dir_event(rel_path);
             if (auto self = weak.lock()) {
                 (void)self->loop_.post_task(

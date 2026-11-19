@@ -11,6 +11,7 @@ import net.epoll;
 import net.event_loop;
 import runtime.worker_pool;
 import rpc.connection;
+import rpc.task_classifier;
 import ide.protocol;
 import ide.server;
 import ide.server_git;
@@ -27,16 +28,17 @@ export struct KvState {
     service::KvService service;
 };
 
+// 绑定到单个 EventLoop（单一 I/O 线程）的分流运行时上下文。
+export struct IoDispatchView {
+    std::size_t io_id{0};
+    std::size_t inline_cache_threshold{32 * 1024};
+};
+
 namespace {
 
-// 根据连接当前状态计算下一次 epoll 需要监听的事件掩码。
-// 分支逻辑：
-//   1. 基础掩码带 EPOLLONESHOT：每次触发事件后内核自动屏蔽该 fd，直到处理完后显式重装。
-//   2. 读分支（!conn.peer_eof() && !conn.draining()）：只要对端未发 FIN
-//   且服务端未停机，就继续监听可读与对端半关闭。
-//   3. 写分支（conn.wants_write()）：【按需挂载】仅当 output_ 仍有未发完的积压数据时才监听
-//   EPOLLOUT，
-//      避免 Socket 长期可写导致 epoll_wait 忙轮询空转。
+// 【作用】根据连接当前读写状态，拼出下一次 epoll_ctl 需要监听的事件掩码。
+// 【原理】始终带上 EPOLLONESHOT 防止多线程误触发；未读到 EOF 且未停机时监听可读/对端关闭；
+//         仅当 output_ 发送队列里还有积压字节时才按需挂上 EPOLLOUT，避免空转唤醒。
 net::EpollInterest interests(const Connection &conn) {
     auto mask = static_cast<net::EpollInterest>(EPOLLONESHOT);
 
@@ -51,15 +53,11 @@ net::EpollInterest interests(const Connection &conn) {
 
 } // namespace
 
-// 在一次读写事件、响应发送或停机冻结后，同步连接的生命周期与 epoll 监听状态（仅限所属 I/O
-// 线程调用）。 分支逻辑：
-//   1. conn->finished() 为 true：已停止读新请求、无在途 Worker 任务且 output_ 已排空 ->
-//   立即关闭并销毁连接。
-//   2. 已停止读（peer_eof 或 draining）且当前无待发数据（!wants_write），但仍有在途 Worker
-//   任务（pending_ > 0）：
-//      此时无需监听任何 Socket 事件，直接返回等待 Worker 算完后通过 post_task 回调
-//      complete_response 即可。
-//   3. 常规情况：调用 modify_event 重新激活 EPOLLONESHOT 并更新读写监听掩码。
+// 【作用】在每次读写、响应回传或停机冻结后，统一更新连接的关闭状态与 epoll 监听掩码（仅所属 I/O 线程调用）。
+// 【原理】
+//   1. 已满足关闭条件（conn->finished()）：直接摘除 epoll 并销毁连接；
+//   2. 已停读且当前无待发数据（还有在途 Worker 任务）：静默等待 Worker 回调，无需挂任何 socket 事件；
+//   3. 其余常规状态：调用 modify_event 重新武装 EPOLLONESHOT 与最新读写掩码。
 export void refresh_connection(net::EventLoop &loop, ConnectionMap &connections,
                                ConnectionCounter &counter,
                                const std::shared_ptr<Connection> &conn) {
@@ -74,43 +72,39 @@ export void refresh_connection(net::EventLoop &loop, ConnectionMap &connections,
     loop.modify_event(conn->fd(), interests(*conn));
 }
 
-// 创建绑定在本 I/O 线程上的 DirWatcher，并注入 refresh_connection 回调。
-export inline std::shared_ptr<service::DirWatcher> make_dir_watcher(net::EventLoop &loop,
-                                                                    ConnectionMap &connections,
-                                                                    runtime::WorkerPool &workers,
-                                                                    ConnectionCounter &counter) {
+// 【作用】为第 io_id 号 I/O 线程创建专属目录变更监听器（DirWatcher）。
+// 【原理】把所属 EventLoop、连接表、WorkerPool、io_id 与 refresh_connection 回调注入 DirWatcher；
+//         后续该线程收到 inotify 目录变更时，将用自己的 io_id 向 Blocking Worker 投递目录重扫任务。
+export inline std::shared_ptr<service::DirWatcher>
+make_dir_watcher(net::EventLoop &loop, ConnectionMap &connections, runtime::WorkerPool &workers,
+                 ConnectionCounter &counter, std::size_t io_id = 0) {
     return std::make_shared<service::DirWatcher>(
-        loop, connections, workers, counter,
+        loop, connections, workers, counter, io_id,
         [&loop, &connections, &counter](const std::shared_ptr<Connection> &conn) {
             refresh_connection(loop, connections, counter, conn);
         });
 }
 
-// 在所属 I/O 线程启动全局 FileWatcher（将文件监听 fd 挂载到 epoll）。
+// 【作用】在所属 I/O 线程启动进程级全局文件监听器（FileWatcher）。
+// 【原理】将全局 FileWatcher 的 inotify_fd 挂进该 EventLoop 的 epoll，用于监听缓存文件的外部改动并触发失效。
 export void start_file_watcher(net::EventLoop &loop) {
     service::global_file_watcher().start(loop);
 }
 
-// 在所属 I/O 线程停止全局 FileWatcher 并释放 inotify 资源。
+// 【作用】在停机阶段停止全局文件监听器并释放内核 inotify 描述符。
+// 【原理】由挂载 FileWatcher 的那个 I/O 线程调用，先摘除 epoll 再 close(inotify_fd)。
 export void stop_file_watcher() noexcept {
     service::global_file_watcher().stop();
 }
 
 namespace {
 
-// Worker 线程执行完业务后，通过 loop.post_task 投递回连接所属 I/O 线程执行的响应收尾函数。
-// 分支逻辑：
-//   1. !weak.lock()：Worker 执行期间连接若已因错误/断开被关闭，则直接丢弃响应。
-//   2. 若本次是成功的 workspace_list_dir 请求，将该目录注册到本 I/O 线程的 DirWatcher。
-//   3. !conn->enqueue_response(response)：核销 pending_ 并将响应编码进 output_；若超 4 MiB
-//   上限则关闭连接。
-//   4. conn->wants_write()：先直接调用一次非阻塞 write() 尝试当场发完。
-//   5. 按需触发 refresh_connection()：
-//      由于 complete_response 由 wake_fd_ 跨线程任务触发（并未消耗 Socket 的 EPOLLONESHOT），
-//      记录入队前的待写状态 had_write：若像 ping 这类小响应在 write() 中当场一次写完，
-//      发送前后 wants_write() 均为 false（状态未变）且连接未到达关闭条件（!conn->finished()），
-//      则内核中原有的 EPOLLONESHOT | EPOLLIN 监听依然有效，直接跳过 refresh_connection()，
-//      省去每次响应不必要触发的 epoll_ctl(EPOLL_CTL_MOD) 系统调用。
+// 【作用】Worker 算完响应后，通过 loop.post_task 切回连接所属 I/O 线程执行的响应发送收尾函数。
+// 【原理】所有对 Socket、Connection::output_ 和 epoll 的操作都必须收敛到所属 I/O 线程串行执行：
+//   1. 先用 weak_ptr 检查连接是否仍存活（执行期间客户端可能已经断开）；
+//   2. 若是写文件响应，撤销同连接上的在途写登记；若是成功的 list_dir / close_dir，同步更新本线程 DirWatcher；
+//   3. 将响应帧入队 output_ 并立刻尝试一次非阻塞 writev()；
+//   4. 仅当连接需要关闭或 wants_write() 状态发生变化时才调用 refresh_connection()，省去冗余 epoll_ctl。
 void complete_response(const std::weak_ptr<Connection> &weak, net::EventLoop &loop,
                        ConnectionMap &connections, ConnectionCounter &counter,
                        const std::shared_ptr<service::DirWatcher> &watcher, Frame &response,
@@ -120,6 +114,9 @@ void complete_response(const std::weak_ptr<Connection> &weak, net::EventLoop &lo
         return;
 
     try {
+        if (response.method == Method::workspace_write_file)
+            conn->finish_inflight_write(response.request_id);
+
         if (!watched_dir.empty() && response.status == Status::ok && watcher) {
             if (response.method == Method::workspace_list_dir)
                 watcher->watch(watched_dir, conn);
@@ -142,10 +139,8 @@ void complete_response(const std::weak_ptr<Connection> &weak, net::EventLoop &lo
     }
 }
 
-// Method 编号采用 16 位位域编码（[15:8] MethodGroup | [7] event_only | [6:0] op）：
-//   1. 先通过 is_event_only_method() 单指令位测试拦截仅限服务端推送的 Event 方法（Bit 7 == 1）。
-//   2. 再通过 method_group() 单指令位与（& 0xFF00）提取高 8
-//   位业务分组，直接由紧凑跳转表路由到对应模块。
+// 【作用】在 Worker 线程内按 Method 的高 8 位分组码把请求路由到对应业务模块。
+// 【原理】先拦截只允许服务端推送的 event_only 方法，再用 method_group() 位与提取模块号做紧凑 switch 跳转。
 void dispatch_request(Frame &request, KvState &kv, std::string &watched_dir,
                       server::TerminalManager *terminal_mgr, int conn_fd) {
     if (is_event_only_method(request.method)) {
@@ -188,21 +183,30 @@ void dispatch_request(Frame &request, KvState &kv, std::string &watched_dir,
     request.payload = "unsupported method";
 }
 
-// Worker 线程实际执行的单次请求处理函数。
-// 分支逻辑：
-//   1. 复用原 Frame 作为响应帧（保留原 method 和 64 位 request_id），将 kind 改为 response。
-//   2. 调用 dispatch_request() 按掩码分发业务；捕获所有异常并转化为错误状态码，绝不让异常逃出
-//   Worker 线程。
-//   3. 业务执行完毕后，通过 loop.post_task 将响应帧投递回所属 I/O 线程执行 complete_response()。
-void handle_request(Frame request, const std::weak_ptr<Connection> &weak, int conn_fd,
-                    net::EventLoop &loop, ConnectionMap &connections, ConnectionCounter &counter,
-                    const std::shared_ptr<KvState> &kv,
+// 【作用】Worker 线程真正执行的单条 RPC 业务处理外壳函数。
+// 【原理】
+//   1. 原地把 request.kind 改成 response（保留原 request_id 和 method）；
+//   2. 若提交阶段已提前抓好了只读缓存快照（> 32 KiB 文件或大目录），直接调用 finish_cached_* 组装响应，
+//      绝不二次查缓存锁也不碰磁盘；否则走 dispatch_request() 执行常规/阻塞业务；
+//   3. 捕获一切异常转成规范 RPC 错误码，最后通过 loop.post_task 把响应帧交回原 I/O 线程发送。
+void handle_request(Frame request, PreparedDispatch prepared, const std::weak_ptr<Connection> &weak,
+                    int conn_fd, net::EventLoop &loop, ConnectionMap &connections,
+                    ConnectionCounter &counter, const std::shared_ptr<KvState> &kv,
                     const std::shared_ptr<service::DirWatcher> &watcher,
                     const std::shared_ptr<server::TerminalManager> &terminal_mgr) {
     request.kind = Kind::response;
     std::string watched_dir;
     try {
-        dispatch_request(request, *kv, watched_dir, terminal_mgr.get(), conn_fd);
+        if (prepared.cached_file) {
+            server::finish_cached_read_file(request, std::move(prepared.cached_file),
+                                             prepared.file_slice_offset, prepared.file_slice_size);
+        } else if (prepared.cached_dir) {
+            watched_dir = std::move(prepared.cached_dir_path);
+            server::finish_cached_list_dir(request, watched_dir, *prepared.cached_dir,
+                                            &watched_dir);
+        } else {
+            dispatch_request(request, *kv, watched_dir, terminal_mgr.get(), conn_fd);
+        }
     } catch (const std::bad_alloc &) {
         request.clear_external_payload();
         request.status = Status::resource_exhausted;
@@ -220,44 +224,53 @@ void handle_request(Frame request, const std::weak_ptr<Connection> &weak, int co
     });
 }
 
-// I/O 线程快路径直发阈值（32 KiB = 2^15 字节；设 0 表示关闭快路径，全部走 WorkerPool）：
-//   - 小于等于 32 KiB（覆盖绝大多数源码文件）：在 I/O 线程直接命中缓存入队 ::writev()，
-//     省去“I/O 线程 -> WorkerPool 任务队列 -> eventfd 跨线程唤醒 -> I/O 线程”的调度与锁开销，
-//     实测纯缓存读可达峰值带宽（~17.3 GiB/s）并显著降低延迟；
-//   - 超过 32 KiB 的大切片：继续交由 WorkerPool 处理，避免长切片写回与背压拖慢同一 I/O 线程上的其他连接。
-inline constexpr std::size_t kIoFastReadThresholdBytes = 32768;
-
-// 将拆包得到的完整请求帧封装为任务提交给 WorkerPool 异步执行。
-bool submit_request(Frame request, const std::weak_ptr<Connection> &weak, int conn_fd,
-                    net::EventLoop &loop, ConnectionMap &connections, runtime::WorkerPool &workers,
+// 【作用】在 I/O 线程将未走内联路径的请求封装成闭包，按分类提交到 WorkerPool V2。
+// 【原理】若请求是 workspace_write_file，先偷看其目标路径；打包闭包后调用 workers.try_submit(io_id, task_class, ...)
+//         进入本 I/O 线程专属无锁 lane；提交成功后立刻在 conn 上登记该在途写路径，防止后续内联读超车。
+bool submit_request(Frame request, PreparedDispatch &prepared, Connection &conn,
+                    const std::weak_ptr<Connection> &weak, int conn_fd, net::EventLoop &loop,
+                    ConnectionMap &connections, runtime::WorkerPool &workers,
                     ConnectionCounter &counter, const std::shared_ptr<KvState> &kv,
                     const std::shared_ptr<service::DirWatcher> &watcher,
-                    const std::shared_ptr<server::TerminalManager> &terminal_mgr) {
-    return workers.try_submit([request = std::move(request), weak, conn_fd, &loop, &connections,
-                               &counter, kv, watcher, terminal_mgr]() mutable {
-        handle_request(std::move(request), weak, conn_fd, loop, connections, counter, kv, watcher,
-                       terminal_mgr);
-    });
+                    const std::shared_ptr<server::TerminalManager> &terminal_mgr,
+                    std::size_t io_id) {
+    const std::uint64_t req_id = request.request_id;
+    std::optional<std::string_view> write_path;
+    if (request.method == Method::workspace_write_file)
+        write_path = peek_write_file_path(request.payload);
+
+    const runtime::TaskClass task_class = prepared.task_class;
+    runtime::PoolTask task = [request = std::move(request), prepared = std::move(prepared), weak,
+                              conn_fd, &loop, &connections, &counter, kv, watcher,
+                              terminal_mgr]() mutable {
+        handle_request(std::move(request), std::move(prepared), weak, conn_fd, loop, connections,
+                       counter, kv, watcher, terminal_mgr);
+    };
+
+    if (!workers.try_submit(io_id, task_class, std::move(task)))
+        return false;
+
+    if (write_path)
+        conn.track_inflight_write(req_id, *write_path);
+    return true;
 }
 
-// 客户端连接在所属 I/O 线程上的 epoll 事件主回调。
-// 分支逻辑：
-//   1. event.error()：Socket 发生底层 EPOLLERR，立即关闭连接。
-//   2. 可读/对端关闭分支：连接未处于半关闭或停机排空时，调用 conn->read() 拆帧：
-//      - 命中 I/O 快路径（<= 32 KiB 的 workspace_read_file 缓存命中）直接在当前线程入队响应，
-//        随后在下方 conn->write() 一次 ::writev() 聚集发出；
-//      - 未命中快路径（缓存未命中、切片 > 32 KiB 或其他业务请求）则提交给 WorkerPool 异步执行。
-//      若帧格式非法、在途请求超限、Worker 队列满、发送上限溢出或 EOF 时残留半包（!ok），立即关闭连接。
-//   3. 可写分支（conn->wants_write()）：将 output_ 中积压的响应数据非阻塞写入内核缓冲区。
-//   4. 末尾调用 refresh_connection()：根据最新状态决定关闭连接、静默等待 Worker 还是重装 epoll
-//   事件。
+// 【作用】单条客户端 TCP 连接在所属 I/O 线程上的 epoll 事件总回调。
+// 【原理】
+//   1. 发生 EPOLLERR 直接清理终端并关闭连接；
+//   2. 可读时调用 conn->read() 逐帧拆包：
+//      - 回调 1（try_inline_or_classify）：判断能否就地内联响应，否则给出 Normal/Blocking 分类与缓存快照；
+//      - 回调 2（on_inline_enqueued）：若目录缓存内联命中并成功入队，顺手在本线程挂上 DirWatcher 监听；
+//      - 回调 3（submit_request）：把非内联请求投递进 WorkerPool 对应 io_id 的队列；
+//   3. 本轮若有待发响应（包括内联直出响应），立即调 conn->write() 用 writev() 一次聚集发出；
+//   4. 末尾调 refresh_connection() 决定关闭连接还是重装 epoll 事件。
 void handle_connection_event(const std::shared_ptr<Connection> &conn,
                              const std::weak_ptr<Connection> &weak, net::EventLoop &loop,
                              ConnectionMap &connections, runtime::WorkerPool &workers,
                              ConnectionCounter &counter, const std::shared_ptr<KvState> &kv,
                              const std::shared_ptr<service::DirWatcher> &watcher,
                              const std::shared_ptr<server::TerminalManager> &terminal_mgr,
-                             net::EpollEvent event) {
+                             IoDispatchView io_view, net::EpollEvent event) {
     const int conn_fd = conn->fd();
     auto close_conn = [&] {
         if (terminal_mgr)
@@ -273,19 +286,33 @@ void handle_connection_event(const std::shared_ptr<Connection> &conn,
     try {
         if (!conn->peer_eof() && !conn->draining() &&
             (event.readable() || event.peer_closed() || event.hangup())) {
-            bool ok = conn->read(
-                [](Frame &request) {
-                    if constexpr (kIoFastReadThresholdBytes > 0) {
-                        if (request.method == Method::workspace_read_file)
-                            return server::try_handle_cached_read_file(request,
-                                                                       kIoFastReadThresholdBytes);
-                    }
-                    return false;
-                },
-                [&](Frame request) {
-                    return submit_request(std::move(request), weak, conn_fd, loop, connections,
-                                          workers, counter, kv, watcher, terminal_mgr);
-                });
+            PreparedDispatch prepared;
+            std::string inline_watched_dir;
+
+            bool ok = false;
+            {
+                // 批量提交/合并唤醒守卫：本轮 conn->read() 可能连续拆包提交几十个请求，
+                // 期间仅在线程私有位图标记目标 Worker，退出作用域时统一做 1 次栅栏并仅唤醒沉睡 Worker。
+                runtime::WorkerPool::SubmitBatchGuard wake_batch(workers, io_view.io_id);
+                ok = conn->read(
+                    [&](Frame &request) {
+                        return try_inline_or_classify(request, *conn,
+                                                      io_view.inline_cache_threshold, prepared,
+                                                      inline_watched_dir);
+                    },
+                    [&](const Frame &response) {
+                        if (!inline_watched_dir.empty() && response.status == Status::ok &&
+                            watcher) {
+                            watcher->watch(inline_watched_dir, conn);
+                        }
+                        inline_watched_dir.clear();
+                    },
+                    [&](Frame request) {
+                        return submit_request(std::move(request), prepared, *conn, weak, conn_fd,
+                                              loop, connections, workers, counter, kv, watcher,
+                                              terminal_mgr, io_view.io_id);
+                    });
+            }
 
             if (!ok) {
                 close_conn();
@@ -303,12 +330,15 @@ void handle_connection_event(const std::shared_ptr<Connection> &conn,
     }
 }
 
-// 在所属 I/O 线程中初始化 Connection 对象、放入本线程连接表并首次注册到 epoll。
+// 【作用】在目标 I/O 线程内正式接管一条刚 accept 的客户端 Socket。
+// 【原理】构造 Connection 放入本线程独占的连接表 connections，再向本线程 epoll 注册可读监听回调，
+//         最后给全局活跃连接计数器加 1；若 epoll 注册失败则回滚 map 条目防泄漏。
 void register_connection(net::Socket socket, net::EventLoop &loop, ConnectionMap &connections,
                          runtime::WorkerPool &workers, ConnectionCounter &counter,
                          const std::shared_ptr<KvState> &kv,
                          const std::shared_ptr<service::DirWatcher> &watcher,
-                         const std::shared_ptr<server::TerminalManager> &terminal_mgr) {
+                         const std::shared_ptr<server::TerminalManager> &terminal_mgr,
+                         IoDispatchView io_view) {
     auto conn = std::make_shared<Connection>(std::move(socket));
     int fd = conn->fd();
     std::weak_ptr<Connection> weak = conn;
@@ -317,9 +347,9 @@ void register_connection(net::Socket socket, net::EventLoop &loop, ConnectionMap
     try {
         loop.add_event(fd, interests(*conn),
                        [conn, weak, &loop, &connections, &workers, &counter, kv, watcher,
-                        terminal_mgr](net::EpollEvent event) {
+                        terminal_mgr, io_view](net::EpollEvent event) {
                            handle_connection_event(conn, weak, loop, connections, workers, counter,
-                                                   kv, watcher, terminal_mgr, event);
+                                                   kv, watcher, terminal_mgr, io_view, event);
                        });
     } catch (...) {
         connections.erase(fd);
@@ -330,7 +360,9 @@ void register_connection(net::Socket socket, net::EventLoop &loop, ConnectionMap
 
 } // namespace
 
-// 创建绑定在本 I/O 线程上的 TerminalManager，并注入向客户端 Connection 推送 Event 帧的回调。
+// 【作用】为单个 I/O 线程创建专属 PTY 终端管理器（TerminalManager）。
+// 【原理】注入事件推送闭包：当本线程上的 PTY 有输出或命令完成时，查本线程连接表找到对应 Connection，
+//         把 Event 帧入队 output_ 并立刻尝试 writev() 发送。
 export std::shared_ptr<server::TerminalManager> make_terminal_manager(net::EventLoop &loop,
                                                                       ConnectionMap &connections,
                                                                       ConnectionCounter &counter) {
@@ -358,17 +390,20 @@ export std::shared_ptr<server::TerminalManager> make_terminal_manager(net::Event
         });
 }
 
-// 由主线程（Acceptor）调用：将新 accept 的客户端 Socket 跨线程投递给选定的 I/O 线程完成注册。
+// 【作用】由主线程（Acceptor）调用：把新接收的客户端 Socket 安全移交给选定的 I/O 线程。
+// 【原理】不跨线程直接改对方 EventLoop 的 epoll/map，而是通过 loop.post_task 投递一个异步任务，
+//         由目标 I/O 线程醒来后在自己线程内执行 register_connection()。
 export bool post_connection(net::Socket socket, net::EventLoop &loop, ConnectionMap &connections,
                             runtime::WorkerPool &workers, ConnectionCounter &counter,
                             std::shared_ptr<KvState> kv,
                             std::shared_ptr<service::DirWatcher> watcher = nullptr,
-                            std::shared_ptr<server::TerminalManager> terminal_mgr = nullptr) {
+                            std::shared_ptr<server::TerminalManager> terminal_mgr = nullptr,
+                            IoDispatchView io_view = {}) {
     return loop.post_task([socket = std::move(socket), &loop, &connections, &workers, &counter,
                            kv = std::move(kv), watcher = std::move(watcher),
-                           terminal_mgr = std::move(terminal_mgr)]() mutable {
+                           terminal_mgr = std::move(terminal_mgr), io_view]() mutable {
         register_connection(std::move(socket), loop, connections, workers, counter, kv, watcher,
-                            terminal_mgr);
+                            terminal_mgr, io_view);
     });
 }
 

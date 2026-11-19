@@ -90,6 +90,80 @@ bool try_handle_cached_read_file(Frame &frame, std::size_t max_slice_bytes) {
                                            max_slice_bytes);
 }
 
+// 缓存探测与分流结果：单次查询同时服务于 I/O 线程内联（<= 32 KiB）与 Normal Worker 大缓存搬运（> 32 KiB）。
+struct CachedReadProbe {
+    enum class Outcome : std::uint8_t {
+        inline_handled, // 命中缓存且切片 <= 阈值，已原地编码为响应帧
+        normal_cached,  // 命中缓存但切片 > 阈值，已持有只读快照，交由 Normal Worker 准备响应
+        blocking_miss,  // 缓存未命中或存在同连接在途写冲突，需交由 Blocking Worker 走磁盘路径
+        invalid_request // 请求参数或相对路径非法，交由 Normal Worker 快速返回参数错误（不碰磁盘）
+    };
+
+    Outcome outcome{Outcome::blocking_miss};
+    std::shared_ptr<const ReadFileResponse> cached;
+    std::size_t slice_offset{0};
+    std::size_t slice_size{0};
+};
+
+// 【作用】在 I/O 线程对 0x0203 (workspace_read_file) 做一次轻量缓存探测并决定分流去向。
+// 【原理】
+//   1. 先零拷贝解码并校验相对路径：非法直接返回 invalid_request（不改 frame，交 Normal 回错）；
+//   2. 若 allow_cache_hit == false（如同连接有同路径在途写）或查表未命中，返回 blocking_miss 交 Blocking 读盘；
+//   3. 若命中缓存且切片大小 <= max_inline_bytes（32 KiB）：原地把 frame 编码为响应并挂载只读快照，返回 inline_handled；
+//   4. 若命中缓存但切片 > 32 KiB：不改 frame，直接把只读 shared_ptr 快照和切片偏移装入结果返回 normal_cached，
+//      这样 Normal Worker 不必二次加锁查表，也不会因为中途 LRU 淘汰而被迫在 Normal 线程读盘。
+CachedReadProbe probe_cached_read_file(Frame &frame, std::size_t max_inline_bytes,
+                                       bool allow_cache_hit = true) {
+    CachedReadProbe res;
+    auto req = decode_workspace_read_file_view(frame.payload);
+    if (!req || !service::file::is_valid_workspace_rel_path(req->path) ||
+        !service::file::has_projects_root_env()) {
+        res.outcome = CachedReadProbe::Outcome::invalid_request;
+        return res;
+    }
+
+    if (!allow_cache_hit) {
+        res.outcome = CachedReadProbe::Outcome::blocking_miss;
+        return res;
+    }
+
+    auto cached = service::global_workspace_cache().get_file(req->path);
+    if (!cached) {
+        res.outcome = CachedReadProbe::Outcome::blocking_miss;
+        return res;
+    }
+
+    const auto slice = detail::slice_file_content(*cached, req->offset, req->max_bytes);
+    if (max_inline_bytes > 0 && slice.size() <= max_inline_bytes) {
+        frame.kind = Kind::response;
+        frame.status = Status::ok;
+        encode_workspace_read_file(frame, std::move(cached), slice);
+        res.outcome = CachedReadProbe::Outcome::inline_handled;
+        return res;
+    }
+
+    const std::size_t slice_offset =
+        slice.empty() ? 0 : static_cast<std::size_t>(slice.data() - cached->content.data());
+    res.outcome = CachedReadProbe::Outcome::normal_cached;
+    res.cached = std::move(cached);
+    res.slice_offset = slice_offset;
+    res.slice_size = slice.size();
+    return res;
+}
+
+// 【作用】由 Normal Worker 使用提交阶段捕获的只读文件缓存快照完成 > 32 KiB 响应帧组装。
+// 【原理】直接按 [slice_offset, slice_size] 从不可变 cached->content 切出 string_view，
+//         写入 16 字节元数据头并将 cached 挂入 frame.payload_owner 保活，全程零拷贝、零磁盘 I/O。
+void finish_cached_read_file(Frame &frame, std::shared_ptr<const ReadFileResponse> cached,
+                             std::size_t slice_offset, std::size_t slice_size) {
+    const std::string_view slice =
+        (slice_size == 0)
+            ? std::string_view{}
+            : std::string_view(cached->content).substr(slice_offset, slice_size);
+    frame.status = Status::ok;
+    encode_workspace_read_file(frame, std::move(cached), slice);
+}
+
 // 处理 0x0203 (workspace_read_file)：
 // 按 [offset, maxBytes] 分段读取 UTF-8 文件内容。
 // 优先命中内存缓存（ReadFileResponse），命中时直接切片编码返回，不进入 Linux 文件系统；

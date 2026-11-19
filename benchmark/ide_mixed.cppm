@@ -11,6 +11,7 @@ import bench.client;
 import bench.workload;
 import bench.stats;
 import bench.mixed_fixture;
+import bench.mixed_stats;
 import net.buffer;
 import net.socket;
 import net.epoll;
@@ -59,6 +60,7 @@ struct Pending {
 
 struct Meter {
     Stats stats{1'000'000};
+    ClassLatencyRecorder class_latencies{131072};
     Clock::time_point warmup_end{}, test_end{};
     bool active{};
     std::array<std::uint64_t, 5> completed{};
@@ -76,14 +78,29 @@ struct Meter {
             stats.record_warmup(ok);
             return;
         }
-        const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now - p.sent).count();
+        const auto ns = static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(now - p.sent).count());
         const auto sec = std::chrono::duration_cast<std::chrono::seconds>(now - warmup_end).count();
-        stats.record_measured(ok, static_cast<std::uint64_t>(ns), p.tx, p.rx,
-                              static_cast<std::size_t>(sec));
+        stats.record_measured(ok, ns, p.tx, p.rx, static_cast<std::size_t>(sec));
         if (ok) {
             ++completed[static_cast<std::size_t>(p.op)];
             if (p.expect_entry)
                 ++confirmed_changes;
+            if (p.op == Op::hot) {
+                const auto avail = (p.file_size > p.offset) ? (p.file_size - p.offset) : 0;
+                const auto slice = std::min<std::uint64_t>(avail, p.read_bytes);
+                class_latencies.record(slice <= 32768 ? ClassLatencyRecorder::Bucket::hot_inline
+                                                      : ClassLatencyRecorder::Bucket::hot_normal,
+                                       ns);
+            } else if (p.op == Op::cold) {
+                class_latencies.record(ClassLatencyRecorder::Bucket::cold_read, ns);
+            } else if (p.op == Op::directory) {
+                class_latencies.record(ClassLatencyRecorder::Bucket::directory, ns);
+            } else if (p.op == Op::write) {
+                class_latencies.record(ClassLatencyRecorder::Bucket::file_write, ns);
+            } else if (p.op == Op::terminal) {
+                class_latencies.record(ClassLatencyRecorder::Bucket::terminal, ns);
+            }
         }
     }
 
@@ -567,7 +584,8 @@ class MixedRunner {
                << "  Confirmed Dir Changes  : " << meter.confirmed_changes << "\n"
                << "  Drained After Deadline : " << meter.drained
                << " operations (excluded from QPS/latency)\n"
-               << "  Scratch Cleanup        : verified\n";
+               << "  Scratch Cleanup        : verified\n"
+               << meter.class_latencies.format_summary();
         summary.workload_details = detail.str();
         write_report_file(config_.output_file, summary);
         return summary;

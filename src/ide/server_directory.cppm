@@ -179,6 +179,75 @@ void handle_workspace_list_dir(Frame &frame, std::string *watched_dir = nullptr)
     detail::write_list_dir_response(frame, rel_path, *entries, watched_dir);
 }
 
+// 0x0202 (workspace_list_dir) 缓存探测结果：
+// 区分 I/O 线程直接内联（<= 32 KiB）、Normal Worker 编码大目录快照、以及阻塞扫盘。
+struct CachedListDirProbe {
+    enum class Outcome : std::uint8_t {
+        inline_handled,
+        normal_cached,
+        blocking_miss,
+        invalid_request
+    };
+
+    Outcome outcome{Outcome::blocking_miss};
+    std::shared_ptr<const std::vector<DirEntry>> cached;
+    std::string dir_path;
+};
+
+// 【作用】在 I/O 线程对 0x0202 (workspace_list_dir) 做一次缓存探测并决定走 Inline、Normal 还是 Blocking。
+// 【原理】
+//   1. 零拷贝解码目录路径并查 WorkspaceCache 目录分片；未命中返回 blocking_miss 交 Blocking 扫盘；
+//   2. 命中后先一遍累加预估线上编码字节数并检查 u16 边界：
+//      - 总大小 <= max_inline_bytes（32 KiB）：原地编码进 frame 并把目录路径填入 watched_dir_out，
+//        返回 inline_handled 由当前 I/O 线程直接发出并挂上 DirWatcher；
+//      - 超过 32 KiB：把只读 shared_ptr 目录快照转交给 Normal Worker 编码，避免大目录序列化拖慢 EventLoop。
+CachedListDirProbe probe_cached_list_dir(Frame &frame, std::size_t max_inline_bytes,
+                                         std::string &watched_dir_out) {
+    CachedListDirProbe res;
+    auto req = decode_workspace_list_dir_view(frame.payload);
+    if (!req || !service::file::is_valid_workspace_rel_path(req->path) ||
+        !service::file::has_projects_root_env()) {
+        res.outcome = CachedListDirProbe::Outcome::invalid_request;
+        return res;
+    }
+
+    auto cached = service::global_workspace_cache().get_dir(req->path);
+    if (!cached) {
+        res.outcome = CachedListDirProbe::Outcome::blocking_miss;
+        return res;
+    }
+
+    // 预估线上响应大小并校检 u16 边界，避免对超大目录在内联路径中产生大块拷贝或异常。
+    bool u16_valid = req->path.size() <= std::numeric_limits<std::uint16_t>::max();
+    std::size_t total_bytes = 2 + req->path.size();
+    for (const auto &entry : *cached) {
+        if (entry.name.empty() || entry.name.size() > std::numeric_limits<std::uint16_t>::max()) {
+            u16_valid = false;
+            break;
+        }
+        total_bytes += 1 + 2 + entry.name.size();
+    }
+
+    if (u16_valid && total_bytes <= max_inline_bytes) {
+        frame.kind = Kind::response;
+        detail::write_list_dir_response(frame, req->path, *cached, &watched_dir_out);
+        res.outcome = CachedListDirProbe::Outcome::inline_handled;
+        return res;
+    }
+
+    res.outcome = CachedListDirProbe::Outcome::normal_cached;
+    res.cached = std::move(cached);
+    res.dir_path = std::string(req->path);
+    return res;
+}
+
+// 【作用】由 Normal Worker 使用已捕获的目录只读快照将条目列表编码为响应帧。
+// 【原理】直接复用 detail::write_list_dir_response 原地序列化到 frame.payload 并回传 watched_dir，不碰磁盘。
+void finish_cached_list_dir(Frame &frame, std::string_view dir_path,
+                            const std::vector<DirEntry> &entries, std::string *watched_dir) {
+    detail::write_list_dir_response(frame, dir_path, entries, watched_dir);
+}
+
 // 处理 0x0205 (workspace_close_dir)：
 // 客户端折叠或关闭指定目录时调用，请求与响应负载均为 [u16 pathLength][path bytes]（len + data）。
 // 校验相对目录路径合法后，将目录相对路径写入 *unwatched_dir，供所属 I/O 线程在 DirWatcher 中执行
