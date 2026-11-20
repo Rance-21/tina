@@ -2,6 +2,7 @@ module;
 #include <sys/socket.h>
 #include <sys/uio.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <netdb.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -75,7 +76,7 @@ class Socket {
                 if (p->ai_family != family)
                     continue;
 
-                int fd = ::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+                int fd = ::socket(p->ai_family, p->ai_socktype | SOCK_CLOEXEC, p->ai_protocol);
                 if (fd == -1)
                     continue;
 
@@ -189,6 +190,11 @@ class Socket {
             int client_fd = ::accept4(fd_, nullptr, nullptr, SOCK_NONBLOCK | SOCK_CLOEXEC);
 
             if (client_fd >= 0) {
+                // 开启 TCP_NODELAY 关闭 Nagle：高频小包已由 FrameSendQueue + ::writev()
+                // 在用户态聚合， 关闭 Nagle 可避免响应小包或超出 MSS 的尾部切片触发 40 ms Delayed
+                // ACK 死等。
+                int one = 1;
+                (void)::setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
                 return Socket{client_fd};
             }
 
@@ -268,7 +274,8 @@ class Socket {
     }
 
     // non-blocking writev（聚集写）。
-    // 将分散在多个 iovec 中的数据块（如 17B 帧头 + 协议头 + 零拷贝外置缓存切片）在单次系统调用中写入内核。
+    // 将分散在多个 iovec 中的数据块（如 17B 帧头 + 协议头 +
+    // 零拷贝外置缓存切片）在单次系统调用中写入内核。
     std::optional<std::size_t> inline try_writev(const struct iovec *iov, int iovcnt) const {
         (void)ignore_sigpipe;
         while (true) {

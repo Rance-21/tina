@@ -251,49 +251,73 @@ class Stats {
     std::vector<std::uint64_t> per_second_counts_;
 };
 
+// 【作用】按终端显示宽度（ASCII 占 1 列、UTF-8 中文字符占 2 列）在右侧补齐空格，保证中英混排报表冒号对齐。
+[[nodiscard]] std::string pad_display(std::string_view text, std::size_t target_cols) {
+    std::size_t cols = 0;
+    for (std::size_t i = 0; i < text.size();) {
+        const auto c = static_cast<unsigned char>(text[i]);
+        if (c < 0x80) {
+            cols += 1;
+            i += 1;
+        } else if ((c & 0xE0) == 0xC0) {
+            cols += 1;
+            i += 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            cols += 2;
+            i += 3;
+        } else {
+            cols += 2;
+            i += 4;
+        }
+    }
+    std::string result(text);
+    if (cols < target_cols)
+        result.append(target_cols - cols, ' ');
+    return result;
+}
+
 std::string format_report(const BenchSummary &s) {
     std::ostringstream out;
     out << std::fixed << std::setprecision(2);
+    auto kv = [&](std::string_view label) -> std::ostream & {
+        return out << "  " << pad_display(label, 22) << " : ";
+    };
 
     out << "====================================================================\n";
-    out << "                     Tina RPC Benchmark Report                      \n";
+    out << "                         Tina RPC 压测报告                          \n";
     out << "====================================================================\n\n";
 
-    out << "[1. Test Configuration]\n";
-    out << "  Server Target          : " << s.host << ":" << s.port << "\n";
-    out << "  Workload               : " << s.workload_name << "\n";
-    out << "  TCP Connections        : " << s.connections << "\n";
-    out << "  Max Inflight / Conn    : " << s.max_inflight << "\n";
-    out << "  Total Max Concurrency  : " << (s.connections * s.max_inflight) << "\n";
-    out << "  Total Duration         : " << s.total_seconds << " s\n";
-    out << "  Warmup Duration        : " << s.warmup_seconds << " s\n";
-    out << "  Measured Duration      : " << s.measured_seconds << " s\n\n";
+    out << "[1. 测试配置]\n";
+    kv("目标地址") << s.host << ":" << s.port << "\n";
+    kv("负载类型") << s.workload_name << "\n";
+    kv("TCP 连接数") << s.connections << "\n";
+    kv("单连接最大 Inflight") << s.max_inflight << "\n";
+    kv("总最大并发") << (s.connections * s.max_inflight) << "\n";
+    kv("总时长") << s.total_seconds << " s\n";
+    kv("预热时长") << s.warmup_seconds << " s\n";
+    kv("正式测量时长") << s.measured_seconds << " s\n\n";
 
-    out << "[2. Throughput & Request Summary]\n";
-    out << "  Warmup Completed       : " << s.warmup_completed << " reqs (errors: " << s.warmup_errors
-        << ")\n";
-    out << "  Measured Completed     : " << s.completed << " reqs\n";
-    out << "  Measured Errors        : " << s.errors << " reqs\n";
-    out << "  Success Rate           : " << s.success_rate << " %\n";
-    out << "  Average QPS            : " << s.qps << " req/s\n";
-    out << "  Peak 1s QPS            : " << s.peak_qps << " req/s\n";
-    out << "  Min 1s QPS             : " << s.min_qps << " req/s\n";
-    out << "  TX Throughput          : " << s.tx_mib_per_sec << " MiB/s (" << s.bytes_sent
-        << " bytes)\n";
-    out << "  RX Throughput          : " << s.rx_mib_per_sec << " MiB/s (" << s.bytes_received
-        << " bytes)\n";
-    out << "  Total Bandwidth        : " << s.total_mib_per_sec << " MiB/s\n\n";
+    out << "[2. 吞吐与请求汇总]\n";
+    kv("预热完成数") << s.warmup_completed << " reqs (错误: " << s.warmup_errors << ")\n";
+    kv("测量完成数") << s.completed << " reqs\n";
+    kv("测量错误数") << s.errors << " reqs\n";
+    kv("成功率") << s.success_rate << " %\n";
+    kv("平均 QPS") << s.qps << " req/s\n";
+    kv("峰值 1s QPS") << s.peak_qps << " req/s\n";
+    kv("最低 1s QPS") << s.min_qps << " req/s\n";
+    kv("TX 吞吐") << s.tx_mib_per_sec << " MiB/s (" << s.bytes_sent << " bytes)\n";
+    kv("RX 吞吐") << s.rx_mib_per_sec << " MiB/s (" << s.bytes_received << " bytes)\n";
+    kv("总带宽") << s.total_mib_per_sec << " MiB/s\n\n";
 
-    out << "[3. Latency Distribution (Microseconds / Milliseconds)]\n";
+    out << "[3. 延迟分布 (us / ms)]\n";
     auto print_lat = [&](std::string_view name, double us) {
-        out << "  " << std::left << std::setw(22) << name << " : " << std::right << std::setw(10)
-            << std::fixed << std::setprecision(2) << us << " us  (" << std::setw(8)
-            << std::setprecision(4) << (us / 1000.0) << " ms)\n";
+        kv(name) << std::right << std::setw(10) << std::fixed << std::setprecision(2) << us
+                 << " us  (" << std::setw(8) << std::setprecision(4) << (us / 1000.0) << " ms)\n";
     };
     print_lat("Min", s.min_us);
-    print_lat("Avg (Mean)", s.avg_us);
+    print_lat("Avg", s.avg_us);
     print_lat("StdDev", s.stddev_us);
-    print_lat("P50 (Median)", s.p50_us);
+    print_lat("P50", s.p50_us);
     print_lat("P75", s.p75_us);
     print_lat("P90", s.p90_us);
     print_lat("P95", s.p95_us);
@@ -304,7 +328,7 @@ std::string format_report(const BenchSummary &s) {
     out << "\n";
 
     if (!s.histogram.empty()) {
-        out << "[4. Latency Histogram]\n";
+        out << "[4. 延迟直方图]\n";
         for (const auto &b : s.histogram) {
             out << "  " << b.label << " : " << std::setw(10) << b.count << "  (" << std::setw(6)
                 << std::fixed << std::setprecision(2) << b.percentage << " %)\n";
@@ -313,9 +337,9 @@ std::string format_report(const BenchSummary &s) {
     }
 
     if (!s.per_second_qps.empty()) {
-        out << "[5. Per-Second Measured QPS Timeline]\n";
+        out << "[5. 每秒测量 QPS 曲线]\n";
         for (std::size_t i = 0; i < s.per_second_qps.size(); ++i) {
-            out << "  Sec " << std::setw(2) << (i + 1) << " (t=" << std::setw(2)
+            out << "  第 " << std::setw(2) << (i + 1) << " 秒 (t=" << std::setw(2)
                 << (static_cast<std::size_t>(std::round(s.warmup_seconds)) + i + 1)
                 << "s) : " << std::setw(10) << s.per_second_qps[i] << " req/s\n";
         }
@@ -323,7 +347,7 @@ std::string format_report(const BenchSummary &s) {
     }
 
     if (!s.workload_details.empty())
-        out << "[6. Mixed Workload Details]\n" << s.workload_details << "\n";
+        out << "[6. 混合负载明细]\n" << s.workload_details << "\n";
 
     out << "====================================================================\n";
     return out.str();

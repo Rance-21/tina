@@ -109,14 +109,14 @@ def main():
                     port=port), env=env, capture_output=True, text=True, timeout=30)
                 assert result.returncode == 0, result.stdout + result.stderr
                 report = (home / "report.txt").read_text()
-                assert metric(report, "Measured Errors") == 0
-                assert metric(report, "Measured Duration") == duration - warmup
-                for label in ["Directory read", "File write", "Terminal command", "Confirmed Dir Changes"]:
+                assert metric(report, "测量错误数") == 0
+                assert metric(report, "正式测量时长") == duration - warmup
+                for label in ["目录读取", "文件写入", "终端命令", "已确认目录变更"]:
                     assert metric(report, label) > 0, report
-                assert (metric(report, "Hot-file read") > 0) == (hot > 0), report
-                assert (metric(report, "Uncached-file read") > 0) == (hot < 100), report
-                assert metric(report, "Directory Events") >= metric(report, "Confirmed Dir Changes"), report
-                assert "Scratch Cleanup        : verified" in report
+                assert (metric(report, "热文件读") > 0) == (hot > 0), report
+                assert (metric(report, "冷文件读") > 0) == (hot < 100), report
+                assert metric(report, "目录变更事件") >= metric(report, "已确认目录变更"), report
+                assert "已验证 (源码树未改动)" in report
                 check_unchanged()
                 print(f"PASS hot={hot}% connections={connections} inflight={inflight}", flush=True)
 
@@ -128,7 +128,7 @@ def main():
                                             env=env, stdout=output, stderr=output, text=True)
                     try:
                         deadline = time.monotonic() + 15
-                        while "Starting benchmark" not in log.read_text():
+                        while "开始压测" not in log.read_text():
                             assert proc.poll() is None, log.read_text()
                             assert time.monotonic() < deadline, log.read_text()
                             time.sleep(0.02)

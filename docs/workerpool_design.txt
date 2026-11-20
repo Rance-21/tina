@@ -32,13 +32,13 @@ Tina 本身不申请 root；SMT 离线与恢复交由 scripts/smt_ctl.sh，
 config.cppm 默认配置：
     io_cpus = {0, 2, 4, 8}
     worker_cpus = {16,17,18,19,20,21,22,23}
-    non_blk_worker_cnt = 3         // k
+    non_blk_worker_cnt = 2         // k（经实测穷举定型为 2 Normal + 6 Blocking）
     blocking_workers() = 8 - k     // 派生值，不独立配置
     queue_cap = 128                // 每条 SPSC lane，2 的幂
     io_inline_threshold = 32 * 1024
 
-支持 server 参数 --normal-workers <k>（1 <= k <= 7），默认 k=3；
-穷举后依据实测决定是否改默认值。保留原有 server 参数与兼容性。
+支持 server 参数 --normal-workers <k>（1 <= k <= 7），默认 k=2；
+保留原有 server 参数与兼容性。
 
 2. 任务分类
 ------------------------------------------------------------

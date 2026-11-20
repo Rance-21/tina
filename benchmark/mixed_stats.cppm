@@ -1,6 +1,7 @@
 export module bench.mixed_stats;
 
 import std;
+import bench.stats;
 
 export namespace bench::mixed {
 
@@ -38,12 +39,12 @@ class ClassLatencyRecorder {
     [[nodiscard]] std::string format_summary() const {
         static constexpr std::array<std::string_view, static_cast<std::size_t>(Bucket::count)>
             labels = {
-                "Class Inline (Hot<=32K)",
-                "Class Normal (Hot>32K) ",
-                "Class Blocking (Cold)  ",
-                "Op Directory Read      ",
-                "Op File Write          ",
-                "Op Terminal Command    ",
+                "Inline 热读 (<=32K)",
+                "Normal 热读 (>32K)",
+                "Blocking 冷读 (>2M)",
+                "目录读取 (list_dir)",
+                "文件写入 (fsync)",
+                "终端命令 (PTY)",
             };
 
         std::ostringstream out;
@@ -66,10 +67,10 @@ class ClassLatencyRecorder {
                 return ns / 1000.0;
             };
 
-            out << "  " << labels[i] << ": n=" << std::setw(8) << sorted.size()
-                << " p50=" << std::setw(8) << pct_us(50.0) << "us"
-                << " p95=" << std::setw(8) << pct_us(95.0) << "us"
-                << " p99=" << std::setw(8) << pct_us(99.0) << "us\n";
+            out << "  " << pad_display(labels[i], 22) << " : n=" << std::setw(8) << sorted.size()
+                << " P50=" << std::setw(8) << pct_us(50.0) << "us"
+                << " P95=" << std::setw(8) << pct_us(95.0) << "us"
+                << " P99=" << std::setw(8) << pct_us(99.0) << "us\n";
         }
         return out.str();
     }

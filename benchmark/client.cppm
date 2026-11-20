@@ -301,12 +301,12 @@ class BenchRunner {
         const auto warmup_end = start_time + config_.warmup_duration;
         const auto test_end = start_time + config_.total_duration;
 
-        std::cout << "[BenchRunner] Starting benchmark against " << config_.host << ":"
-                  << config_.port << " | workload=" << workload_name(config_.workload.type)
-                  << " | connections=" << config_.connections
-                  << " | max_inflight=" << config_.max_inflight
-                  << " | warmup=" << config_.warmup_duration.count() << "s"
-                  << " | total=" << config_.total_duration.count() << "s\n"
+        std::cout << "[压测引擎] 开始压测 " << config_.host << ":" << config_.port
+                  << " | 负载=" << workload_name(config_.workload.type)
+                  << " | 连接数=" << config_.connections
+                  << " | 单连接 Inflight=" << config_.max_inflight
+                  << " | 预热=" << config_.warmup_duration.count() << "s"
+                  << " | 总时长=" << config_.total_duration.count() << "s\n"
                   << std::flush;
 
         bool warmup_logged = (config_.warmup_duration.count() == 0);
@@ -319,10 +319,9 @@ class BenchRunner {
 
             if (!warmup_logged && now >= warmup_end) {
                 warmup_logged = true;
-                std::cout << "[BenchRunner] Warmup finished (" << config_.warmup_duration.count()
-                          << "s, " << stats.warmup_completed()
-                          << " reqs). Measuring performance for " << measured_duration.count()
-                          << "s...\n"
+                std::cout << "[压测引擎] 预热完成 (" << config_.warmup_duration.count() << "s, "
+                          << stats.warmup_completed() << " reqs)，开始正式测量 "
+                          << measured_duration.count() << "s...\n"
                           << std::flush;
             }
 

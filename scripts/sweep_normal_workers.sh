@@ -284,15 +284,15 @@ def grab(pattern, default="NA"):
     m = re.search(pattern, text, re.M)
     return m.group(1) if m else default
 
-qps = grab(r"^\s*Average QPS\s*:\s*([0-9.]+)")
-rx = grab(r"^\s*RX Throughput\s*:\s*([0-9.]+)")
-errs = grab(r"^\s*Measured Errors\s*:\s*([0-9.]+)")
-p50 = grab(r"^\s*P50 \(Median\)\s*:\s*([0-9.]+)")
+qps = grab(r"^\s*平均 QPS\s*:\s*([0-9.]+)")
+rx = grab(r"^\s*RX 吞吐\s*:\s*([0-9.]+)")
+errs = grab(r"^\s*测量错误数\s*:\s*([0-9.]+)")
+p50 = grab(r"^\s*P50\s*:\s*([0-9.]+)")
 p95 = grab(r"^\s*P95\s*:\s*([0-9.]+)")
 p99 = grab(r"^\s*P99\s*:\s*([0-9.]+)")
-hot_in_p99 = grab(r"Class Inline \(Hot<=32K\):.*p99=\s*([0-9.]+)us")
-hot_nm_p99 = grab(r"Class Normal \(Hot>32K\)\s*:.*p99=\s*([0-9.]+)us")
-cold_p99 = grab(r"Class Blocking \(Cold\)\s*:.*p99=\s*([0-9.]+)us")
+hot_in_p99 = grab(r"Inline 热读 \(<=32K\)\s*:.*P99=\s*([0-9.]+)us")
+hot_nm_p99 = grab(r"Normal 热读 \(>32K\)\s*:.*P99=\s*([0-9.]+)us")
+cold_p99 = grab(r"Blocking 冷读 \(>2M\)\s*:.*P99=\s*([0-9.]+)us")
 
 row = ",".join([
     round_id, k_val, b_val, srv_rc, bench_rc,

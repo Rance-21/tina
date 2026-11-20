@@ -22,7 +22,8 @@ struct ServerConfig {
     std::vector<unsigned> worker_cpus{16, 17, 18, 19, 20, 21, 22, 23};
 
     // Normal Worker 数量 k（1 <= k < worker_cpus.size()）；Blocking Worker 数为 8 - k。
-    std::size_t non_blk_worker_cnt{3};
+    // 经实测穷举（k=1..7），默认采用 2 Normal + 6 Blocking。
+    std::size_t non_blk_worker_cnt{2};
 
     // 每条 Per-producer SPSC lane 的槽位容量（2 的幂，>= 2）。
     // 默认 8 * 4 * 128 = 4096 总容量。

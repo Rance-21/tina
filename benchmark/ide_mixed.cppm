@@ -42,14 +42,14 @@ struct SignalGuard {
 
 enum class Op { hot, cold, directory, write, terminal, control };
 constexpr std::array<std::string_view, 5> op_names = {
-    "Hot-file read", "Uncached-file read", "Directory read", "File write", "Terminal command"};
+    "热文件读", "冷文件读", "目录读取", "文件写入", "终端命令"};
 
 struct Pending {
     Method method{};
     Op op{Op::control};
     Clock::time_point sent;
     std::size_t tx{}, rx{};
-    std::string path;
+    std::string_view path;
     std::uint64_t file_size{}, offset{};
     std::uint32_t read_bytes{};
     bool terminal{}, ack{}, done{}, marker_seen{}, command_ok{};
@@ -59,8 +59,8 @@ struct Pending {
 };
 
 struct Meter {
-    Stats stats{1'000'000};
-    ClassLatencyRecorder class_latencies{131072};
+    Stats stats{4'000'000, 60};
+    ClassLatencyRecorder class_latencies{524'288};
     Clock::time_point warmup_end{}, test_end{};
     bool active{};
     std::array<std::uint64_t, 5> completed{};
@@ -115,15 +115,19 @@ struct Meter {
 
 class Connection {
   public:
-    Connection(const BenchConfig &config, Fixture &fixture, std::size_t index, net::Epoll &epoll,
+    Connection(const BenchConfig &config, Fixture &fixture,
+               const std::vector<std::string> &hot_payloads,
+               const std::vector<std::string> &dir_payloads, std::size_t index, net::Epoll &epoll,
                Meter &meter)
         : socket_(net::Socket::connect_tcp_nonblocking(config.host, config.port)), config_(config),
-          fixture_(fixture), epoll_(epoll), meter_(meter),
+          fixture_(fixture), hot_payloads_(hot_payloads), dir_payloads_(dir_payloads),
+          epoll_(epoll), meter_(meter),
           dir_(fixture.relative_scratch + "/" + std::to_string(index)),
-          write_path_(dir_ + "/write.txt") {
+          dir_payload_(client::encode_workspace_list_dir(dir_)),
+          write_path_(dir_ + "/write.txt"), hot_pick_(index) {
         int one = 1;
         ::setsockopt(fd(), IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
-        pending_.reserve(config.max_inflight);
+        pending_.reserve(config.max_inflight * 2);
         epoll_.add(fd(), interest_);
     }
 
@@ -157,37 +161,51 @@ class Connection {
     }
 
     void fill() {
-        // 每 20 个操作固定 9 read + 5 list + 3 write + 3 terminal。
+        // 每 20 个操作排程：9 次文件读 + 5 次目录读 + 3 次文件写入 + 3 次终端命令。
+        // 同一连接的 write 与 terminal 各自保持串行，但当某一方在途时不再 break 阻塞整条连接，
+        // 而是跳过并继续用读/目录请求填满 max_inflight，避免单路 fsync 饿死全部并发槽位。
         static constexpr std::array<char, 20> plan = {'r', 'd', 'r', 'w', 'r', 't', 'd',
                                                       'r', 'w', 'd', 'r', 't', 'd', 'r',
                                                       'w', 'r', 'd', 'r', 't', 'r'};
         while (pending_.size() < config_.max_inflight && Clock::now() < meter_.test_end) {
             const char op = plan[sequence_ % plan.size()];
-            // 同一写目标/PTY 串行；等待时保留配比，其他已提交 RPC 仍可并发完成。
-            if ((op == 'w' && writing_) || (op == 't' && terminal_request_ != 0))
-                break;
+            if ((op == 'w' && writing_) || (op == 't' && terminal_request_ != 0)) {
+                ++sequence_;
+                continue;
+            }
             const auto seq = sequence_++;
             if (op == 'r') {
-                // 每 100 次文件读按配置准确分配冷热；路径选择使用独立序列。
+                // 每 100 次文件读按配置准确分配冷热；热文件按交替序列均匀覆盖 <=32K 与 >32K。
                 const bool hot = ((read_sequence_++ * 37) % 100) < config_.workload.fs_hot_percent;
-                const auto &pool = hot ? fixture_.hot : fixture_.cold;
-                const auto &file = pool[(seq * 17 + seq / 20) % pool.size()];
                 const auto bytes = config_.workload.read_max_bytes;
-                const auto ranges = std::max<std::uint64_t>(1, (file.size + bytes - 1) / bytes);
-                const auto offset = hot ? 0 : ((seq * 7919) % ranges) * bytes;
-                auto &p = send(Method::workspace_read_file,
-                               client::encode_workspace_read_file(file.path, offset, bytes),
-                               hot ? Op::hot : Op::cold);
-                p.file_size = file.size;
-                p.offset = offset;
-                p.read_bytes = bytes;
+                if (hot) {
+                    const std::size_t idx = hot_pick_++ % fixture_.hot.size();
+                    const auto &file = fixture_.hot[idx];
+                    auto &p = send(Method::workspace_read_file, hot_payloads_[idx], Op::hot);
+                    p.file_size = file.size;
+                    p.offset = 0;
+                    p.read_bytes = bytes;
+                } else {
+                    const auto &file = fixture_.cold[(seq * 17 + seq / 20) % fixture_.cold.size()];
+                    const auto ranges =
+                        std::max<std::uint64_t>(1, (file.size + bytes - 1) / bytes);
+                    const auto offset = ((seq * 7919) % ranges) * bytes;
+                    auto &p = send(Method::workspace_read_file,
+                                   client::encode_workspace_read_file(file.path, offset, bytes),
+                                   Op::cold);
+                    p.file_size = file.size;
+                    p.offset = offset;
+                    p.read_bytes = bytes;
+                }
             } else if (op == 'd') {
-                const auto &path =
-                    (seq % 5 == 1) ? dir_
-                                   : fixture_.directories[(seq * 13) % fixture_.directories.size()];
-                auto &p = send(Method::workspace_list_dir, client::encode_workspace_list_dir(path),
-                               Op::directory);
-                p.path = path;
+                if (seq % 5 == 1) {
+                    auto &p = send(Method::workspace_list_dir, dir_payload_, Op::directory);
+                    p.path = dir_;
+                } else {
+                    const std::size_t idx = (seq * 13) % fixture_.directories.size();
+                    auto &p = send(Method::workspace_list_dir, dir_payloads_[idx], Op::directory);
+                    p.path = fixture_.directories[idx];
+                }
             } else if (op == 'w') {
                 last_write = "tina benchmark " + std::to_string(seq) + "\n";
                 last_write.resize(4096, static_cast<char>('a' + seq % 26));
@@ -413,14 +431,16 @@ class Connection {
     net::Socket socket_;
     const BenchConfig &config_;
     Fixture &fixture_;
+    const std::vector<std::string> &hot_payloads_;
+    const std::vector<std::string> &dir_payloads_;
     net::Epoll &epoll_;
     Meter &meter_;
     net::Buffer input_{65536};
     net::FrameSendQueue output_;
     std::unordered_map<std::uint64_t, Pending> pending_;
-    std::string dir_, write_path_;
+    std::string dir_, dir_payload_, write_path_;
     std::uint64_t next_id_{1}, terminal_request_{}, sequence_{}, read_sequence_{},
-        command_sequence_{};
+        command_sequence_{}, hot_pick_{};
     bool connected_{}, writing_{}, entry_present_{};
     net::EpollInterest interest_ =
         net::EpollInterest::read | net::EpollInterest::write | net::EpollInterest::peer_closed;
@@ -451,21 +471,39 @@ class MixedRunner {
             throw std::invalid_argument(
                 "report output must be outside the source and scratch directories");
         // 任何异常都会先销毁连接、再清理独占目录；命令不会 mkdir，不能在清理后重建目录。
+        std::vector<std::string> hot_payloads;
+        hot_payloads.reserve(fixture.hot.size());
+        for (const auto &file : fixture.hot) {
+            hot_payloads.push_back(
+                client::encode_workspace_read_file(file.path, 0, config_.workload.read_max_bytes));
+        }
+        std::vector<std::string> dir_payloads;
+        dir_payloads.reserve(fixture.directories.size());
+        for (const auto &dir : fixture.directories) {
+            dir_payloads.push_back(client::encode_workspace_list_dir(dir));
+        }
+
         net::Epoll epoll;
         mixed::Meter meter;
         std::vector<std::unique_ptr<mixed::Connection>> connections;
         std::unordered_map<int, mixed::Connection *> by_fd;
         for (std::size_t i = 0; i < config_.connections; ++i) {
-            auto c = std::make_unique<mixed::Connection>(config_, fixture, i, epoll, meter);
+            auto c = std::make_unique<mixed::Connection>(config_, fixture, hot_payloads,
+                                                         dir_payloads, i, epoll, meter);
             by_fd.emplace(c->fd(), c.get());
             connections.push_back(std::move(c));
         }
 
+        auto last_timeout_check = Clock::now();
         auto pump = [&] {
             for (auto event : epoll.wait(10))
                 by_fd.at(event.fd)->on_event(event);
-            for (auto &c : connections)
-                c->check_timeout();
+            const auto now = Clock::now();
+            if (now - last_timeout_check >= std::chrono::milliseconds(100)) {
+                last_timeout_check = now;
+                for (auto &c : connections)
+                    c->check_timeout();
+            }
         };
         auto wait_idle = [&](mixed::Connection &c) {
             while (!c.idle())
@@ -518,11 +556,11 @@ class MixedRunner {
         meter.warmup_end = start + config_.warmup_duration;
         meter.test_end = start + config_.total_duration;
         meter.active = true;
-        std::cout << "[BenchRunner] Starting benchmark against " << config_.host << ':'
-                  << config_.port << " | workload=ide_mixed | connections=" << config_.connections
-                  << " | max_inflight=" << config_.max_inflight
-                  << " | warmup=" << config_.warmup_duration.count()
-                  << "s | total=" << config_.total_duration.count() << "s\n"
+        std::cout << "[压测引擎] 开始压测 " << config_.host << ':' << config_.port
+                  << " | 负载=ide_mixed | 连接数=" << config_.connections
+                  << " | 单连接 Inflight=" << config_.max_inflight
+                  << " | 预热=" << config_.warmup_duration.count()
+                  << "s | 总时长=" << config_.total_duration.count() << "s\n"
                   << std::flush;
         bool warmed = config_.warmup_duration.count() == 0;
         while (Clock::now() < meter.test_end && !mixed::interrupted) {
@@ -531,9 +569,8 @@ class MixedRunner {
             pump();
             if (!warmed && Clock::now() >= meter.warmup_end) {
                 warmed = true;
-                std::cout << "[BenchRunner] Warmup finished (" << config_.warmup_duration.count()
-                          << "s, " << meter.stats.warmup_completed()
-                          << " reqs). Measuring performance for "
+                std::cout << "[压测引擎] 预热完成 (" << config_.warmup_duration.count() << "s, "
+                          << meter.stats.warmup_completed() << " reqs)，开始正式测量 "
                           << (config_.total_duration - config_.warmup_duration).count() << "s...\n"
                           << std::flush;
             }
@@ -565,27 +602,24 @@ class MixedRunner {
             static_cast<double>(config_.warmup_duration.count()),
             static_cast<double>((config_.total_duration - config_.warmup_duration).count()));
         std::ostringstream detail;
-        detail
-            << "  Operation Mix          : file read 45%, dir read 25%, write 15%, terminal 15%\n"
-            << "  File Read Targets      : hot " << config_.workload.fs_hot_percent
-            << "%, uncached " << 100 - config_.workload.fs_hot_percent
-            << "% (target mix, not measured hit rate)\n"
-            << "  Source Root            : " << fixture.source.string() << " (read-only)\n"
-            << "  Read Limit             : " << config_.workload.read_max_bytes << " bytes\n"
-            << "  Cold File Threshold    : > " << fixture.cache_limit
-            << " bytes; Linux page cache retained\n"
-            << "  Terminal Completion    : ACK + exit status + state; mutations also wait for "
-               "inotify\n";
+        auto kv = [&](std::string_view label) -> std::ostream & {
+            return detail << "  " << pad_display(label, 22) << " : ";
+        };
+        kv("并发策略") << "write/terminal 单连接串行，其余槽位持续压满读/目录请求\n";
+        kv("文件读冷热占比") << "热读 " << config_.workload.fs_hot_percent << "% (<=32K:"
+                             << fixture.hot_small_count << " / >32K:" << fixture.hot_large_count
+                             << "), 冷读 " << (100 - config_.workload.fs_hot_percent) << "%\n";
+        kv("源码根目录") << fixture.source.string() << " (全程只读)\n";
+        kv("单次读上限") << config_.workload.read_max_bytes << " bytes\n";
+        kv("冷文件阈值") << "> " << fixture.cache_limit << " bytes (保留 Linux Page Cache)\n";
+        kv("终端完成口径") << "ACK + 退出码 + 状态事件 (变更命令另等 inotify)\n";
         for (std::size_t i = 0; i < mixed::op_names.size(); ++i)
-            detail << "  " << std::left << std::setw(23) << mixed::op_names[i] << ": "
-                   << meter.completed[i] << " reqs\n";
-        detail << "  Directory Events       : " << meter.dir_events
-               << " (included in RX, excluded from QPS)\n"
-               << "  Confirmed Dir Changes  : " << meter.confirmed_changes << "\n"
-               << "  Drained After Deadline : " << meter.drained
-               << " operations (excluded from QPS/latency)\n"
-               << "  Scratch Cleanup        : verified\n"
-               << meter.class_latencies.format_summary();
+            kv(mixed::op_names[i]) << meter.completed[i] << " reqs\n";
+        kv("目录变更事件") << meter.dir_events << " (计入 RX 带宽，不计入 QPS)\n";
+        kv("已确认目录变更") << meter.confirmed_changes << "\n";
+        kv("截止后排空请求") << meter.drained << " (不计入 QPS 与延迟)\n";
+        kv("临时目录清理") << "已验证 (源码树未改动)\n";
+        detail << meter.class_latencies.format_summary();
         summary.workload_details = detail.str();
         write_report_file(config_.output_file, summary);
         return summary;

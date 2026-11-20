@@ -101,6 +101,9 @@ class Dispatcher {
         }
 
         for (std::size_t io = 0; io < io_count_; ++io) {
+            // 错开轮询起点：给第 io 号 I/O 线程设置 rr_normal = io % normal_count、rr_blocking =
+            // normal_count + io % blocking_count，
+            //  防止刚启动大家同时把第一波任务全砸向 Worker 0 和 Worker k
             io_contexts_[io].idx_normal = io % normal_count_;
             io_contexts_[io].idx_blocking = normal_count_ + (io % (worker_count_ - normal_count_));
         }

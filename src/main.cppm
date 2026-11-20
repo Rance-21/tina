@@ -17,7 +17,7 @@ void print_usage() {
         << "\n"
         << "server options:\n"
         << "  --port <port>              Listen port (default: 3490)\n"
-        << "  --normal-workers <k>       Number of Normal Workers, 1 <= k <= 7 (default: 3)\n"
+        << "  --normal-workers <k>       Number of Normal Workers, 1 <= k <= 7 (default: 2)\n"
         << "  --queue-capacity <n>       Per-lane SPSC queue capacity, power of 2 (default: 128)\n"
         << "  --inline-threshold <bytes> Max cache-hit size handled inline on IO loop (default: "
            "32768)\n"
