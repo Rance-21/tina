@@ -11,12 +11,18 @@ export namespace rpc {
 // Server 用
 class Connection {
   public:
-    explicit Connection(net::Socket socket) : socket_(std::move(socket)) {
+    explicit Connection(net::Socket socket, std::uint64_t id = 0)
+        : socket_(std::move(socket)), id_(id) {
     }
 
     [[nodiscard]]
     inline int fd() const noexcept {
         return socket_.native_handle();
+    }
+
+    [[nodiscard]]
+    inline std::uint64_t id() const noexcept {
+        return id_;
     }
 
     [[nodiscard]]
@@ -151,48 +157,14 @@ class Connection {
         output_.write(socket_);
     }
 
-    // 【作用】检查当前连接上是否还有尚未完成的同路径写请求（workspace_write_file）。
-    // 【原理】Connection 只在所属单个 I/O 线程访问（无需加锁）；绝大多数时候 inflight_writes_ 为空，
-    //         直接一次 empty() 判断返回 false，避免内联 read 越过同连接已提交的 write 读到旧缓存。
-    [[nodiscard]] bool has_inflight_write(std::string_view path) const noexcept {
-        return std::ranges::any_of(inflight_writes_,
-                                   [&](const auto &item) { return item.path == path; });
-    }
-
-    // 【作用】登记一条已成功提交到 WorkerPool 的写文件请求。
-    // 【原理】把 (request_id, path) 追加到本连接私有 vector，等待响应返回时按 request_id 核销。
-    void track_inflight_write(std::uint64_t request_id, std::string_view path) {
-        inflight_writes_.push_back(InflightWrite{
-            .request_id = request_id,
-            .path = std::string(path),
-        });
-    }
-
-    // 【作用】在写文件响应回到 I/O 线程时撤销对应的在途写登记。
-    // 【原理】按 request_id 找到记录后与末尾元素交换并 pop_back()（O(1) 删除，无需维持顺序）。
-    void finish_inflight_write(std::uint64_t request_id) noexcept {
-        for (auto it = inflight_writes_.begin(); it != inflight_writes_.end(); ++it) {
-            if (it->request_id == request_id) {
-                *it = std::move(inflight_writes_.back());
-                inflight_writes_.pop_back();
-                return;
-            }
-        }
-    }
-
   private:
-    struct InflightWrite {
-        std::uint64_t request_id{0};
-        std::string path;
-    };
-
     static constexpr std::size_t max_inflight = 64;
     static constexpr std::size_t max_output = 4 * 1024 * 1024;
 
     net::Socket socket_;
+    std::uint64_t id_{0};
     net::Buffer input_;
     net::FrameSendQueue output_;
-    std::vector<InflightWrite> inflight_writes_;
 
     // 已提交、但尚未收到业务执行结果的 RPC 数量。
     std::size_t pending_{0};

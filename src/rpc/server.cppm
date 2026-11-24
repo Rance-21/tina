@@ -167,7 +167,7 @@ void run_server(std::string_view port, runtime::ServerConfig config = {}) {
         slot->kv = kv.get();
         slot->io_view = detail::IoDispatchView{
             .io_id = i,
-            .inline_cache_threshold = config.io_inline_threshold,
+            .inline_threshold = config.io_inline_threshold,
         };
         // 初始化第 2 条缓存行起的本线程私有组件与预热任务池（64 个连续 RpcTaskContext 节点）
         slot->watcher_owner = detail::make_dir_watcher(*slot);

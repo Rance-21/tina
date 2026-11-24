@@ -95,7 +95,7 @@ struct CachedReadProbe {
     enum class Outcome : std::uint8_t {
         inline_handled, // 命中缓存且切片 <= 阈值，已原地编码为响应帧
         normal_cached,  // 命中缓存但切片 > 阈值，已持有只读快照，交由 Normal Worker 准备响应
-        blocking_miss,  // 缓存未命中或存在同连接在途写冲突，需交由 Blocking Worker 走磁盘路径
+        blocking_miss,  // 缓存未命中，需交由 Blocking Worker 走磁盘读盘路径
         invalid_request // 请求参数或相对路径非法，交由 Normal Worker 快速返回参数错误（不碰磁盘）
     };
 
@@ -108,22 +108,16 @@ struct CachedReadProbe {
 // 【作用】在 I/O 线程对 0x0203 (workspace_read_file) 做一次轻量缓存探测并决定分流去向。
 // 【原理】
 //   1. 先零拷贝解码并校验相对路径：非法直接返回 invalid_request（不改 frame，交 Normal 回错）；
-//   2. 若 allow_cache_hit == false（如同连接有同路径在途写）或查表未命中，返回 blocking_miss 交 Blocking 读盘；
-//   3. 若命中缓存且切片大小 <= max_inline_bytes（32 KiB）：原地把 frame 编码为响应并挂载只读快照，返回 inline_handled；
-//   4. 若命中缓存但切片 > 32 KiB：不改 frame，直接把只读 shared_ptr 快照和切片偏移装入结果返回 normal_cached，
-//      这样 Normal Worker 不必二次加锁查表，也不会因为中途 LRU 淘汰而被迫在 Normal 线程读盘。
-CachedReadProbe probe_cached_read_file(Frame &frame, std::size_t max_inline_bytes,
-                                       bool allow_cache_hit = true) {
+//   2. 查内存缓存未命中：返回 blocking_miss 交 Blocking Worker 读盘；
+//   3. 命中缓存且切片大小 <= max_inline_bytes（32 KiB）：原地把 frame 编码为响应并挂载只读快照，返回 inline_handled；
+//   4. 命中缓存但切片 > 32 KiB：不改 frame，直接把只读 shared_ptr 快照和切片偏移装入结果返回 normal_cached，
+//      使 Normal Worker 不必二次加锁查表，也不会因为中途 LRU 淘汰而被迫在 Normal 线程读盘。
+CachedReadProbe probe_cached_read_file(Frame &frame, std::size_t max_inline_bytes) {
     CachedReadProbe res;
     auto req = decode_workspace_read_file_view(frame.payload);
     if (!req || !service::file::is_valid_workspace_rel_path(req->path) ||
         !service::file::has_projects_root_env()) {
         res.outcome = CachedReadProbe::Outcome::invalid_request;
-        return res;
-    }
-
-    if (!allow_cache_hit) {
-        res.outcome = CachedReadProbe::Outcome::blocking_miss;
         return res;
     }
 

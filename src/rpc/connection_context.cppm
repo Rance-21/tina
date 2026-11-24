@@ -52,18 +52,20 @@ export struct IoSlotContext;
 //
 //   2. 按“谁先读、谁后读”排布 4 条缓存行，减少跨核 L1d Cache Miss，利好 Prefetch：
 //      +-----------------------------------------------------------------------+
-//      | Cache Line 0 (0..63B)   : slot(8B) + conn_fd(8B) + weak_conn(16B)     |
-//      |                           + frame 的前 32B（完整 24B 帧头 + payload 指针）|
+//      | Cache Line 0 (0..63B)   : slot(8B) + conn_fd(8B) + conn_id(8B)        |
+//      |                           + frame 的前 40B（完整 24B 帧头 + payload 头部）|
 //      +-----------------------------------------------------------------------+
-//      | Cache Line 1 (64..127B) : frame 剩余 56B + watched_dir 的前 8B        |
+//      | Cache Line 1 (64..127B) : frame 剩余 48B + watched_dir 的前 16B       |
 //      +-----------------------------------------------------------------------+
-//      | Cache Line 2 (128..191B): watched_dir 剩余 24B + prepared 的前 40B    |
+//      | Cache Line 2 (128..191B): watched_dir 剩余 16B + prepared 的前 48B    |
 //      +-----------------------------------------------------------------------+
-//      | Cache Line 3 (192..255B): prepared 剩余 48B                           |
+//      | Cache Line 3 (192..255B): prepared 剩余 40B + 24B 对齐填充            |
 //      +-----------------------------------------------------------------------+
 //      - 无论是 Worker 刚拿到 ctx，还是 I/O 线程收到回传的 ctx，解引用第 1 条缓存行（Cache Line 0）
-//        就能一次性拿到槽位指针、连接弱引用和完整的 RPC
+//        就能一次性拿到槽位指针、连接世代号（conn_fd + conn_id）和完整的 RPC
 //        帧头（length/kind/request_id/method/status）；
+//      - 用 (conn_fd, conn_id) 替代 std::weak_ptr<Connection>：连接生命周期全部由所属 I/O
+//        线程单线程串行管理，彻底消灭每条慢请求 4 次控制块原子计数操作，同时防 UAF 与 fd 复用 ABA；
 //      - 尾部的 prepared 仅在 Worker 刚启动时消费一次并当场清空；回写阶段的 I/O
 //      线程只读前两条半缓存行，
 //        完全不触碰 Cache Line 3，省去跨核缓存行回传与写失效开销。
@@ -72,19 +74,18 @@ export struct IoSlotContext;
 //      ctx 在第 i 号 I/O 线程的 submit_request() 中借出，经 Worker 原地把 ctx->frame 从 Request
 //      改写为 Response 后，最终必回到第 i 号 I/O 线程的 complete_response() 中归还。
 export struct alignas(kCacheLineBytes) RpcTaskContext {
-    // --- Cache Line 0 (offset 0..63B): 核心路由控制头 (32B) + Frame 头部字段 (前 32B) ---
+    // --- Cache Line 0 (offset 0..63B): 核心路由控制头 (24B) + Frame 头部字段 (前 40B) ---
     IoSlotContext *slot{nullptr}; // 8B (offset 0): 指向所属 I/O 线程的运行时槽位上下文
-    int conn_fd{-1};              // 4B (offset 8): 客户端连接 fd（供 Terminal 会话校验）
+    int conn_fd{-1};              // 4B (offset 8): 客户端连接 fd（回写查表与 Terminal 会话校验）
     // 4B 编译器对齐填充 (offset 12..15)
-    std::weak_ptr<Connection>
-        weak_conn{}; // 16B (offset 16): 连接弱引用（回写前检查连接是否仍存活）
-    Frame frame{};   // 88B (offset 32..119): 请求与响应原地复用的协议帧
+    std::uint64_t conn_id{0}; // 8B (offset 16): 本 I/O 线程单调连接世代号（防 fd 复用 ABA，0 为无效）
+    Frame frame{};            // 88B (offset 24..111): 请求与响应原地复用的协议帧
 
     // --- Cache Line 1..2: 回写阶段按需读取的目录监听路径 ---
-    std::string watched_dir{}; // 32B (offset 120..151): 需向 DirWatcher 注册/注销的目录
+    std::string watched_dir{}; // 32B (offset 112..143): 需向 DirWatcher 注册/注销的目录
 
     // --- Cache Line 2..3: 仅在 Worker 入口消费一次的预分类结果与只读缓存快照 ---
-    PreparedDispatch prepared{}; // 88B (offset 152..239): 预分类与 >32KiB 缓存快照
+    PreparedDispatch prepared{}; // 88B (offset 144..231): 预分类与 >32KiB 缓存快照
 };
 
 static_assert(sizeof(RpcTaskContext) == 4 * kCacheLineBytes,
@@ -125,8 +126,15 @@ export struct alignas(kCacheLineBytes) IoSlotContext {
     // --- Cache Line 1+ (offset 64B..): 仅所属 I/O 线程单线程读写的可变数据与所有权管理 ---
     alignas(kCacheLineBytes) ConnectionMap connections{};
     std::vector<std::unique_ptr<RpcTaskContext>> task_pool_{};
+    std::uint64_t next_conn_id_{1}; // 本 I/O 线程私有单调连接世代号（非原子，0 保留为无效 id）
     std::shared_ptr<service::DirWatcher> watcher_owner{};
     std::shared_ptr<server::TerminalManager> terminal_mgr_owner{};
+
+    // 【作用】为本 I/O 线程新注册的 Connection 分配单调递增的 64 位世代号（仅所属 I/O 线程调用）。
+    // 【原理】单线程自增零原子开销；配合 conn_fd 校验可彻底防止 fd 关闭复用带来的 ABA 错投。
+    [[nodiscard]] std::uint64_t allocate_conn_id() noexcept {
+        return next_conn_id_++;
+    }
 
     // 【作用】启动阶段预留空闲栈容量，并预分配 64 个连续的 RpcTaskContext 节点。
     // 【原理】提前 reserve(1024) 确保运行期归还节点 push_back 绝不触发 vector 重分配；
@@ -145,8 +153,7 @@ export struct alignas(kCacheLineBytes) IoSlotContext {
     // 【原理】直接从本线程私有的 task_pool_ 栈顶 O(1) 弹出热节点（单线程操作，0 锁、0 原子指令）；
     //         仅当瞬时并发超过池存量时才按需 new 新节点，用完后会自动回收到池中。
     [[nodiscard]] RpcTaskContext *acquire_task_ctx(Frame &&request, PreparedDispatch &&prepared,
-                                                   const std::shared_ptr<Connection> &conn,
-                                                   int conn_fd) {
+                                                   int conn_fd, std::uint64_t conn_id) {
         RpcTaskContext *ctx = nullptr;
         if (!task_pool_.empty()) {
             ctx = task_pool_.back().release();
@@ -157,7 +164,7 @@ export struct alignas(kCacheLineBytes) IoSlotContext {
 
         ctx->slot = this;
         ctx->conn_fd = conn_fd;
-        ctx->weak_conn = conn;
+        ctx->conn_id = conn_id;
         ctx->frame = std::move(request);
         ctx->watched_dir.clear();
         ctx->prepared = std::move(prepared);
@@ -166,8 +173,8 @@ export struct alignas(kCacheLineBytes) IoSlotContext {
 
     // 【作用】在所属 I/O 线程完成响应回写（或提交失败回滚）后，清理并归还 RpcTaskContext。
     // 【原理】
-    //   1. 立即释放 weak_conn
-    //   与外置缓存切片引用（payload_owner），防止空闲池节点延长外部对象生命周期；
+    //   1. 立即重置 conn_fd / conn_id
+    //   并释放外置缓存切片引用（payload_owner），防止空闲池节点延长外部对象生命周期；
     //   2. 对常规大小的字符串仅调 clear() 保留底层堆容量供下次请求复用；若偶发超大缓冲（payload >
     //   16KiB）
     //      未被移动走，则主动替换为空串释放内存，防止长连接池内存膨胀；
@@ -178,7 +185,7 @@ export struct alignas(kCacheLineBytes) IoSlotContext {
             return;
 
         ctx->conn_fd = -1;
-        ctx->weak_conn.reset();
+        ctx->conn_id = 0;
         ctx->frame.clear_external_payload();
         if (ctx->frame.payload.capacity() > kMaxRetainedPayloadCap) {
             ctx->frame.payload = {};
