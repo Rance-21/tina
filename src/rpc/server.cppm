@@ -21,7 +21,7 @@ import runtime.log;
 
 import rpc.connection;
 import rpc.handler;
-import rpc.task_classifier;
+import service.file_watcher;
 import service.dir_watcher;
 import ide.server_terminal;
 
@@ -100,6 +100,31 @@ std::string format_cpu_list(std::span<const unsigned> cpus) {
     return out.str();
 }
 
+// 启停屏障。向每条 I/O 线程各投一次，全部完成后主线程才进入下一阶段。
+// 若某次投递或执行失败，也要等已投递的操作结束，再让调用方栈上的引用离开作用域。
+void run_on_io_threads(const std::vector<std::unique_ptr<rpc::detail::IoSlotContext>> &slots,
+                       auto action) {
+    std::vector<std::future<void>> completed;
+    completed.reserve(slots.size());
+    try {
+        for (const auto &slot : slots) {
+            std::packaged_task<void()> task([&action, &io = *slot] { action(io); });
+            auto done = task.get_future();
+            if (!slot->loop.post_task(std::move(task)))
+                throw std::runtime_error("I/O EventLoop rejected lifecycle task");
+            completed.push_back(std::move(done));
+        }
+        for (auto &done : completed)
+            done.get();
+    } catch (...) {
+        for (auto &done : completed) {
+            if (done.valid())
+                done.wait();
+        }
+        throw;
+    }
+}
+
 } // namespace
 
 export namespace rpc {
@@ -144,8 +169,7 @@ void run_server(std::string_view port, runtime::ServerConfig config = {}) {
     accept_epoll.add(listener->native_handle(), net::EpollInterest::read);
     accept_epoll.add(signals.fd(), net::EpollInterest::read);
 
-    auto kv = std::make_shared<detail::KvState>();
-    ConnectionCounter connection_counter;
+    detail::KvState kv;
 
     std::span<const unsigned> io_cpu_span;
     if (config.enable_cpu_affinity)
@@ -159,46 +183,19 @@ void run_server(std::string_view port, runtime::ServerConfig config = {}) {
 
     slots.reserve(config.io_threads_cnt());
     for (std::size_t i = 0; i < config.io_threads_cnt(); ++i) {
-        auto slot = std::make_unique<detail::IoSlotContext>();
-        // 填充第 1 条 64B 只读热缓存行：集中存放本槽位全程不变的核心组件裸指针与内联阈值
-        slot->loop = &io_pool.loop_at(i);
-        slot->workers = &workers;
-        slot->counter = &connection_counter;
-        slot->kv = kv.get();
-        slot->io_view = detail::IoDispatchView{
-            .io_id = i,
-            .inline_threshold = config.io_inline_threshold,
-        };
-        // 初始化第 2 条缓存行起的本线程私有组件与预热任务池（64 个连续 RpcTaskContext 节点）
-        slot->watcher_owner = detail::make_dir_watcher(*slot);
-        slot->watcher = slot->watcher_owner.get();
-        slot->terminal_mgr_owner = detail::make_terminal_manager(*slot);
-        slot->terminal_mgr = slot->terminal_mgr_owner.get();
-        slot->prewarm_task_pool();
-        slots.push_back(std::move(slot));
+        slots.push_back(std::make_unique<detail::IoSlotContext>(
+            io_pool.loop_at(i), workers, kv, i, config.io_inline_threshold));
     }
 
-    // 启动各 I/O 线程的 DirWatcher 以及挂载在 slots[0] 上的全局 FileWatcher。
-    {
-        std::latch watchers_started(static_cast<std::ptrdiff_t>(slots.size()));
-        for (std::size_t i = 0; i < slots.size(); ++i) {
-            auto *slot = slots[i].get();
-            auto *latch = &watchers_started;
-            if (!slot->loop->post_task([i, slot, latch]() noexcept {
-                    try {
-                        slot->watcher->start();
-                        if (i == 0)
-                            detail::start_file_watcher(*slot->loop);
-                    } catch (...) {
-                        runtime::log::error("startup: failed to start inotify watchers");
-                    }
-                    latch->count_down();
-                })) {
-                throw std::runtime_error("cannot start inotify watchers");
-            }
+    run_on_io_threads(slots, [](detail::IoSlotContext &slot) {
+        try {
+            slot.watcher->start();
+            if (slot.io_id == 0)
+                service::global_file_watcher().start(slot.loop);
+        } catch (...) {
+            runtime::log::error("startup: failed to start inotify watchers");
         }
-        watchers_started.wait();
-    }
+    });
 
     runtime::log::info(
         "tina listening on port " + std::string(port) +
@@ -257,67 +254,38 @@ void run_server(std::string_view port, runtime::ServerConfig config = {}) {
     runtime::log::info("shutdown: stop accepting connections");
 
     // 阶段 2：在各 I/O 线程冻结读取与新的 Worker 提交；屏障保证先前 accept 任务已就绪。
-    std::latch frozen(static_cast<std::ptrdiff_t>(slots.size()));
-    for (std::size_t i = 0; i < slots.size(); ++i) {
-        auto *slot = slots[i].get();
-        auto *latch = &frozen;
-        const bool stop_fw = (i == 0);
-
-        bool posted = slot->loop->post_task([slot, latch, stop_fw]() noexcept {
-            try {
-                if (slot->watcher != nullptr)
-                    slot->watcher->stop();
-                if (stop_fw)
-                    detail::stop_file_watcher();
-                if (slot->terminal_mgr != nullptr)
-                    slot->terminal_mgr->stop();
-                for (auto it = slot->connections.begin(); it != slot->connections.end();) {
-                    auto conn = it->second;
-                    ++it;
-                    conn->begin_shutdown();
-                    detail::refresh_connection(*slot, conn);
-                }
-            } catch (...) {
-                runtime::log::error("shutdown: failed to freeze an I/O loop");
-            }
-            latch->count_down();
-        });
-        if (!posted)
-            throw std::runtime_error("cannot initiate I/O shutdown");
-    }
-    frozen.wait();
+    std::vector<std::future<void>> drained(slots.size());
+    run_on_io_threads(slots, [&drained](detail::IoSlotContext &slot) {
+        slot.watcher->stop();
+        if (slot.io_id == 0)
+            service::global_file_watcher().stop();
+        slot.terminal_mgr->stop();
+        try {
+            drained[slot.io_id] = slot.connections.begin_drain();
+        } catch (...) {
+            runtime::log::error("shutdown: failed to freeze an I/O loop");
+        }
+    });
 
     // 阶段 3：停止 WorkerPool 接收新任务并排空所有已接受与已预留任务。
     workers.shutdown();
 
-    // 阶段 4：等待 I/O 线程将剩余响应发空；慢连接超时强制关闭。
-    constexpr auto drain_timeout = std::chrono::seconds(5);
-    if (!connection_counter.wait_empty_for(drain_timeout)) {
+    // 阶段 4：各线程的连接表独立排空。共享同一截止时间，慢连接最多等 5 秒，
+    // 不会因为逐个检查 future 而把超时放大成「线程数 × 5 秒」。
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    for (auto &done : drained) {
+        if (done.valid() && done.wait_until(deadline) == std::future_status::ready)
+            continue;
+
         runtime::log::warn("shutdown: drain timeout, closing remaining connections");
-
-        std::latch closed(static_cast<std::ptrdiff_t>(slots.size()));
-        for (auto &slot_ptr : slots) {
-            auto *slot = slot_ptr.get();
-            auto *latch = &closed;
-
-            bool posted = slot->loop->post_task([slot, latch]() noexcept {
-                try {
-                    while (!slot->connections.empty()) {
-                        int fd = slot->connections.begin()->first;
-                        close_connection(*slot->loop, slot->connections, *slot->counter, fd);
-                    }
-                } catch (...) {
-                    try {
-                        runtime::log::error("shutdown: failed to close a connection");
-                    } catch (...) {
-                    }
-                }
-                latch->count_down();
-            });
-            if (!posted)
-                throw std::runtime_error("cannot close remaining connections");
-        }
-        closed.wait();
+        run_on_io_threads(slots, [](detail::IoSlotContext &slot) {
+            try {
+                slot.connections.close_all();
+            } catch (...) {
+                runtime::log::error("shutdown: failed to close a connection");
+            }
+        });
+        break;
     }
 
     // 阶段 5：关闭并 join 所有 I/O 线程。

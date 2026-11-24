@@ -21,7 +21,7 @@ inline void write_list_dir_response(Frame &frame, std::string_view rel_path,
                                     std::string *watched_dir) {
     frame.status = Status::ok;
     if (watched_dir != nullptr) {
-        *watched_dir = std::string(rel_path);
+        watched_dir->assign(rel_path);
         encode_workspace_list_dir_into(*watched_dir, entries, frame.payload);
     } else {
         std::string dir_copy(rel_path);
@@ -239,13 +239,6 @@ CachedListDirProbe probe_cached_list_dir(Frame &frame, std::size_t max_inline_by
     res.cached = std::move(cached);
     res.dir_path = std::string(req->path);
     return res;
-}
-
-// 【作用】由 Normal Worker 使用已捕获的目录只读快照将条目列表编码为响应帧。
-// 【原理】直接复用 detail::write_list_dir_response 原地序列化到 frame.payload 并回传 watched_dir，不碰磁盘。
-void finish_cached_list_dir(Frame &frame, std::string_view dir_path,
-                            const std::vector<DirEntry> &entries, std::string *watched_dir) {
-    detail::write_list_dir_response(frame, dir_path, entries, watched_dir);
 }
 
 // 处理 0x0205 (workspace_close_dir)：

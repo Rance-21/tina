@@ -26,17 +26,11 @@ export namespace service {
 // 单个 IO 线程对应单个 inotify-fd，因此无须加锁
 class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
   public:
-    using RefreshConnFn = std::function<void(const std::shared_ptr<rpc::Connection> &)>;
-
-    DirWatcher(net::EventLoop &loop, rpc::ConnectionMap &connections, runtime::WorkerPool &workers,
-               rpc::ConnectionCounter &counter, std::size_t io_id = 0,
-               RefreshConnFn refresh_conn = {},
-               WorkspaceCache *cache = &global_workspace_cache(),
+    DirWatcher(net::EventLoop &loop, rpc::LoopConnections &connections, runtime::WorkerPool &workers,
+               std::size_t io_id, WorkspaceCache *cache = &global_workspace_cache(),
                FileWatcher *file_watcher = &global_file_watcher())
-        : loop_(loop), connections_(connections), workers_(workers), counter_(counter),
-          io_id_(io_id), refresh_conn_(std::move(refresh_conn)), cache_(cache),
-          file_watcher_(file_watcher) {
-    }
+        : loop_(loop), connections_(connections), workers_(workers), io_id_(io_id), cache_(cache),
+          file_watcher_(file_watcher) {}
 
     ~DirWatcher() {
         if (inotify_fd_ >= 0)
@@ -87,16 +81,15 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
     }
 
     // 记录某条客户端连接已获取过 rel_path 目录列表，将该目录加入本 I/O 线程的 inotify 监听。
-    void watch(std::string_view rel_path, const std::shared_ptr<rpc::Connection> &conn) {
-        if (stopped_ || inotify_fd_ < 0 || rel_path.empty() || !conn || conn->peer_eof() ||
-            conn->draining()) {
+    void watch(std::string_view rel_path, const rpc::Connection &conn) {
+        if (inotify_fd_ < 0 || rel_path.empty() || !conn.accepting_requests()) {
             return;
         }
 
         // 多个 conn，直接更新该 wd 对应的 conn 集合
         if (auto it = path_to_wd_.find(rel_path); it != path_to_wd_.end()) {
             if (auto wit = watches_.find(it->second); wit != watches_.end()) {
-                wit->second.subscribers[conn->fd()] = conn;
+                wit->second.subscribers[conn.fd()] = conn.id();
                 return;
             }
             path_to_wd_.erase(it);
@@ -116,7 +109,7 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
         auto &entry = watches_[wd];
         if (entry.rel_path.empty())
             entry.rel_path.assign(rel_path);
-        entry.subscribers[conn->fd()] = conn;
+        entry.subscribers[conn.fd()] = conn.id();
         path_to_wd_[entry.rel_path] = wd;
     }
 
@@ -130,7 +123,8 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
         if (it != path_to_wd_.end()) {
             if (auto wit = watches_.find(it->second); wit != watches_.end()) {
                 wit->second.subscribers.erase(conn_fd);
-                if (!has_subscribers(wit->second))
+                prune_disconnected_subscribers(wit->second);
+                if (wit->second.subscribers.empty())
                     remove_watch(it->second, true, false);
                 return;
             }
@@ -142,7 +136,8 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
   private:
     struct WatchEntry {
         std::string rel_path;
-        std::unordered_map<int, std::weak_ptr<rpc::Connection>> subscribers;
+        // 只记录订阅时的 fd 和世代号，目录监听不会延长 TCP 连接的寿命。
+        std::unordered_map<int, std::uint64_t> subscribers;
         bool refreshing{false};
         bool dirty{false};
     };
@@ -243,15 +238,11 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
         watches_.erase(it);
     }
 
-    static bool has_subscribers(WatchEntry &entry) {
-        for (auto it = entry.subscribers.begin(); it != entry.subscribers.end();) {
-            auto conn = it->second.lock();
-            if (!conn || conn->peer_eof() || conn->draining())
-                it = entry.subscribers.erase(it);
-            else
-                ++it;
-        }
-        return !entry.subscribers.empty();
+    void prune_disconnected_subscribers(WatchEntry &entry) const {
+        std::erase_if(entry.subscribers, [this](const auto &subscriber) {
+            auto *conn = connections_.find(subscriber.first, subscriber.second);
+            return !conn || !conn->accepting_requests();
+        });
     }
 
     void on_event(net::EpollEvent event);
@@ -260,16 +251,12 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
 
     void complete_refresh(RefreshTaskContext *ctx);
 
-    void complete_refresh(int wd, std::optional<Frame> event_frame);
-
     net::EventLoop &loop_;
-    rpc::ConnectionMap &connections_;
+    rpc::LoopConnections &connections_;
     runtime::WorkerPool &workers_;
-    rpc::ConnectionCounter &counter_;
     std::size_t io_id_{0};
-    RefreshConnFn refresh_conn_;
-    WorkspaceCache *cache_{nullptr};
-    FileWatcher *file_watcher_{nullptr};
+    WorkspaceCache *cache_;
+    FileWatcher *file_watcher_;
 
     int inotify_fd_{-1};
     bool stopped_{false};

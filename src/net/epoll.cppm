@@ -13,6 +13,7 @@ enum class EpollInterest : std::uint32_t {
     write = EPOLLOUT,
     peer_closed = EPOLLRDHUP,
     edge_triggered = EPOLLET,
+    one_shot = EPOLLONESHOT,
 };
 
 // 允许这样写：EpollInterest::read | EpollInterest::peer_closed

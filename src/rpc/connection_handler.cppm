@@ -19,80 +19,53 @@ namespace rpc::detail {
 
 namespace {
 
-// ============================================================================
-// 【步骤 4 / 终点】I/O 线程回写响应并回收任务节点（Worker -> EventLoop::post_task 回调）
-// ============================================================================
-// 【作用】Worker 线程算完响应后，通过 `loop.post_task([ctx])` 切回连接所属 I/O 线程完成响应入队、
-//         非阻塞写出以及池节点 `ctx` 的无锁归还。
-// 【原理】
-//   1. RAII 回收兜底（RecycleGuard）：无论连接已断开、正常发包还是中途抛异常，退出函数时必然将 ctx
-//      归还到当前 I/O 线程私有的 slot.task_pool_，绝不泄漏；
-//   2. 存活校验：用 (ctx->conn_fd, ctx->conn_id) 查本线程 slot.connections 并比对连接世代号，
-//      零原子操作即可同时校验连接仍存活并防止 fd 复用 ABA；
-//   3. 目录监听同步：若是成功的目录列举/关闭（list_dir / close_dir），同步在本线程 DirWatcher 上注册或移除
-//      inotify 监听；
-//   4. 零拷贝入队与聚集发送：调用 conn->enqueue_response(response)（内部 std::move 接管 payload
-//   缓冲，
-//      不拷贝正文）并立刻尝试一次非阻塞 writev()；
-//   5. 按需更新
-//   epoll：仅当连接已满足关闭条件（conn->finished()）或待写状态（wants_write()）发生翻转时，
-//      才调用 refresh_connection()，省去稳态下的冗余 epoll_ctl 系统调用。
+// Worker 把节点投回原 I/O 线程。连接可能已关闭甚至 fd 已被重新分配；
+// 无论能否送达，都要归还节点，让其中的缓存切片及时释放。
 void complete_response(RpcTaskContext *ctx) noexcept {
-    IoSlotContext &slot = *ctx->slot;
+    IoSlotContext &slot = ctx->slot;
     struct RecycleGuard {
-        IoSlotContext &slot;
         RpcTaskContext *ctx;
-        ~RecycleGuard() noexcept {
-            slot.release_task_ctx(ctx);
+        ~RecycleGuard() {
+            ctx->slot.recycle_task(ctx);
         }
-    } recycle_guard{slot, ctx};
+    } recycle{ctx};
 
-    const int conn_fd = ctx->conn_fd;
-    const std::uint64_t conn_id = ctx->conn_id;
-    if (conn_fd < 0 || conn_id == 0)
+    auto *conn = slot.connections.find(ctx->conn_fd, ctx->conn_id);
+    if (!conn)
         return;
 
-    auto it = slot.connections.find(conn_fd);
-    if (it == slot.connections.end() || !it->second || it->second->id() != conn_id)
-        return;
-
-    const std::shared_ptr<Connection> &conn = it->second;
     Frame &response = ctx->frame;
     const std::string &watched_dir = ctx->watched_dir;
-
     try {
-        if (!watched_dir.empty() && response.status == Status::ok && slot.watcher != nullptr) {
+        if (!watched_dir.empty() && response.status == Status::ok) {
             if (response.method == Method::workspace_list_dir)
-                slot.watcher->watch(watched_dir, conn);
+                slot.watcher->watch(watched_dir, *conn);
             else if (response.method == Method::workspace_close_dir)
-                slot.watcher->unwatch(watched_dir, conn_fd);
+                slot.watcher->unwatch(watched_dir, ctx->conn_fd);
         }
 
         const bool had_write = conn->wants_write();
 
         if (!conn->enqueue_response(response)) {
-            close_connection(*slot.loop, slot.connections, *slot.counter, conn_fd);
+            slot.connections.close(ctx->conn_fd);
             return;
         }
-        if (conn->wants_write())
-            conn->write();
+        conn->flush_output(); // 成功入队至少有一个 17 字节帧头可发。
+        // 回包不是 socket 就绪通知；读写兴趣没变时无需额外 epoll_ctl。
         if (conn->finished() || conn->wants_write() != had_write)
-            refresh_connection(slot, conn);
+            slot.connections.rearm_or_close(*conn);
     } catch (...) {
         try {
-            close_connection(*slot.loop, slot.connections, *slot.counter, conn_fd);
+            slot.connections.close(ctx->conn_fd);
         } catch (...) {
         }
     }
 }
 
-// ============================================================================
-// 【步骤 3b】Worker 线程业务路由表（按 Method 高 8 位模块分组跳转）
-// ============================================================================
-// 【作用】在 Worker 线程内按 Method 的高 8 位分组码（MethodGroup）把请求分发到对应的业务处理器。
-// 【原理】先拦截仅允许服务端主动推送的 event_only 方法，再通过位运算提取分组号做紧凑 switch 跳转。
-void dispatch_request(Frame &request, KvState &kv, std::string &watched_dir,
-                      server::TerminalManager *terminal_mgr, int conn_fd) {
+// 分类器已经就地处理了 ping。Worker 只路由剩余请求，服务端专用事件沿用
+// unsupported 响应；KV 的锁在进入其他业务或将结果投回 I/O 线程前释放。
+void dispatch_request(RpcTaskContext &ctx) {
+    Frame &request = ctx.frame;
     if (is_event_only_method(request.method)) {
         request.status = Status::unsupported;
         request.payload = "unsupported method";
@@ -101,28 +74,21 @@ void dispatch_request(Frame &request, KvState &kv, std::string &watched_dir,
 
     switch (method_group(request.method)) {
     case MethodGroup::system:
-        if (request.method == Method::system_ping) {
-            handle_ping(request);
-            return;
-        }
         break;
 
     case MethodGroup::kv: {
-        std::lock_guard lock(kv.mutex);
-        kv.service.handle(request);
+        std::lock_guard lock(ctx.slot.kv.mutex);
+        ctx.slot.kv.service.handle(request);
         return;
     }
 
     case MethodGroup::workspace:
-        server::handle_workspace_request(request, &watched_dir);
+        server::handle_workspace_request(request, &ctx.watched_dir);
         return;
 
     case MethodGroup::terminal:
-        if (terminal_mgr != nullptr) {
-            terminal_mgr->handle_request(request, conn_fd);
-            return;
-        }
-        break;
+        ctx.slot.terminal_mgr->handle_request(request, ctx.conn_fd);
+        return;
 
     case MethodGroup::git:
         server::handle_git_request(request);
@@ -133,27 +99,14 @@ void dispatch_request(Frame &request, KvState &kv, std::string &watched_dir,
     request.payload = "unsupported method";
 }
 
-// ============================================================================
-// 【步骤 3a】Worker 线程执行单条慢路径 RPC 任务（WorkerPool::PoolTask 入口）
-// ============================================================================
-// 【作用】在 Normal 或 Blocking Worker 线程中处理 ctx 承载的请求，并将结果投递回原 I/O 线程。
-// 【原理】
-//   1. 原地复用帧：将 ctx->frame.kind 从 request 原地改为 response（保留 request_id 与 method）；
-//   2. 优先消费预取快照：若 I/O 线程在分类阶段已经抓到了 >32KiB 的文件或大目录只读缓存快照
-//      （prepared.cached_file / cached_dir），直接通过 std::move
-//      消费快照组装响应并当场释放快照引用， 既不二次查缓存锁也不碰磁盘；否则进入 dispatch_request()
-//      执行常规/阻塞业务；
-//   3. 单指针回投（命中 24B SBO）：以 `[ctx]() noexcept`（8 字节 <= 24 字节）投递给
-//   slot.loop->post_task()，
-//      全程零闭包堆分配。仅当停机阶段 EventLoop 已关闭拒绝新任务时，才由 Worker 直接 delete ctx
-//      兜底。
-void handle_request(RpcTaskContext *ctx) noexcept {
-    IoSlotContext &slot = *ctx->slot;
+// 同一个节点依次经过 I/O -> Worker -> 原 I/O。原地改写 kind，保留 request_id 和 method。
+// 分类时拿到的大文件或目录快照在此直接消费，避免重新查缓存或磁盘；其余请求进入业务处理器。
+void execute_worker_request(RpcTaskContext *ctx) noexcept {
+    IoSlotContext &slot = ctx->slot;
     Frame &request = ctx->frame;
     PreparedDispatch &prepared = ctx->prepared;
 
     request.kind = Kind::response;
-    ctx->watched_dir.clear();
 
     try {
         if (prepared.cached_file) {
@@ -162,10 +115,11 @@ void handle_request(RpcTaskContext *ctx) noexcept {
         } else if (prepared.cached_dir) {
             ctx->watched_dir = std::move(prepared.cached_dir_path);
             auto cached_dir = std::move(prepared.cached_dir);
-            server::finish_cached_list_dir(request, ctx->watched_dir, *cached_dir,
-                                           &ctx->watched_dir);
+            // 路径已经归节点所有，直接编码；回到 I/O 线程仍可用它登记订阅。
+            request.status = Status::ok;
+            server::encode_workspace_list_dir_into(ctx->watched_dir, *cached_dir, request.payload);
         } else {
-            dispatch_request(request, *slot.kv, ctx->watched_dir, slot.terminal_mgr, ctx->conn_fd);
+            dispatch_request(*ctx);
         }
     } catch (const std::bad_alloc &) {
         prepared.clear_snapshots();
@@ -186,65 +140,47 @@ void handle_request(RpcTaskContext *ctx) noexcept {
                       std::is_nothrow_move_constructible_v<decltype(complete_lambda)>,
                   "EventLoop completion task must fit in std::move_only_function 24B SBO");
 
-    if (!slot.loop->post_task(std::move(complete_lambda))) {
+    if (!slot.loop.post_task(std::move(complete_lambda))) {
         delete ctx;
     }
 }
 
-// ============================================================================
-// 【步骤 2】I/O 线程将非内联请求装入池节点并投递至 WorkerPool
-// ============================================================================
-// 【作用】在所属 I/O 线程从本线程对象池借出 RpcTaskContext，并以 8B 单指针闭包提交到 WorkerPool V2。
-// 【原理】
-//   1. 无锁借节点：从本线程私有的 slot.acquire_task_ctx() O(1) 弹出热节点 ctx，将 request 与 prepared 原地移入；
-//   2. 单指针提交（命中 24B SBO）：构造 `[ctx]() noexcept`（8 字节 <= 24 字节）提交进本 I/O 线程专属的
-//      SPSC lane；若队列满或正在停机导致提交失败，立刻清空预取快照并将 ctx 归还本线程池。
-bool submit_to_worker(Frame &&request, PreparedDispatch &prepared, int conn_fd,
-                      std::uint64_t conn_id, IoSlotContext &slot) {
-    const runtime::TaskClass task_class = prepared.task_class;
-
-    RpcTaskContext *ctx =
-        slot.acquire_task_ctx(std::move(request), std::move(prepared), conn_fd, conn_id);
-
-    auto worker_lambda = [ctx]() noexcept {
-        handle_request(ctx);
-    };
-
-    if (!slot.workers->try_submit(slot.io_view.io_id, task_class, std::move(worker_lambda))) {
-        ctx->prepared.clear_snapshots();
-        slot.release_task_ctx(ctx);
-        return false;
-    }
-
-    return true;
+// 一个可读事件内的所有 Worker 提交共用一次唤醒屏障。先分流，再分别处理两种结果：
+// 内联响应入队成功才登记订阅；慢路径直接移动帧和缓存快照，闭包只携带一个池节点指针。
+bool read_and_dispatch_requests(Connection &conn, IoSlotContext &slot) {
+    PreparedDispatch prepared;
+    std::string inline_watched_dir;
+    runtime::WorkerPool::SubmitBatchGuard wake_batch(slot.workers, slot.io_id);
+    return conn.read_requests(
+        [&](Frame &request) {
+            return try_inline_or_classify(request, slot.inline_threshold, prepared,
+                                          inline_watched_dir);
+        },
+        [&](const Frame &response) {
+            if (!inline_watched_dir.empty() && response.status == Status::ok)
+                slot.watcher->watch(inline_watched_dir, conn);
+        },
+        [&](Frame &&request) {
+            const auto task_class = prepared.task_class;
+            auto *ctx = slot.acquire_task(conn, std::move(request), std::move(prepared));
+            auto run = [ctx] { execute_worker_request(ctx); };
+            if (slot.workers.try_submit(slot.io_id, task_class, std::move(run)))
+                return true;
+            // 队列满或已停机，Worker 从未接管节点，仍在本线程回收。
+            ctx->prepared.clear_snapshots();
+            slot.recycle_task(ctx);
+            return false;
+        });
 }
 
-// ============================================================================
-// 【步骤 1】I/O 线程单条客户端连接的 epoll 事件主回调
-// ============================================================================
-// 【作用】处理客户端 Socket 的可读（收包拆帧 + 快慢路径分流）、可写（writev 发送）与异常关闭事件。
-// 【原理】
-//   1. 错误快速清理：若触发 EPOLLERR，立即清理该连接关联的 PTY 终端会话并关闭连接；
-//   2. 批量拆包与三级分流（在 SubmitBatchGuard 合并唤醒作用域内执行 conn->read()）：
-//      - 回调 1（try_inline_or_classify）：判断能否在当前 I/O 线程就地内联响应（如 ping、<=32KiB 的
-//        热文件/目录缓存命中）。内联命中时直接编码进发送队列，不碰对象池、不进 WorkerPool；
-//      - 回调 2（on_inline_enqueued）：若目录缓存内联命中并成功入队，顺手在本线程 DirWatcher
-//      注册监听；
-//      - 回调 3（submit_request）：未走内联的请求按 Normal / Blocking 分类装入池节点投递给
-//      WorkerPool。 退出 SubmitBatchGuard 作用域时，本轮拆包触达的所有沉睡 Worker 只做 1
-//      次内存栅栏并统一合并唤醒；
-//   3. 聚集写回与重装监听：若发送队列有待发数据（含刚产生的内联响应），立即调 conn->write() 用
-//   ::writev()
-//      写出，最后调 refresh_connection() 决定销毁连接还是重装 EPOLLONESHOT 监听掩码。
-void handle_connection_event(const std::shared_ptr<Connection> &conn, IoSlotContext &slot,
-                             net::EpollEvent event) noexcept {
-    const int conn_fd = conn->fd();
-    const std::uint64_t conn_id = conn->id();
+// 每个 socket 就绪事件只在所属 I/O 线程处理。先读完本轮请求，再聚集写出；
+// 即使读写兴趣没变也要重新武装 ONESHOT，否则下次就绪不会唤醒这个连接。
+void handle_connection_event(Connection &conn, IoSlotContext &slot, net::EpollEvent event) noexcept {
+    const int fd = conn.fd();
     auto close_conn = [&]() noexcept {
-        if (slot.terminal_mgr != nullptr)
-            slot.terminal_mgr->close_for_connection(conn_fd);
+        slot.terminal_mgr->close_for_connection(fd);
         try {
-            close_connection(*slot.loop, slot.connections, *slot.counter, conn_fd);
+            slot.connections.close(fd);
         } catch (...) {
         }
     };
@@ -255,87 +191,32 @@ void handle_connection_event(const std::shared_ptr<Connection> &conn, IoSlotCont
     }
 
     try {
-        if (!conn->peer_eof() && !conn->draining() &&
-            (event.readable() || event.peer_closed() || event.hangup())) {
-            PreparedDispatch prepared;
-            std::string inline_watched_dir;
-
-            bool ok = false;
-            {
-                runtime::WorkerPool::SubmitBatchGuard wake_batch(*slot.workers, slot.io_view.io_id);
-                ok = conn->read(
-                    [&](Frame &request) {
-                        return try_inline_or_classify(request, slot.io_view.inline_threshold,
-                                                      prepared, inline_watched_dir);
-                    },
-                    [&](const Frame &response) {
-                        if (!inline_watched_dir.empty() && response.status == Status::ok &&
-                            slot.watcher != nullptr) {
-                            slot.watcher->watch(inline_watched_dir, conn);
-                        }
-                        inline_watched_dir.clear();
-                    },
-                    [&](Frame request) {
-                        return submit_to_worker(std::move(request), prepared, conn_fd, conn_id,
-                                                slot);
-                    });
-            }
-
-            if (!ok) {
-                close_conn();
-                return;
-            }
+        const bool read_ready = event.readable() || event.peer_closed() || event.hangup();
+        if (conn.accepting_requests() && read_ready && !read_and_dispatch_requests(conn, slot)) {
+            close_conn();
+            return;
         }
 
-        if (conn->wants_write())
-            conn->write();
-        if (conn->finished() && slot.terminal_mgr != nullptr)
-            slot.terminal_mgr->close_for_connection(conn_fd);
-        refresh_connection(slot, conn);
+        if (conn.wants_write())
+            conn.flush_output();
+        if (conn.finished())
+            slot.terminal_mgr->close_for_connection(fd);
+        slot.connections.rearm_or_close(conn);
     } catch (...) {
         close_conn();
     }
 }
 
-// ============================================================================
-// 【步骤 0b】目标 I/O 线程接管新连接并挂载到 epoll
-// ============================================================================
-// 【作用】在所属 I/O 线程内构造 Connection 放入 slot.connections，并向本线程 epoll 注册事件回调。
-// 【原理】epoll 回调仅捕获 `[conn, &slot]`（16B + 8B = 24B），刚好卡在 EventLoop::Handler 的 24B
-// SBO 上限内，避免 std::move_only_function 内部二次堆分配。
-void register_connection(net::Socket socket, IoSlotContext &slot) {
-    auto conn = std::make_shared<Connection>(std::move(socket), slot.allocate_conn_id());
-    const int fd = conn->fd();
-
-    slot.connections.emplace(fd, conn);
-    try {
-        auto handler = [conn, &slot](net::EpollEvent event) noexcept {
-            handle_connection_event(conn, slot, event);
-        };
-        slot.loop->add_event(fd, connection_interests(*conn), std::move(handler));
-    } catch (...) {
-        slot.connections.erase(fd);
-        throw;
-    }
-
-    slot.counter->opened();
-}
-
 } // namespace
 
-// ============================================================================
-// 【步骤 0a / 起点】Acceptor 主线程将新接收的客户端 Socket 移交给目标 I/O 线程槽位
-// ============================================================================
-// 【作用】由 Acceptor 线程按轮询选定一个 IoSlotContext 后调用，把新连接安全投递到目标 I/O
-// 线程注册。 【原理】不跨线程加锁修改目标 EventLoop 的连接表，而是通过 slot.loop->post_task
-// 投递异步注册任务；
-//         闭包仅捕获 `[socket, &slot]`（4B + 4B pad + 8B = 16 Bytes <= 24 Bytes），直接命中
-//         EventLoop::Task 的 24B SBO 本地存储，新连接接入同样零闭包堆分配、零 shared_ptr 原子计数。
+// Acceptor 只移动 socket 到目标 EventLoop。注册后 epoll 回调借用表节点；
+// 在回调中断开连接会销毁节点，所以关闭之后立即返回，不再访问 conn。
 export bool post_connection(net::Socket socket, IoSlotContext &slot) {
-    auto register_lambda = [socket = std::move(socket), &slot]() mutable noexcept {
-        register_connection(std::move(socket), slot);
-    };
-    return slot.loop->post_task(std::move(register_lambda));
+    return slot.loop.post_task([socket = std::move(socket), &slot]() mutable {
+        slot.connections.add(std::move(socket), [&slot](Connection &conn, net::EpollEvent event) {
+            handle_connection_event(conn, slot, event);
+        });
+    });
 }
 
 } // namespace rpc::detail

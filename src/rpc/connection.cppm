@@ -4,81 +4,60 @@ import std;
 import net.buffer;
 import net.socket;
 import net.event_loop;
+import net.epoll;
 import rpc.protocol;
 
 export namespace rpc {
 
-// Server 用
+// 连接及其收发缓冲只由所属 EventLoop 访问。Worker 保存 fd 与世代号，不能持有连接引用。
 class Connection {
   public:
-    explicit Connection(net::Socket socket, std::uint64_t id = 0)
+    explicit Connection(net::Socket socket, std::uint64_t id)
         : socket_(std::move(socket)), id_(id) {
     }
 
-    [[nodiscard]]
-    inline int fd() const noexcept {
+    [[nodiscard]] int fd() const noexcept {
         return socket_.native_handle();
     }
 
-    [[nodiscard]]
-    inline std::uint64_t id() const noexcept {
+    [[nodiscard]] std::uint64_t id() const noexcept {
         return id_;
     }
 
-    [[nodiscard]]
-    inline bool wants_write() const noexcept {
+    [[nodiscard]] bool wants_write() const noexcept {
         return !output_.empty();
     }
 
-    [[nodiscard]]
-    inline bool peer_eof() const noexcept {
-        return peer_eof_;
+    // 对端半关闭和服务端停机之后，都停止收请求和推送事件，但仍要发完在途响应。
+    [[nodiscard]] bool accepting_requests() const noexcept {
+        return accepting_requests_;
     }
 
-    [[nodiscard]]
-    inline bool draining() const noexcept {
-        return draining_;
+    void stop_reading() noexcept {
+        accepting_requests_ = false;
     }
 
-    // 停止读取新的 RPC 请求，已提交的 Worker 任务和响应仍然有效。
-    inline void begin_shutdown() noexcept {
-        draining_ = true;
+    [[nodiscard]] bool finished() const noexcept {
+        return !accepting_requests_ && pending_ == 0 && output_.empty();
     }
 
-    // 判断连接是否已满足关闭条件：
-    // 对端已半关闭（peer_eof_）或服务端主动停止读新请求（draining_），
-    // 且所有已提交给 Worker 的在途请求均已处理完（pending_ == 0），且待发队列已全部发空。
-    [[nodiscard]]
-    bool finished() const noexcept {
-        return (peer_eof_ || draining_) && pending_ == 0 && output_.empty();
+    // ONESHOT 交付一次事件后失效。只有待发队列非空时才订阅 EPOLLOUT，
+    // 否则几乎总是可写的 TCP socket 会让 epoll 不断唤醒本线程。
+    [[nodiscard]] net::EpollInterest interests() const noexcept {
+        auto mask = net::EpollInterest::one_shot;
+        if (accepting_requests_)
+            mask = mask | net::EpollInterest::read | net::EpollInterest::peer_closed;
+        if (wants_write())
+            mask = mask | net::EpollInterest::write;
+        return mask;
     }
 
-    // 非阻塞读取 Socket 数据，逐帧解析完整 RPC 请求并分流处理：
-    //   1. draining_ 为 true：处于停机排空阶段，不再读取新数据，直接返回 true。
-    //   2. 循环最多接收 8 次（单次缓冲按 8 KiB 扩容），防止单条高活跃连接饿死同一 I/O 线程上的其他连接。
-    //   3. 每拆出一帧完整 request，先执行 fast_handle(*request)：
-    //      - 返回 true（快路径命中，如小文件 read_file 命中内存缓存）：
-    //        直接在当前 I/O 线程将响应入队 output_，不经过 WorkerPool、不自增 pending_，
-    //        随后在本轮 read 结束后的 conn->write() 中统一用 ::writev() 聚集发出；
-    //      - 返回 false（慢路径，如缓存未命中需读盘、切片超出阈值或写/终端/Git 请求）：
-    //        检查在途请求数未超 max_inflight (64) 后投递给 WorkerPool 异步处理，并递增 pending_。
-    // 返回 false 表示协议非法、在途并发超限、发送缓冲满、Worker 队列满或 EOF 时残留半包，调用方将关闭连接。
-    // 【作用】read() 兼容重载：无需内联响应后置钩子时，转发到三参数版本。
-    template <typename FastHandle, typename Submit>
-    bool read(FastHandle &&fast_handle, Submit &&submit) {
-        return read(std::forward<FastHandle>(fast_handle), [](const Frame &) {},
-                    std::forward<Submit>(submit));
-    }
-
-    // 【作用】三参数版 read()：在内联快路径响应成功入队 output_ 后，回调 on_inline_enqueued
-    //         （例如目录缓存内联命中后顺手在当前 I/O 线程注册 DirWatcher 的 inotify 监听）。
-    // 【原理】单次最多 recv 8 轮防饿死其他连接；每拆出一帧完整请求先试 fast_handle，命中直接入队并触发
-    //         on_inline_enqueued；未命中则检查在途数上限 max_inflight 后交给 submit 异步提交并 ++pending_。
+    // 在可读事件中最多 recv 八轮，每轮直接写入输入缓冲，再拆出其中全部完整帧。
+    // 快路径响应入队成功后才登记目录订阅。只有提交给 Worker 的帧才占用在途名额。
+    // 返回 false 表示收到非法帧，或发送队列、在途上限、Worker 队列已无法接收请求。
     template <typename FastHandle, typename OnInlineEnqueued, typename Submit>
-    bool read(FastHandle &&fast_handle, OnInlineEnqueued &&on_inline_enqueued, Submit &&submit) {
-        if (draining_)
-            return true;
-
+    bool read_requests(FastHandle &&fast_handle, OnInlineEnqueued &&on_inline_enqueued,
+                       Submit &&submit) {
         for (int i = 0; i < 8; ++i) {
             input_.ensure_writable(8192);
             auto n = socket_.try_recv(input_.writable_data(), input_.writable_bytes());
@@ -87,7 +66,7 @@ class Connection {
                 return true;
 
             if (*n == 0) {
-                peer_eof_ = true;
+                stop_reading();
 
                 // EOF 时不允许残留不完整的 RPC Frame。
                 return input_.empty();
@@ -114,8 +93,8 @@ class Connection {
     }
 
     // I/O 线程快路径直接响应入队（直接复用 FrameSendQueue::enqueue，不占用 pending_ 计数）：
-    //   - 当单条连接在一次 read() 流水线中连续命中多条快路径请求时，先发响应会暂存在 output_ 中；
-    //   - 为避免突发大流量在尚未退出 read() 循环前就撑爆 4 MiB 的 max_output 上限，
+    //   - 当单条连接在一次 read_requests() 流水线中连续命中多条快路径请求时，先发响应会暂存在 output_ 中；
+    //   - 为避免突发大流量在尚未退出收包循环前就撑爆 4 MiB 的 max_output 上限，
     //     在积压达到 256 KiB 或首次 enqueue 放不下时，立即尝试一次非阻塞 ::writev() 刷出数据再入队；
     //   - 若刷写后依然超出 max_output（说明对端读太慢且内核发送缓冲区已满），返回 false 断开慢连接。
     bool enqueue_direct_response(Frame &response) {
@@ -137,23 +116,18 @@ class Connection {
         return true;
     }
 
-    // 服务端主动向客户端推送 Event 帧（如 workspace_list_dir 目录变更通知），不核销 pending_。
-    bool enqueue_event(const Frame &event) {
-        if (peer_eof_ || draining_)
-            return false;
-
-        return output_.enqueue(event, max_output);
-    }
-
-    bool enqueue_event(Frame &&event) {
-        if (peer_eof_ || draining_)
-            return false;
-
+    // 单播时发送队列可直接接管正文。广播时第一个订阅者把正文转成共享切片，
+    // 后续队列只拷贝引用。事件没有对应请求，因此不核销 pending_。
+    bool enqueue_event(Frame &event, bool broadcast) {
+        if (broadcast) {
+            event.share_payload();
+            return output_.enqueue(std::as_const(event), max_output);
+        }
         return output_.enqueue(event, max_output);
     }
 
     // 使用 ::writev() 将 output_ 队列中的“17B 帧头 + Payload”聚集写入内核 Socket 发送缓冲区。
-    void write() {
+    void flush_output() {
         output_.write(socket_);
     }
 
@@ -162,58 +136,110 @@ class Connection {
     static constexpr std::size_t max_output = 4 * 1024 * 1024;
 
     net::Socket socket_;
-    std::uint64_t id_{0};
+    const std::uint64_t id_;
     net::Buffer input_;
     net::FrameSendQueue output_;
 
     // 已提交、但尚未收到业务执行结果的 RPC 数量。
     std::size_t pending_{0};
 
-    bool peer_eof_{false};
-    bool draining_{false};
+    bool accepting_requests_{true};
 };
 
-using ConnectionMap = std::unordered_map<int, std::shared_ptr<Connection>>;
-
-// 记录全体 I/O 线程的活跃连接数，供 Acceptor 等待排空。
-class ConnectionCounter {
+// 每个 I/O 线程独占一张连接表。表节点直接拥有 socket，rehash 也不会移动节点里的 Connection。
+// epoll 回调可在注册至注销之间借用节点；异步回包和目录订阅跨越此期限，只保存 (fd, id)。
+class LoopConnections {
   public:
-    void opened() {
-        std::lock_guard lock(mutex_);
-        ++count_;
+    explicit LoopConnections(net::EventLoop &loop) : loop_(loop) {
     }
 
-    void closed() {
-        {
-            std::lock_guard lock(mutex_);
-            --count_;
+    void add(net::Socket socket, auto on_event) {
+        const int fd = socket.native_handle();
+        auto [it, inserted] = active_.try_emplace(fd, std::move(socket), next_id_++);
+        if (!inserted)
+            throw std::logic_error("connection fd already registered");
+        Connection &conn = it->second;
+        try {
+            loop_.add_event(fd, conn.interests(), [&conn, on_event](net::EpollEvent event) {
+                on_event(conn, event);
+            });
+        } catch (...) {
+            active_.erase(it);
+            throw;
         }
-        cv_.notify_all();
     }
 
-    [[nodiscard]] bool wait_empty_for(std::chrono::seconds timeout) {
-        std::unique_lock lock(mutex_);
-        return cv_.wait_for(lock, timeout, [this] {
-            return count_ == 0;
-        });
+    [[nodiscard]] Connection *find(int fd) {
+        auto it = active_.find(fd);
+        return it == active_.end() ? nullptr : &it->second;
+    }
+
+    // fd 在 close 后可立即复用；迟到的回包和目录事件必须同时匹配原连接的世代号。
+    [[nodiscard]] Connection *find(int fd, std::uint64_t id) {
+        auto *conn = find(fd);
+        return conn && conn->id() == id ? conn : nullptr;
+    }
+
+    void close(int fd) {
+        loop_.del_event(fd); // 先注销借用节点的回调，再销毁 socket。
+        active_.erase(fd);
+        if (drain_complete_ && active_.empty()) {
+            drain_complete_->set_value();
+            drain_complete_.reset();
+        }
+    }
+
+    // 已经停读且没有待写数据时，只有在途 Worker 回包能推进连接，无需重装 ONESHOT。
+    void rearm_or_close(Connection &conn) {
+        if (conn.finished())
+            close(conn.fd());
+        else if (conn.accepting_requests() || conn.wants_write())
+            loop_.modify_event(conn.fd(), conn.interests());
+    }
+
+    // 目录和 PTY 推送共用此路径。背压超限或 socket 出错会关闭这条连接，
+    // 返回 false 让目录监听同时移除相应订阅。调用方已跳过停读的连接。
+    bool send_event(Connection &conn, Frame &event, bool broadcast = false) {
+        const int fd = conn.fd();
+        try {
+            if (conn.enqueue_event(event, broadcast)) {
+                conn.flush_output();
+                rearm_or_close(conn);
+                return true;
+            }
+        } catch (...) {
+            // writev 或重装监听失败，走相同的断连清理。
+        }
+        close(fd);
+        return false;
+    }
+
+    // 只在停机时建立一次跨线程通知。空表立即就绪，其余由最后一次 close 唤醒主线程。
+    std::future<void> begin_drain() {
+        std::promise<void> complete;
+        auto drained = complete.get_future();
+        for (auto it = active_.begin(); it != active_.end();) {
+            Connection &conn = (it++)->second; // rearm_or_close 可能删除当前节点。
+            conn.stop_reading();
+            rearm_or_close(conn);
+        }
+        if (active_.empty())
+            complete.set_value();
+        else
+            drain_complete_.emplace(std::move(complete));
+        return drained;
+    }
+
+    void close_all() {
+        while (!active_.empty())
+            close(active_.begin()->first);
     }
 
   private:
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    std::size_t count_{0};
+    net::EventLoop &loop_;
+    std::unordered_map<int, Connection> active_;
+    std::uint64_t next_id_{1};
+    std::optional<std::promise<void>> drain_complete_;
 };
-
-// 注销监听后再释放 Connection，防止 epoll 中留下旧 fd。
-void close_connection(net::EventLoop &loop, ConnectionMap &connections, ConnectionCounter &counter,
-                      int fd) {
-    auto it = connections.find(fd);
-    if (it == connections.end())
-        return;
-
-    loop.del_event(fd);
-    connections.erase(it);
-    counter.closed();
-}
 
 } // namespace rpc

@@ -124,7 +124,8 @@ void DirWatcher::schedule_refresh(int wd) {
         return;
 
     WatchEntry &entry = it->second;
-    if (!has_subscribers(entry)) {
+    prune_disconnected_subscribers(entry);
+    if (entry.subscribers.empty()) {
         remove_watch(wd, true);
         return;
     }
@@ -177,10 +178,7 @@ void DirWatcher::complete_refresh(RefreshTaskContext *ctx) {
     const int wd = ctx->wd;
     std::optional<Frame> event_frame = std::move(ctx->event_frame);
     release_refresh_ctx(ctx);
-    complete_refresh(wd, std::move(event_frame));
-}
 
-void DirWatcher::complete_refresh(int wd, std::optional<Frame> event_frame) {
     if (stopped_)
         return;
 
@@ -189,52 +187,24 @@ void DirWatcher::complete_refresh(int wd, std::optional<Frame> event_frame) {
         return;
 
     WatchEntry &entry = it->second;
-    if (!has_subscribers(entry)) {
-        remove_watch(wd, true);
-        return;
-    }
-
+    // 先排除已断开或停读的订阅者。只有多个有效接收方才需要共享正文。
+    prune_disconnected_subscribers(entry);
     if (event_frame) {
         const bool broadcast = entry.subscribers.size() > 1;
-        for (auto sub_it = entry.subscribers.begin(); sub_it != entry.subscribers.end();) {
-            auto conn = sub_it->second.lock();
-            if (!conn || conn->peer_eof() || conn->draining()) {
-                sub_it = entry.subscribers.erase(sub_it);
-                continue;
-            }
-            ++sub_it;
-
-            try {
-                if (broadcast)
-                    event_frame->share_payload();
-                const bool enqueued = broadcast ? conn->enqueue_event(*event_frame)
-                                                : conn->enqueue_event(std::move(*event_frame));
-                if (!enqueued) {
-                    rpc::close_connection(loop_, connections_, counter_, conn->fd());
-                    continue;
-                }
-                if (conn->wants_write())
-                    conn->write();
-                if (refresh_conn_)
-                    refresh_conn_(conn);
-            } catch (...) {
-                rpc::close_connection(loop_, connections_, counter_, conn->fd());
-            }
-        }
+        std::erase_if(entry.subscribers, [&](const auto &subscriber) {
+            // 同一 I/O 线程内没有其他回调插入，刚校验过的节点在轮到它时一定存活。
+            auto *conn = connections_.find(subscriber.first, subscriber.second);
+            return !connections_.send_event(*conn, *event_frame, broadcast);
+        });
     }
-
-    if (!has_subscribers(entry)) {
+    if (entry.subscribers.empty()) {
         remove_watch(wd, true);
         return;
     }
 
-    if (entry.dirty) {
-        entry.refreshing = false;
-        entry.dirty = false;
+    entry.refreshing = false;
+    if (entry.dirty)
         schedule_refresh(wd);
-    } else {
-        entry.refreshing = false;
-    }
 }
 
 }
