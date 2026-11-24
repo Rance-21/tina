@@ -34,6 +34,15 @@ class ClassLatencyRecorder {
         samples_ns_[static_cast<std::size_t>(bucket)].push_back(latency_ns);
     }
 
+    // 【作用】将另一个压测线程私有的分类延迟样本合并到当前汇总器（压测结束阶段调用）。
+    void merge(const ClassLatencyRecorder &other) {
+        for (std::size_t i = 0; i < samples_ns_.size(); ++i) {
+            auto &dst = samples_ns_[i];
+            const auto &src = other.samples_ns_[i];
+            dst.insert(dst.end(), src.begin(), src.end());
+        }
+    }
+
     // 【作用】对每个非空分类桶计算样本数与 p50 / p95 / p99（微秒），格式化为报表文本段落。
     // 【原理】拷贝各桶样本数组排序后，按线性插值公式计算精确分位点并除以 1000.0 转成微秒输出。
     [[nodiscard]] std::string format_summary() const {

@@ -35,7 +35,7 @@ struct TransparentStringHash {
 }
 
 // ============================================================================
-// 分片式线程安全 LRU 缓存模板（仅使用 C++ 标准库容器）
+// 分片式线程安全 LRU 缓存模板
 // ============================================================================
 // - 分片数量固定为 16（2 的幂），通过路径哈希低位分片降低多线程并发锁竞争；
 // - 每个分片独立维护 LRU 双向链表（std::list）与哈希表（std::unordered_map），O(1) 命中与淘汰；
@@ -146,7 +146,7 @@ template <typename Value, bool TrackParentDir> class ShardedLruCache {
         }
     }
 
-    // 精确失效单个键（推进版本号并在存在时删除）。
+    // 失效单个键（推进版本号并在存在时删除）。
     void invalidate(std::string_view key) noexcept {
         if (key.empty())
             return;
@@ -320,4 +320,4 @@ template <typename Value, bool TrackParentDir> class ShardedLruCache {
 
 } // namespace detail
 
-}
+} // namespace service

@@ -18,10 +18,24 @@ struct PreparedDispatch {
     std::shared_ptr<const std::vector<DirEntry>> cached_dir;
     std::string cached_dir_path;
 
-    // 【作用】将上下文重置回默认初始态，供同一连接连续拆包处理下一帧请求时复用栈对象。
-    // 【原理】清空缓存快照的 shared_ptr 引用与路径字符串，并将默认分类重置为保守的 blocking。
+    // 【作用】将上下文重置回默认初始态，供同一连接连续拆包或槽位对象池回收复用。
+    // 【原理】释放缓存快照的 shared_ptr 引用，对 cached_dir_path 调用 clear() 保留底层字符串容量避免重复分配，
+    //         并将默认分类重置为保守的 blocking。
     void reset() noexcept {
-        *this = {};
+        task_class = runtime::TaskClass::blocking;
+        cached_file.reset();
+        file_slice_offset = 0;
+        file_slice_size = 0;
+        cached_dir.reset();
+        cached_dir_path.clear();
+    }
+
+    // 【作用】在 Worker 线程消费完预取快照后立即释放 shared_ptr 引用，避免延长大文件/目录缓存块生命周期，
+    //         同时让回写阶段的 I/O 线程无需再触碰 prepared 所在的尾部缓存行。
+    void clear_snapshots() noexcept {
+        cached_file.reset();
+        cached_dir.reset();
+        cached_dir_path.clear();
     }
 };
 

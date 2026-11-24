@@ -52,11 +52,10 @@ class EventLoopThreadPool {
 
         try {
             for (std::size_t i = 0; i < count; ++i) {
-                auto ctx = std::make_unique<ThreadContext>(ThreadContext{
+                auto ctx = std::make_unique<IoThreadContext>(IoThreadContext{
                     .loop = loops_[i].get(),
                     .io_id = i,
-                    .pin_cpu = cpu_ids.empty() ? std::nullopt
-                                               : std::optional<unsigned>{cpu_ids[i]},
+                    .pin_cpu = cpu_ids.empty() ? std::nullopt : std::optional<unsigned>{cpu_ids[i]},
                     .ready = ready_latch,
                     .error = &(*startup_errors)[i],
                 });
@@ -132,7 +131,7 @@ class EventLoopThreadPool {
     }
 
   private:
-    struct ThreadContext {
+    struct IoThreadContext {
         EventLoop *loop{nullptr};
         std::size_t io_id{0};
         std::optional<unsigned> pin_cpu;
@@ -144,7 +143,7 @@ class EventLoopThreadPool {
     // 【原理】记录 thread_local io_id -> 若指定了绑核则二次执行 pin_thread_to_cpu 并回读校验 ->
     //         通过 ready latch 告知主线程启动结果 -> 正式调用 loop->run() 进入 epoll 事件主循环。
     static void *entry(void *arg) noexcept {
-        auto *ctx = static_cast<ThreadContext *>(arg);
+        auto *ctx = static_cast<IoThreadContext *>(arg);
         t_current_io_id = ctx->io_id;
 
         try {
@@ -169,7 +168,7 @@ class EventLoopThreadPool {
     }
 
     std::vector<std::unique_ptr<EventLoop>> loops_;
-    std::vector<std::unique_ptr<ThreadContext>> contexts_;
+    std::vector<std::unique_ptr<IoThreadContext>> contexts_;
     std::vector<pthread_t> threads_;
 
     // 只在 Acceptor 线程中修改。

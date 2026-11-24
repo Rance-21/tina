@@ -112,6 +112,25 @@ class Stats {
         bytes_received_ += bytes;
     }
 
+    // 【作用】将另一个线程私有的 Stats 统计数据无锁合并到当前汇总实例中（压测结束阶段调用）。
+    void merge(const Stats &other) {
+        warmup_completed_ += other.warmup_completed_;
+        warmup_errors_ += other.warmup_errors_;
+        completed_ += other.completed_;
+        errors_ += other.errors_;
+        bytes_sent_ += other.bytes_sent_;
+        bytes_received_ += other.bytes_received_;
+
+        latencies_ns_.insert(latencies_ns_.end(), other.latencies_ns_.begin(),
+                             other.latencies_ns_.end());
+        if (other.per_second_counts_.size() > per_second_counts_.size()) {
+            per_second_counts_.resize(other.per_second_counts_.size(), 0);
+        }
+        for (std::size_t i = 0; i < other.per_second_counts_.size(); ++i) {
+            per_second_counts_[i] += other.per_second_counts_[i];
+        }
+    }
+
     [[nodiscard]] BenchSummary summarize(std::string_view workload_name, std::string_view host,
                                          std::string_view port, std::size_t connections,
                                          std::size_t max_inflight, double warmup_seconds,

@@ -1,6 +1,8 @@
 module;
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <pthread.h>
+#include <sched.h>
 #include <sys/socket.h>
 
 export module bench.client;
@@ -16,6 +18,111 @@ import bench.stats;
 export namespace bench {
 
 using Clock = std::chrono::steady_clock;
+
+// ============================================================================
+// 压测客户端 CPU 亲和性隔离工具（严格避开 runtime/config.cppm 中的 Server 核心）
+// ============================================================================
+// Server 默认占用：
+//   - I/O EventLoop (4P) : {0, 2, 4, 8}（对应 SMT 兄弟核为 {1, 3, 5, 9}）
+//   - Worker / Logger (8E): {16, 17, 18, 19, 20, 21, 22, 23}
+// 因此压测客户端优先绑定至完全空闲的另外 4 颗物理 P-core {6, 10, 12, 14}，
+// 其次为另外 8 颗物理 E-core {24..31}，最后才是客户端 P-core 的超线程兄弟 {7, 11, 13, 15}。
+inline constexpr std::array<unsigned, 16> kPreferredClientCpus = {
+    6, 10, 12, 14, 24, 25, 26, 27, 28, 29, 30, 31, 7, 11, 13, 15};
+
+// 【作用】探测当前进程可用的客户端专属逻辑 CPU 列表（与当前进程 affinity 掩码求交集）。
+[[nodiscard]] inline std::vector<unsigned> discover_client_cpus() noexcept {
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    if (::sched_getaffinity(0, sizeof(mask), &mask) != 0)
+        return {};
+
+    std::vector<unsigned> result;
+    result.reserve(kPreferredClientCpus.size());
+    for (unsigned cpu : kPreferredClientCpus) {
+        if (cpu < static_cast<unsigned>(CPU_SETSIZE) && CPU_ISSET(cpu, &mask))
+            result.push_back(cpu);
+    }
+
+    // 若运行在核心数较少或已由外部 taskset 限制到其他核的环境中，回退为当前掩码允许的全部核心。
+    if (result.empty()) {
+        for (unsigned cpu = 0; cpu < static_cast<unsigned>(CPU_SETSIZE); ++cpu) {
+            if (CPU_ISSET(cpu, &mask))
+                result.push_back(cpu);
+        }
+    }
+    return result;
+}
+
+// 【作用】将当前压测线程绑定到给定的 CPU 集合（尽力而为，受限容器环境下失败不抛异常）。
+inline void pin_current_thread_to_cpus(std::span<const unsigned> cpus) noexcept {
+    if (cpus.empty())
+        return;
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    for (unsigned cpu : cpus) {
+        if (cpu < static_cast<unsigned>(CPU_SETSIZE))
+            CPU_SET(cpu, &set);
+    }
+    (void)::pthread_setaffinity_np(::pthread_self(), sizeof(set), &set);
+}
+
+// 【作用】将当前压测工作线程一对一钉死在指定逻辑 CPU 核心上。
+inline void pin_current_thread_to_cpu(unsigned cpu) noexcept {
+    pin_current_thread_to_cpus(std::span<const unsigned>{&cpu, 1});
+}
+
+// ============================================================================
+// 零拷贝接收帧视图（直接引用 net::Buffer 连续可读区，消除每次收包的 string 堆分配与拷贝）
+// ============================================================================
+struct RxFrameView {
+    std::uint32_t length{};
+    Kind kind{};
+    std::uint64_t request_id{};
+    Method method{};
+    Status status{};
+    std::string_view payload{};
+};
+
+[[nodiscard]] inline bool valid_rx_header(const RxFrameView &frame) noexcept {
+    switch (frame.kind) {
+    case Kind::request:
+        return frame.request_id != 0 && frame.status == Status::ok;
+    case Kind::response:
+        return frame.request_id != 0 && frame.status <= Status::timeout;
+    case Kind::event:
+        return frame.request_id == 0 && frame.status == Status::ok;
+    }
+    return false;
+}
+
+// 【作用】从输入缓冲区零拷贝解析一帧完整 RPC 消息视图；处理完毕后由调用方执行 in.retrieve(4 + length)。
+[[nodiscard]] inline std::optional<RxFrameView> peek_frame_view(const net::Buffer &in) {
+    if (in.readable_bytes() < 4)
+        return std::nullopt;
+
+    const char *bytes = in.data();
+    const auto length = read_be<std::uint32_t>(bytes);
+    if (length < min_frame_length || length > max_frame_length)
+        throw std::invalid_argument("invalid RPC frame length");
+
+    if (in.readable_bytes() < 4 + length)
+        return std::nullopt;
+
+    RxFrameView frame{
+        .length = length,
+        .kind = static_cast<Kind>(bytes[4]),
+        .request_id = read_be<std::uint64_t>(bytes + 5),
+        .method = static_cast<Method>(read_be<std::uint16_t>(bytes + 13)),
+        .status = static_cast<Status>(read_be<std::uint16_t>(bytes + 15)),
+        .payload = std::string_view(bytes + frame_header_size, length - min_frame_length),
+    };
+
+    if (!valid_rx_header(frame))
+        throw std::invalid_argument("invalid RPC frame header");
+
+    return frame;
+}
 
 // BenchConnection：管理单条 TCP Socket 连接、维持 max_inflight 请求流水线、发送请求并解析响应。
 class BenchConnection {
@@ -155,12 +262,30 @@ class BenchConnection {
         output_.write(socket_);
     }
 
+    [[nodiscard]] static bool validate_view(Method request_method,
+                                            const RxFrameView &response) noexcept {
+        if (response.kind != Kind::response || response.method != request_method)
+            return false;
+
+        switch (request_method) {
+        case Method::system_ping:
+            return response.status == Status::ok && response.payload == "PONG";
+        case Method::kv_set:
+            return response.status == Status::ok && response.payload == "OK";
+        case Method::kv_get:
+        case Method::kv_del:
+            return response.status == Status::ok || response.status == Status::not_found;
+        default:
+            return response.status == Status::ok;
+        }
+    }
+
     void receive_responses(Workload &workload, Stats &stats, Clock::time_point warmup_end,
                            Clock::time_point test_end) {
-        std::array<char, 16384> chunk{};
-
+        (void)workload;
         while (true) {
-            auto n = socket_.try_recv(chunk.data(), chunk.size());
+            input_.ensure_writable(65536);
+            auto n = socket_.try_recv(input_.writable_data(), input_.writable_bytes());
             if (!n) {
                 break;
             }
@@ -168,17 +293,19 @@ class BenchConnection {
                 throw std::runtime_error("server closed benchmark connection");
             }
 
-            input_.append(chunk.data(), *n);
+            input_.commit_write(*n);
+            const auto batch_now = Clock::now();
 
-            while (auto frame = decode_frame(input_)) {
+            while (auto frame = peek_frame_view(input_)) {
+                const auto total_frame_bytes = static_cast<std::size_t>(4 + frame->length);
                 if (frame->kind == Kind::event) {
+                    input_.retrieve(total_frame_bytes);
                     continue;
                 }
                 if (frame->kind != Kind::response) {
                     throw std::runtime_error("unexpected non-response RPC frame");
                 }
 
-                const auto now = Clock::now();
                 const auto req_id = frame->request_id;
                 const auto slot_idx = static_cast<std::uint16_t>(req_id & 0xFFFFu);
 
@@ -191,22 +318,23 @@ class BenchConnection {
                 const auto send_time = slot.send_time;
                 const auto req_method = slot.method;
                 const auto req_bytes = slot.wire_bytes;
-                const auto resp_bytes = static_cast<std::size_t>(4 + frame->length);
+                const auto resp_bytes = total_frame_bytes;
 
                 slot.in_use = false;
                 free_slots_.push_back(slot_idx);
                 --inflight_;
 
-                const bool valid = workload.validate_response(req_method, *frame);
+                const bool valid = validate_view(req_method, *frame);
+                input_.retrieve(total_frame_bytes);
 
-                if (now < warmup_end) {
+                if (batch_now < warmup_end) {
                     stats.record_warmup(valid);
-                } else if (now <= test_end) {
+                } else if (batch_now <= test_end) {
                     const auto latency_ns = static_cast<std::uint64_t>(
-                        std::chrono::duration_cast<std::chrono::nanoseconds>(now - send_time)
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(batch_now - send_time)
                             .count());
                     const auto sec_idx = static_cast<std::size_t>(
-                        std::chrono::duration_cast<std::chrono::seconds>(now - warmup_end)
+                        std::chrono::duration_cast<std::chrono::seconds>(batch_now - warmup_end)
                             .count());
                     stats.record_measured(valid, latency_ns, req_bytes, resp_bytes, sec_idx);
                 }
@@ -279,22 +407,21 @@ class BenchRunner {
     }
 
     BenchSummary run() {
+        const auto client_cpus = discover_client_cpus();
+        pin_current_thread_to_cpus(client_cpus);
+
         const auto measured_duration = config_.total_duration - config_.warmup_duration;
-        net::Epoll epoll(std::max<std::size_t>(256, config_.connections * 2));
-        Workload workload(config_.workload);
-        Stats stats(6'000'000, static_cast<std::size_t>(measured_duration.count()));
+        const std::size_t worker_cnt =
+            std::max<std::size_t>(1, std::min(config_.connections,
+                                              client_cpus.empty() ? 4 : client_cpus.size()));
 
-        std::vector<std::unique_ptr<BenchConnection>> conns;
-        std::unordered_map<int, BenchConnection *> conn_map;
-        conns.reserve(config_.connections);
-        conn_map.reserve(config_.connections);
-
-        for (std::size_t i = 0; i < config_.connections; ++i) {
-            auto conn =
-                std::make_unique<BenchConnection>(config_.host, config_.port, config_.max_inflight);
-            conn->register_epoll(epoll);
-            conn_map.emplace(conn->fd(), conn.get());
-            conns.push_back(std::move(conn));
+        Workload base_workload(config_.workload);
+        std::vector<Workload> workloads(worker_cnt, base_workload);
+        std::vector<Stats> worker_stats;
+        worker_stats.reserve(worker_cnt);
+        for (std::size_t w = 0; w < worker_cnt; ++w) {
+            worker_stats.emplace_back(6'000'000 / worker_cnt + 1024,
+                                      static_cast<std::size_t>(measured_duration.count()));
         }
 
         const auto start_time = Clock::now();
@@ -304,50 +431,97 @@ class BenchRunner {
         std::cout << "[压测引擎] 开始压测 " << config_.host << ":" << config_.port
                   << " | 负载=" << workload_name(config_.workload.type)
                   << " | 连接数=" << config_.connections
+                  << " | 压测线程=" << worker_cnt
                   << " | 单连接 Inflight=" << config_.max_inflight
                   << " | 预热=" << config_.warmup_duration.count() << "s"
                   << " | 总时长=" << config_.total_duration.count() << "s\n"
                   << std::flush;
 
-        bool warmup_logged = (config_.warmup_duration.count() == 0);
+        std::atomic<bool> abort_flag{false};
+        std::vector<std::exception_ptr> worker_errors(worker_cnt);
 
-        while (true) {
-            const auto now = Clock::now();
-            if (now >= test_end) {
-                break;
-            }
+        auto worker_fn = [&](std::size_t w) {
+            try {
+                if (!client_cpus.empty())
+                    pin_current_thread_to_cpu(client_cpus[w % client_cpus.size()]);
 
-            if (!warmup_logged && now >= warmup_end) {
-                warmup_logged = true;
-                std::cout << "[压测引擎] 预热完成 (" << config_.warmup_duration.count() << "s, "
-                          << stats.warmup_completed() << " reqs)，开始正式测量 "
-                          << measured_duration.count() << "s...\n"
-                          << std::flush;
-            }
+                std::size_t my_conns = 0;
+                for (std::size_t i = w; i < config_.connections; i += worker_cnt)
+                    ++my_conns;
 
-            const auto remaining_ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(test_end - now).count();
-            const int timeout_ms = static_cast<int>(std::clamp< std::int64_t>(remaining_ms, 1, 20));
+                net::Epoll epoll(std::max<std::size_t>(64, my_conns * 2));
+                std::vector<std::unique_ptr<BenchConnection>> conns;
+                std::unordered_map<int, BenchConnection *> conn_map;
+                conns.reserve(my_conns);
+                conn_map.reserve(my_conns);
 
-            auto events = epoll.wait(timeout_ms);
-            for (const auto &ev : events) {
-                auto it = conn_map.find(ev.fd);
-                if (it == conn_map.end()) {
-                    continue;
+                for (std::size_t i = w; i < config_.connections; i += worker_cnt) {
+                    auto conn = std::make_unique<BenchConnection>(config_.host, config_.port,
+                                                                  config_.max_inflight);
+                    conn->register_epoll(epoll);
+                    conn_map.emplace(conn->fd(), conn.get());
+                    conns.push_back(std::move(conn));
                 }
-                it->second->on_event(ev, epoll, workload, stats, warmup_end, test_end, false);
-            }
 
-            bool any_alive = false;
-            for (const auto &conn : conns) {
-                if (!conn->closed()) {
-                    any_alive = true;
-                    break;
+                bool warmup_logged = (w != 0) || (config_.warmup_duration.count() == 0);
+                while (!abort_flag.load(std::memory_order_relaxed)) {
+                    const auto now = Clock::now();
+                    if (now >= test_end)
+                        break;
+
+                    if (!warmup_logged && now >= warmup_end) {
+                        warmup_logged = true;
+                        std::uint64_t total_warm = 0;
+                        for (const auto &st : worker_stats)
+                            total_warm += st.warmup_completed();
+                        std::cout << "[压测引擎] 预热完成 (" << config_.warmup_duration.count()
+                                  << "s, " << total_warm << " reqs)，开始正式测量 "
+                                  << measured_duration.count() << "s...\n"
+                                  << std::flush;
+                    }
+
+                    const auto remaining_ms =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(test_end - now)
+                            .count();
+                    const int timeout_ms =
+                        static_cast<int>(std::clamp<std::int64_t>(remaining_ms, 1, 20));
+
+                    auto events = epoll.wait(timeout_ms);
+                    for (const auto &ev : events) {
+                        auto it = conn_map.find(ev.fd);
+                        if (it == conn_map.end())
+                            continue;
+                        it->second->on_event(ev, epoll, workloads[w], worker_stats[w], warmup_end,
+                                             test_end, false);
+                    }
+
+                    bool any_alive = false;
+                    for (const auto &conn : conns) {
+                        if (!conn->closed()) {
+                            any_alive = true;
+                            break;
+                        }
+                    }
+                    if (!any_alive)
+                        throw std::runtime_error("all benchmark connections closed prematurely");
                 }
+            } catch (...) {
+                abort_flag.store(true, std::memory_order_relaxed);
+                worker_errors[w] = std::current_exception();
             }
-            if (!any_alive) {
-                throw std::runtime_error("all benchmark connections closed prematurely");
-            }
+        };
+
+        std::vector<std::thread> threads;
+        threads.reserve(worker_cnt > 0 ? worker_cnt - 1 : 0);
+        for (std::size_t w = 1; w < worker_cnt; ++w)
+            threads.emplace_back(worker_fn, w);
+        worker_fn(0);
+        for (auto &t : threads)
+            t.join();
+
+        for (const auto &err : worker_errors) {
+            if (err)
+                std::rethrow_exception(err);
         }
 
         const auto actual_end = Clock::now();
@@ -356,9 +530,13 @@ class BenchRunner {
         const double actual_measured_s =
             std::chrono::duration<double>(actual_end - warmup_end).count();
 
-        auto summary = stats.summarize(workload_name(config_.workload.type), config_.host,
-                                       config_.port, config_.connections, config_.max_inflight,
-                                       actual_warmup_s, actual_measured_s);
+        Stats total_stats(6'000'000, static_cast<std::size_t>(measured_duration.count()));
+        for (const auto &st : worker_stats)
+            total_stats.merge(st);
+
+        auto summary = total_stats.summarize(workload_name(config_.workload.type), config_.host,
+                                             config_.port, config_.connections, config_.max_inflight,
+                                             actual_warmup_s, actual_measured_s);
 
         write_report_file(config_.output_file, summary);
         return summary;

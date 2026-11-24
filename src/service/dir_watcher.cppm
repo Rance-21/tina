@@ -117,7 +117,7 @@ void DirWatcher::on_event(net::EpollEvent event) {
     }
 }
 
-// 把目录扫描扔到 Worker 线程
+// 把目录扫描扔到 Worker 线程（通过单指针捕获 [ctx] 命中 24B SBO，消除两层闭包堆分配）
 void DirWatcher::schedule_refresh(int wd) {
     auto it = watches_.find(wd);
     if (it == watches_.end())
@@ -136,21 +136,48 @@ void DirWatcher::schedule_refresh(int wd) {
 
     entry.refreshing = true;
     entry.dirty = false;
-    const std::string rel_path = entry.rel_path;
-    std::weak_ptr<DirWatcher> weak = shared_from_this();
+    RefreshTaskContext *ctx = acquire_refresh_ctx(wd, entry.rel_path);
 
-    if (!workers_.try_submit(io_id_, runtime::TaskClass::blocking, [weak, wd, rel_path]() {
-            auto event_frame = server::build_workspace_list_dir_event(rel_path);
-            if (auto self = weak.lock()) {
-                (void)self->loop_.post_task(
-                    [weak, wd, event_frame = std::move(event_frame)]() mutable {
-                        if (auto watcher = weak.lock())
-                            watcher->complete_refresh(wd, std::move(event_frame));
-                    });
-            }
-        })) {
+    auto worker_lambda = [ctx]() noexcept {
+        try {
+            ctx->event_frame = server::build_workspace_list_dir_event(ctx->rel_path);
+        } catch (...) {
+            ctx->event_frame.reset();
+        }
+
+        if (auto self = ctx->weak_watcher.lock()) {
+            auto complete_lambda = [ctx]() noexcept {
+                if (auto watcher = ctx->weak_watcher.lock()) {
+                    watcher->complete_refresh(ctx);
+                } else {
+                    delete ctx;
+                }
+            };
+            static_assert(sizeof(complete_lambda) <= 24 && alignof(decltype(complete_lambda)) <= 8 &&
+                          std::is_nothrow_move_constructible_v<decltype(complete_lambda)>,
+                          "DirWatcher completion task must fit in std::move_only_function 24B SBO");
+
+            if (self->loop_.post_task(std::move(complete_lambda)))
+                return;
+        }
+        // 仅当 DirWatcher 已销毁或 EventLoop 已停止拒绝新任务时，在 Worker 线程兜底释放 ctx。
+        delete ctx;
+    };
+    static_assert(sizeof(worker_lambda) <= 24 && alignof(decltype(worker_lambda)) <= 8 &&
+                  std::is_nothrow_move_constructible_v<decltype(worker_lambda)>,
+                  "DirWatcher worker task must fit in std::move_only_function 24B SBO");
+
+    if (!workers_.try_submit(io_id_, runtime::TaskClass::blocking, std::move(worker_lambda))) {
+        release_refresh_ctx(ctx);
         entry.refreshing = false;
     }
+}
+
+void DirWatcher::complete_refresh(RefreshTaskContext *ctx) {
+    const int wd = ctx->wd;
+    std::optional<Frame> event_frame = std::move(ctx->event_frame);
+    release_refresh_ctx(ctx);
+    complete_refresh(wd, std::move(event_frame));
 }
 
 void DirWatcher::complete_refresh(int wd, std::optional<Frame> event_frame) {

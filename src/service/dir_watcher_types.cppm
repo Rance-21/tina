@@ -147,6 +147,65 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
         bool dirty{false};
     };
 
+    // ============================================================================
+    // 目录异步重扫任务上下文（单 I/O 线程内池化复用，使两层跨线程闭包收敛为 8B 单指针）
+    // ============================================================================
+    // 设计原理：
+    //   1. 原先 schedule_refresh 向 WorkerPool 投递的闭包捕获 [weak, wd, rel_path]（56B），
+    //      Worker 向 EventLoop 回投的闭包捕获 [weak, wd, event_frame]（120B），均超出
+    //      std::move_only_function 的 24B SBO 上限，每次目录变更都会触发 2 次跨线程 new/delete；
+    //   2. 将上述字段集中到 RefreshTaskContext 中，使两层 Lambda 均只捕获 `[ctx]() noexcept`（8B <= 24B），
+    //      100% 命中 SBO 本地存储，实现目录重扫投递与回传零闭包堆分配；
+    //   3. 借出（schedule_refresh）与归还（complete_refresh）均发生在同一所属 I/O 线程，
+    //      通过 refresh_pool_ 单线程无锁复用节点及 rel_path 字符串容量。
+    struct RefreshTaskContext {
+        std::weak_ptr<DirWatcher> weak_watcher{};
+        int wd{-1};
+        std::string rel_path{};
+        std::optional<Frame> event_frame{};
+    };
+
+    static constexpr std::size_t kMaxPooledRefreshTasks = 64;
+
+    [[nodiscard]] RefreshTaskContext *acquire_refresh_ctx(int wd, std::string_view rel_path) {
+        RefreshTaskContext *ctx = nullptr;
+        if (!refresh_pool_.empty()) {
+            ctx = refresh_pool_.back().release();
+            refresh_pool_.pop_back();
+        } else {
+            ctx = new RefreshTaskContext{};
+        }
+
+        ctx->weak_watcher = shared_from_this();
+        ctx->wd = wd;
+        ctx->rel_path.assign(rel_path);
+        ctx->event_frame.reset();
+        return ctx;
+    }
+
+    void release_refresh_ctx(RefreshTaskContext *ctx) noexcept {
+        if (ctx == nullptr)
+            return;
+
+        ctx->weak_watcher.reset();
+        ctx->wd = -1;
+        if (ctx->rel_path.capacity() > 1024) {
+            ctx->rel_path = {};
+        } else {
+            ctx->rel_path.clear();
+        }
+        ctx->event_frame.reset();
+
+        if (refresh_pool_.size() < kMaxPooledRefreshTasks) {
+            try {
+                refresh_pool_.emplace_back(ctx);
+                return;
+            } catch (...) {
+            }
+        }
+        delete ctx;
+    }
+
     static inline std::string join_rel_path(std::string_view dir, std::string_view name) {
         std::string out;
         out.reserve(dir.size() + 1 + name.size());
@@ -199,6 +258,8 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
 
     void schedule_refresh(int wd);
 
+    void complete_refresh(RefreshTaskContext *ctx);
+
     void complete_refresh(int wd, std::optional<Frame> event_frame);
 
     net::EventLoop &loop_;
@@ -216,6 +277,7 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
     std::unordered_map<int, WatchEntry> watches_;
     std::unordered_map<std::string, int, detail::TransparentStringHash, std::equal_to<>>
         path_to_wd_;
+    std::vector<std::unique_ptr<RefreshTaskContext>> refresh_pool_;
 };
 
 } // namespace service

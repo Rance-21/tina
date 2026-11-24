@@ -218,3 +218,45 @@
 [2026-11-20 17:12:48.614] [info] [tid 374268] tina listening on port 3490 | io=4{0,2,4,8} | workers=8 (normal=4, blocking=4){16,17,18,19,20,21,22,23} | lane_cap=128 | inline_bytes=32768 | affinity=on
 [2026-11-20 17:13:50.230] [info] [tid 374268] shutdown: stop accepting connections
 [2026-11-20 17:13:50.237] [info] [tid 374268] shutdown: completed
+[2026-11-20 17:48:29.138] [warning] [tid 441717] topology: IO CPU 0 has online SMT sibling CPU 1 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-20 17:48:29.138] [warning] [tid 441717] topology: IO CPU 2 has online SMT sibling CPU 3 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-20 17:48:29.138] [warning] [tid 441717] topology: IO CPU 4 has online SMT sibling CPU 5 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-20 17:48:29.138] [warning] [tid 441717] topology: IO CPU 8 has online SMT sibling CPU 9 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-20 17:48:29.142] [info] [tid 441717] tina listening on port 3490 | io=4{0,2,4,8} | workers=8 (normal=2, blocking=6){16,17,18,19,20,21,22,23} | lane_cap=128 | inline_bytes=32768 | affinity=on
+[2026-11-20 17:51:30.904] [info] [tid 441717] shutdown: stop accepting connections
+[2026-11-20 17:51:30.911] [info] [tid 441717] shutdown: completed
+[2026-11-20 18:00:56.851] [warning] [tid 534401] topology: IO CPU 0 has online SMT sibling CPU 1 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-20 18:00:56.851] [warning] [tid 534401] topology: IO CPU 2 has online SMT sibling CPU 3 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-20 18:00:56.851] [warning] [tid 534401] topology: IO CPU 4 has online SMT sibling CPU 5 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-20 18:00:56.851] [warning] [tid 534401] topology: IO CPU 8 has online SMT sibling CPU 9 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-20 18:00:56.852] [info] [tid 534401] tina listening on port 3490 | io=4{0,2,4,8} | workers=8 (normal=2, blocking=6){16,17,18,19,20,21,22,23} | lane_cap=128 | inline_bytes=32768 | affinity=on
+[2026-11-20 18:02:58.397] [info] [tid 534401] shutdown: stop accepting connections
+[2026-11-20 18:02:58.403] [info] [tid 534401] shutdown: completed
+[2026-11-23 20:09:40.303] [warning] [tid 37081] topology: IO CPU 0 has online SMT sibling CPU 1 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-23 20:09:40.303] [warning] [tid 37081] topology: IO CPU 2 has online SMT sibling CPU 3 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-23 20:09:40.303] [warning] [tid 37081] topology: IO CPU 4 has online SMT sibling CPU 5 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-23 20:09:40.303] [warning] [tid 37081] topology: IO CPU 8 has online SMT sibling CPU 9 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-23 20:09:40.305] [info] [tid 37081] tina listening on port 3490 | io=4{0,2,4,8} | workers=8 (normal=2, blocking=6){16,17,18,19,20,21,22,23} | lane_cap=128 | inline_bytes=32768 | affinity=on
+[2026-11-23 20:09:48.062] [info] [tid 37081] shutdown: stop accepting connections
+[2026-11-23 20:09:48.064] [info] [tid 37081] shutdown: completed
+[2026-11-23 20:26:52.828] [warning] [tid 136859] topology: IO CPU 0 has online SMT sibling CPU 1 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-23 20:26:52.828] [warning] [tid 136859] topology: IO CPU 2 has online SMT sibling CPU 3 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-23 20:26:52.828] [warning] [tid 136859] topology: IO CPU 4 has online SMT sibling CPU 5 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-23 20:26:52.828] [warning] [tid 136859] topology: IO CPU 8 has online SMT sibling CPU 9 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-23 20:26:52.829] [info] [tid 136859] tina listening on port 53821 | io=4{0,2,4,8} | workers=8 (normal=2, blocking=6){16,17,18,19,20,21,22,23} | lane_cap=128 | inline_bytes=32768 | affinity=on
+[2026-11-23 20:27:00.578] [info] [tid 136859] shutdown: stop accepting connections
+[2026-11-23 20:27:00.580] [info] [tid 136859] shutdown: completed
+[2026-11-23 20:35:14.276] [warning] [tid 145019] topology: IO CPU 0 has online SMT sibling CPU 1 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-23 20:35:14.276] [warning] [tid 145019] topology: IO CPU 2 has online SMT sibling CPU 3 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-23 20:35:14.276] [warning] [tid 145019] topology: IO CPU 4 has online SMT sibling CPU 5 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-23 20:35:14.276] [warning] [tid 145019] topology: IO CPU 8 has online SMT sibling CPU 9 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-23 20:35:14.277] [info] [tid 145019] tina listening on port 47387 | io=4{0,2,4,8} | workers=8 (normal=2, blocking=6){16,17,18,19,20,21,22,23} | lane_cap=128 | inline_bytes=32768 | affinity=on
+[2026-11-23 20:35:22.022] [info] [tid 145019] shutdown: stop accepting connections
+[2026-11-23 20:35:22.031] [info] [tid 145019] shutdown: completed
+[2026-11-23 20:45:21.787] [warning] [tid 162010] topology: IO CPU 0 has online SMT sibling CPU 1 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-23 20:45:21.787] [warning] [tid 162010] topology: IO CPU 2 has online SMT sibling CPU 3 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-23 20:45:21.787] [warning] [tid 162010] topology: IO CPU 4 has online SMT sibling CPU 5 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-23 20:45:21.787] [warning] [tid 162010] topology: IO CPU 8 has online SMT sibling CPU 9 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-23 20:45:21.789] [info] [tid 162010] tina listening on port 40617 | io=4{0,2,4,8} | workers=8 (normal=2, blocking=6){16,17,18,19,20,21,22,23} | lane_cap=128 | inline_bytes=32768 | affinity=on
+[2026-11-23 20:45:29.558] [info] [tid 162010] shutdown: stop accepting connections
+[2026-11-23 20:45:29.566] [info] [tid 162010] shutdown: completed
