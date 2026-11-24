@@ -12,6 +12,7 @@ import rpc.connection;
 import ide.protocol;
 import ide.server;
 import service.file_watcher;
+import service.file;
 import service.workspace_cache;
 
 export namespace service {
@@ -95,7 +96,7 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
             path_to_wd_.erase(it);
         }
 
-        auto full_path = server::resolve_workspace_dir_path(rel_path);
+        auto full_path = file::resolve_workspace_path(rel_path);
         if (!full_path)
             return;
 

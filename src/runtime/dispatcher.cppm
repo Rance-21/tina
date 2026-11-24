@@ -9,8 +9,8 @@ export namespace runtime {
 // 任务分类枚举：按实际执行路径（而非仅按 RPC Method）决定执行层级
 // ============================================================================
 enum class TaskClass : std::uint8_t {
-    inline_task = 0, // ping、<= 32 KiB 目录/小文件 Cache Hit，直接在 EventLoop 执行
-    normal = 1,      // > 32 KiB 缓存响应准备、纯内存 KV / 终端输入 ACK 等非阻塞工作
+    inline_task = 0, // ping、内联阈值内的缓存命中，直接在 EventLoop 执行
+    normal = 1,      // 超出内联阈值的缓存响应准备、纯内存 KV / 终端输入 ACK 等非阻塞工作
     blocking = 2,    // 磁盘读盘/写盘/fsync、目录扫描、Git 子进程、需等待的 PTY/Tab 等阻塞工作
 };
 
@@ -66,7 +66,7 @@ struct alignas(kCacheLineBytes) IoDispatchContext {
 // 提交阶段主动借用调度器（Dispatcher）
 // ============================================================================
 // 核心直觉：
-//   Dispatcher 自己不建线程，而是 4 个 I/O 线程直接调用的“无锁分诊台”：
+//   I/O 线程直接调用 Dispatcher。以默认的 4 个 I/O 线程、8 个 Worker 为例：
 //   - 8 个 Worker 分成两区：前 k 个 [0, k) 是 Normal 区，后 8-k 个 [k, 8) 是 Blocking 区；
 //   - 每个 Worker 有 4 条独占 SPSC 入口通道（对应 4 个 I/O 线程），形成 8 x 4 = 32 条无锁队列；
 //   - Blocking 任务只能进 Blocking 区，挑 outstanding 最少的 Worker 并直接 fetch_add(1) 占坑；
@@ -77,12 +77,11 @@ struct alignas(kCacheLineBytes) IoDispatchContext {
 class Dispatcher {
   public:
     // 【作用】构建 worker_count x io_count 的 SPSC 队列矩阵并初始化各 I/O 线程的私有轮询起点。
-    // 【原理】一次性分配全部 WorkerControl 和 32 条 SpscQueue；同时按 io_id 错开各 I/O 线程的
+    // 【原理】一次性分配全部 WorkerControl 和每对 I/O、Worker 之间的 SpscQueue；同时按 io_id 错开各 I/O 线程的
     //         初始轮询游标，避免冷启动时 4 个 I/O 线程同时扎堆扑向 Worker 0 / k。
     Dispatcher(std::size_t io_count, std::size_t worker_count, std::size_t normal_workers,
                std::size_t queue_capacity)
         : io_count_(io_count), worker_count_(worker_count), normal_count_(normal_workers),
-          queue_capacity_(queue_capacity),
           workers_(std::make_unique<WorkerControl[]>(worker_count)),
           io_contexts_(std::make_unique<IoDispatchContext[]>(io_count)) {
         if (io_count_ == 0 || worker_count_ < 2 || normal_count_ == 0 ||
@@ -96,7 +95,7 @@ class Dispatcher {
         for (std::size_t w = 0; w < worker_count_; ++w) {
             workers_[w].lanes.reserve(io_count_);
             for (std::size_t io = 0; io < io_count_; ++io) {
-                workers_[w].lanes.push_back(std::make_unique<SpscQueue<PoolTask>>(queue_capacity_));
+                workers_[w].lanes.push_back(std::make_unique<SpscQueue<PoolTask>>(queue_capacity));
             }
         }
 
@@ -112,41 +111,31 @@ class Dispatcher {
     Dispatcher(const Dispatcher &) = delete;
     Dispatcher &operator=(const Dispatcher &) = delete;
 
-    // 返回生产者 I/O 线程（lane）数量。
-    [[nodiscard]] std::size_t io_cnt() const noexcept {
-        return io_count_;
-    }
-
     // 返回总 Worker 数量（Normal + Blocking）。
     [[nodiscard]] std::size_t worker_cnt() const noexcept {
         return worker_count_;
     }
 
-    // 返回 Normal Worker 数量 k（即 [0, k) 区间大小）。
-    [[nodiscard]] std::size_t normal_cnt() const noexcept {
-        return normal_count_;
-    }
-
-    // 按下标获取指定 Worker 的控制块（供 WorkerPool 访问状态字、唤醒号与 4 条 SPSC lane）。
+    // 按下标获取指定 Worker 的控制块（供 WorkerPool 访问状态字、唤醒号与该 Worker 的各条 SPSC lane）。
     [[nodiscard]] WorkerControl &worker(std::size_t worker_id) noexcept {
         return workers_[worker_id];
     }
 
     // 只读版本：按下标获取指定 Worker 的控制块。
-    [[nodiscard]] const WorkerControl &r_only_worker(std::size_t worker_id) const noexcept {
+    [[nodiscard]] const WorkerControl &worker(std::size_t worker_id) const noexcept {
         return workers_[worker_id];
     }
 
     // 【作用】开启第 io_id 号 I/O 线程的批量提交/合并唤醒作用域（支持嵌套）。
     // 【原理】将本 I/O 线程私有的非原子计数 batch_depth 加 1；期间 try_submit 成功后只把目标
-    //         Worker 编号置位进本地 pending_wake_mask，不立即触发内存栅栏或 futex 唤醒。
+    //         Worker 编号置位进本地 waiting_wake_mask，不立即触发内存栅栏或 futex 唤醒。
     void begin_submit_batch(std::size_t io_id) noexcept {
         if (io_id < io_count_)
             ++io_contexts_[io_id].batch_depth;
     }
 
     // 【作用】结束当前批量提交作用域，并对本批次所有收到新任务的睡眠 Worker 执行一次合并唤醒。
-    // 【原理】嵌套深度减到 0 后取出并清零 pending_wake_mask：若为空直接零开销返回；否则整批仅执行
+    // 【原理】嵌套深度减到 0 后取出并清零 waiting_wake_mask：若为空直接零开销返回；否则整批仅执行
     //         1 次 seq_cst 栅栏保证所有 SPSC tail_.store(release) 对 Worker 可见，再用 tzcnt
     //         遍历置位 Worker，逐个调用 wake_worker_after_fence()（正在忙的 Worker 直接跳过）。
     void flush_submit_batch(std::size_t io_id) noexcept {
@@ -188,7 +177,7 @@ class Dispatcher {
     //        存在 kIdleBit，加 1 后 state == (kIdleBit | count) != kIdleBit，立即自动禁止借用；
     //   3. 查停机：以 seq_cst 复查 stopping，若已停机则立刻回滚计数并返回 false；
     //   4. 入队：调用专属 SPSC lane.try_push()（纯无锁、0 CAS、带游标本地缓存）：
-    //      - 成功：若在批量作用域内则仅记录 pending_wake_mask 位图，否则立刻按需唤醒，返回 true；
+    //      - 成功：若在批量作用域内则仅记录 waiting_wake_mask 位图，否则立刻按需唤醒，返回 true；
     //      - 满队：撤销 reservation，排除该 Worker 继续尝试其他合法候选；所有候选均满返回 false
     //        且保证不消耗原 task。
     [[nodiscard]] bool try_submit(std::size_t io_id, TaskClass task_class, PoolTask &&task,
@@ -254,7 +243,7 @@ class Dispatcher {
   private:
     struct Candidate {
         std::size_t worker_id{0};
-        std::uint64_t expected_state{0};
+        std::uint64_t outstanding{0};
         bool borrow{false};
     };
 
@@ -307,7 +296,7 @@ class Dispatcher {
         }
 
         auto best_normal = select_lightest_in_range(0, normal_count_, io.idx_normal, excluded_mask);
-        if (best_normal && (best_normal->expected_state & kCountMask) == 0)
+        if (best_normal && best_normal->outstanding == 0)
             return best_normal;
 
         for (std::size_t step = 0, cursor = io.idx_blocking; step < worker_count_ - normal_count_;
@@ -315,7 +304,7 @@ class Dispatcher {
             if ((excluded_mask & (std::uint64_t{1} << cursor)) == 0 &&
                 workers_[cursor].state.load(std::memory_order_relaxed) == kIdleBit) {
                 io.idx_blocking = next_in_range(cursor, normal_count_, worker_count_);
-                return Candidate{.worker_id = cursor, .expected_state = kIdleBit, .borrow = true};
+                return Candidate{.worker_id = cursor, .outstanding = 0, .borrow = true};
             }
         }
 
@@ -329,9 +318,8 @@ class Dispatcher {
     [[nodiscard]] std::optional<Candidate>
     select_lightest_in_range(std::size_t begin, std::size_t end, std::size_t &rr_cursor,
                              std::uint64_t excluded_mask) noexcept {
-        std::size_t cursor = (rr_cursor >= begin && rr_cursor < end) ? rr_cursor : begin;
+        std::size_t cursor = rr_cursor; // 初始化和每次推进都在本区间内。
         std::optional<Candidate> best;
-        std::uint64_t best_count = std::numeric_limits<std::uint64_t>::max();
 
         for (std::size_t step = 0; step < end - begin;
              ++step, cursor = next_in_range(cursor, begin, end)) {
@@ -339,9 +327,8 @@ class Dispatcher {
                 continue;
             const std::uint64_t raw = workers_[cursor].state.load(std::memory_order_relaxed);
             const std::uint64_t count = raw & kCountMask;
-            if (!best || count < best_count) {
-                best = Candidate{.worker_id = cursor, .expected_state = raw, .borrow = false};
-                best_count = count;
+            if (!best || count < best->outstanding) {
+                best = Candidate{.worker_id = cursor, .outstanding = count, .borrow = false};
                 if (count == 0)
                     break;
             }
@@ -355,7 +342,6 @@ class Dispatcher {
     const std::size_t io_count_;
     const std::size_t worker_count_;
     const std::size_t normal_count_;
-    const std::size_t queue_capacity_;
 
     std::unique_ptr<WorkerControl[]> workers_;
     std::unique_ptr<IoDispatchContext[]> io_contexts_;

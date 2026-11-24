@@ -83,7 +83,7 @@ void dispatch_request(RpcTaskContext &ctx) {
     }
 
     case MethodGroup::workspace:
-        server::handle_workspace_request(request, &ctx.watched_dir);
+        server::handle_workspace_request(request, ctx.watched_dir);
         return;
 
     case MethodGroup::terminal:
@@ -104,30 +104,24 @@ void dispatch_request(RpcTaskContext &ctx) {
 void execute_worker_request(RpcTaskContext *ctx) noexcept {
     IoSlotContext &slot = ctx->slot;
     Frame &request = ctx->frame;
-    PreparedDispatch &prepared = ctx->prepared;
-
+    // 移出节点，让快照在本线程结束编码时释放。即使编码抛异常，RAII 也会释放所有权。
+    // 成功的非空文件切片由响应帧接管，生命周期延续到 writev 发完。
     request.kind = Kind::response;
-
     try {
-        if (prepared.cached_file) {
-            server::finish_cached_read_file(request, std::move(prepared.cached_file),
-                                            prepared.file_slice_offset, prepared.file_slice_size);
-        } else if (prepared.cached_dir) {
-            ctx->watched_dir = std::move(prepared.cached_dir_path);
-            auto cached_dir = std::move(prepared.cached_dir);
-            // 路径已经归节点所有，直接编码；回到 I/O 线程仍可用它登记订阅。
-            request.status = Status::ok;
-            server::encode_workspace_list_dir_into(ctx->watched_dir, *cached_dir, request.payload);
+        auto &snapshot = ctx->snapshot;
+        if (snapshot.file) {
+            const auto slice = std::exchange(snapshot.slice, {});
+            server::encode_workspace_read_file(request, std::move(snapshot.file), slice);
+        } else if (auto entries = std::move(snapshot.directory)) {
+            server::encode_workspace_list_dir_into(ctx->watched_dir, *entries, request.payload);
         } else {
             dispatch_request(*ctx);
         }
     } catch (const std::bad_alloc &) {
-        prepared.clear_snapshots();
         request.clear_external_payload();
         request.status = Status::resource_exhausted;
         request.payload = "out of memory";
     } catch (...) {
-        prepared.clear_snapshots();
         request.clear_external_payload();
         request.status = Status::internal;
         request.payload = "internal server error";
@@ -147,35 +141,42 @@ void execute_worker_request(RpcTaskContext *ctx) noexcept {
 
 // 一个可读事件内的所有 Worker 提交共用一次唤醒屏障。先分流，再分别处理两种结果：
 // 内联响应入队成功才登记订阅；慢路径直接移动帧和缓存快照，闭包只携带一个池节点指针。
-bool read_and_dispatch_requests(Connection &conn, IoSlotContext &slot) {
-    PreparedDispatch prepared;
-    std::string inline_watched_dir;
+bool dispatch_requests(Connection &conn, IoSlotContext &slot) {
+    // 快路径不会留下快照；提交慢请求时把快照取走。整批共用这些临时量，
+    // 连续的内联命中无需逐帧构造、销毁空的 shared_ptr。
+    WorkspaceSnapshot snapshot;
+    std::string dir_path;
     runtime::WorkerPool::SubmitBatchGuard wake_batch(slot.workers, slot.io_id);
-    return conn.read_requests(
-        [&](Frame &request) {
-            return try_inline_or_classify(request, slot.inline_threshold, prepared,
-                                          inline_watched_dir);
-        },
-        [&](const Frame &response) {
-            if (!inline_watched_dir.empty() && response.status == Status::ok)
-                slot.watcher->watch(inline_watched_dir, conn);
-        },
-        [&](Frame &&request) {
-            const auto task_class = prepared.task_class;
-            auto *ctx = slot.acquire_task(conn, std::move(request), std::move(prepared));
-            auto run = [ctx] { execute_worker_request(ctx); };
-            if (slot.workers.try_submit(slot.io_id, task_class, std::move(run)))
+    return conn.read_requests([&](Frame &request) {
+        const auto route =
+            prepare_request_for_dispatch(request, slot.inline_threshold, snapshot, dir_path);
+        if (route == runtime::TaskClass::inline_task) {
+            if (!conn.enqueue_direct_response(request))
+                return false;
+            if (request.method == Method::workspace_list_dir)
+                slot.watcher->watch(dir_path, conn);
+            return true;
+        }
+
+        return conn.try_submit_worker_request([&] {
+            auto *ctx = slot.acquire_task(conn, std::move(request));
+            if (snapshot.directory)
+                ctx->watched_dir.swap(dir_path);
+            ctx->snapshot = std::exchange(snapshot, {});
+            if (slot.workers.try_submit(slot.io_id, route, [ctx] {
+                    execute_worker_request(ctx);
+                }))
                 return true;
-            // 队列满或已停机，Worker 从未接管节点，仍在本线程回收。
-            ctx->prepared.clear_snapshots();
+
+            // 队列拒收时 Worker 没有取得节点，必须在本线程释放快照并归还池。
+            ctx->snapshot = {};
             slot.recycle_task(ctx);
             return false;
         });
+    });
 }
 
-// 每个 socket 就绪事件只在所属 I/O 线程处理。先读完本轮请求，再聚集写出；
-// 即使读写兴趣没变也要重新武装 ONESHOT，否则下次就绪不会唤醒这个连接。
-void handle_connection_event(Connection &conn, IoSlotContext &slot, net::EpollEvent event) noexcept {
+void handle_conn_event(Connection &conn, IoSlotContext &slot, net::EpollEvent event) noexcept {
     const int fd = conn.fd();
     auto close_conn = [&]() noexcept {
         slot.terminal_mgr->close_for_connection(fd);
@@ -191,8 +192,7 @@ void handle_connection_event(Connection &conn, IoSlotContext &slot, net::EpollEv
     }
 
     try {
-        const bool read_ready = event.readable() || event.peer_closed() || event.hangup();
-        if (conn.accepting_requests() && read_ready && !read_and_dispatch_requests(conn, slot)) {
+        if (conn.accepting_requests() && read_ready && !dispatch_requests(conn, slot)) {
             close_conn();
             return;
         }
@@ -209,12 +209,10 @@ void handle_connection_event(Connection &conn, IoSlotContext &slot, net::EpollEv
 
 } // namespace
 
-// Acceptor 只移动 socket 到目标 EventLoop。注册后 epoll 回调借用表节点；
-// 在回调中断开连接会销毁节点，所以关闭之后立即返回，不再访问 conn。
 export bool post_connection(net::Socket socket, IoSlotContext &slot) {
     return slot.loop.post_task([socket = std::move(socket), &slot]() mutable {
         slot.connections.add(std::move(socket), [&slot](Connection &conn, net::EpollEvent event) {
-            handle_connection_event(conn, slot, event);
+            handle_conn_event(conn, slot, event);
         });
     });
 }

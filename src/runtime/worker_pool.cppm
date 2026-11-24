@@ -19,14 +19,13 @@ thread_local std::optional<std::size_t> t_current_worker_id;
 export namespace runtime {
 
 // 【作用】查询当前正在执行的线程是第几号 Worker（0..N-1）；在非 Worker 线程调用时返回 nullopt。
-// 【原理】每个 Worker 线程启动进入 entry() 时把自己的 worker_id 写入 thread_local
-// 变量，零开销读取。
+// 每个 Worker 启动时写入自己的 thread_local 编号，查询只访问当前线程。
 [[nodiscard]] std::optional<std::size_t> current_worker_id() noexcept {
     return t_current_worker_id;
 }
 
 // ============================================================================
-// WorkerPool V2：固定 4P+8E 拓扑 + 主动借用调度 + Per-producer SPSC 队列矩阵 + 批量唤醒
+// WorkerPool：固定数量的工作线程，按任务类别分区，支持空闲借用和批量唤醒
 // ============================================================================
 //   - 启动时创建 N 个固定工作线程（默认 8 个，分别绑定到 E-core 16..23），[0, k) 处理 Normal，
 //     [k, N) 处理 Blocking（仅在精确 state == kIdleBit 时允许被借用接 1 个 Normal 任务）；
@@ -34,7 +33,8 @@ export namespace runtime {
 //   - I/O 线程可通过 RAII 的 SubmitBatchGuard 把一轮 epoll/recv
 //   内提交的多个任务合并成一次批次唤醒，
 //     且仅对挂有 kSleepingBit 的真正沉睡 Worker 触发 notify_one()；
-//   - 每个 Worker 线程循环轮询自己的 4 条 SPSC lane 取任务执行，开始执行前按需清除 kIdleBit，
+//   - 每个 Worker 轮询本核的 SPSC lane（每个 I/O 线程一条） 取任务执行，开始执行前按需清除
+//   kIdleBit，
 //     空载时挂出 IDLE 牌子并进入按需休眠，全过程无全局锁。
 class WorkerPool {
   public:
@@ -46,77 +46,39 @@ class WorkerPool {
     class SubmitBatchGuard {
       public:
         SubmitBatchGuard(WorkerPool &pool, std::size_t io_id) noexcept
-            : pool_(pool), io_id_(io_id) {
-            pool_.begin_submit_batch(io_id_);
+            : dispatcher_(pool.dispatcher_), io_id_(io_id) {
+            dispatcher_.begin_submit_batch(io_id_);
         }
 
         ~SubmitBatchGuard() {
-            pool_.flush_submit_batch(io_id_);
+            dispatcher_.flush_submit_batch(io_id_);
         }
 
         SubmitBatchGuard(const SubmitBatchGuard &) = delete;
         SubmitBatchGuard &operator=(const SubmitBatchGuard &) = delete;
 
       private:
-        WorkerPool &pool_;
+        Dispatcher &dispatcher_;
         std::size_t io_id_;
     };
 
-    // 【作用】按配置初始化 SPSC 队列矩阵、创建并启动所有 Worker 线程，并可选逐一钉到指定 CPU 核。
-    // 【原理】
-    //   1. 先校验 config 并构造内部的 Dispatcher（分配好 8 x 4 条 SPSC 环形队列）；
-    //   2. 逐个创建 pthread（若开启绑核，先用 ScopedThreadAttr 在创建时就指定目标核）；
-    //   3. 用 std::latch 同步屏障等待所有 Worker
-    //   完成线程内绑核校验；只要任意一个线程创建或绑核失败，
-    //      立刻调用 shutdown() 回收已经拉起的线程，再向上抛出异常，保证不泄漏孤儿线程。
+    // 队列、负载和唤醒状态归 Dispatcher；线程池在启动后只需保留 pthread 句柄。
     explicit WorkerPool(const ServerConfig &config)
-        : config_(config), dispatcher_(config_.io_threads_cnt(), config_.worker_threads(),
-                                       config_.non_blk_worker_cnt, config_.queue_cap) {
-        config_.validate();
-
-        const std::size_t count = config_.worker_threads();
-        auto ready_latch = std::make_shared<std::latch>(static_cast<std::ptrdiff_t>(count));
-        auto startup_errors = std::make_shared<std::vector<std::exception_ptr>>(count);
-
+        : dispatcher_(config.io_threads_cnt(), config.worker_threads(), config.non_blk_worker_cnt,
+                      config.queue_cap) {
+        config.validate();
+        std::span<const unsigned> cpus;
+        if (config.enable_cpu_affinity)
+            cpus = config.worker_cpus;
         try {
-            threads_.reserve(count);
-            contexts_.reserve(count);
-
-            for (std::size_t w = 0; w < count; ++w) {
-                auto ctx = std::make_unique<WorkerContext>(WorkerContext{
-                    .pool = this,
-                    .worker_id = w,
-                    .pin_cpu = config_.enable_cpu_affinity
-                                   ? std::optional<unsigned>{config_.worker_cpus[w]}
-                                   : std::nullopt,
-                    .ready = ready_latch,
-                    .error = &(*startup_errors)[w],
-                });
-
-                affinity::ScopedThreadAttr attr;
-                if (ctx->pin_cpu)
-                    attr.set_affinity(*ctx->pin_cpu);
-
-                pthread_t thread{};
-                const int rc = ::pthread_create(&thread, ctx->pin_cpu ? attr.get() : nullptr,
-                                                &WorkerPool::entry, ctx.get());
-                if (rc != 0)
-                    throw std::system_error(rc, std::generic_category(), "pthread_create");
-
-                contexts_.push_back(std::move(ctx));
-                threads_.push_back(thread);
-            }
+            affinity::start_threads(threads_, config.worker_threads(), cpus,
+                                    [this](std::size_t id) {
+                                        t_current_worker_id = id;
+                                        worker_loop(id);
+                                    });
         } catch (...) {
             shutdown();
             throw;
-        }
-
-        ready_latch->wait();
-        for (const auto &err : *startup_errors) {
-            if (err) {
-                shutdown();
-                std::rethrow_exception(err);
-            }
         }
     }
 
@@ -127,18 +89,6 @@ class WorkerPool {
 
     WorkerPool(const WorkerPool &) = delete;
     WorkerPool &operator=(const WorkerPool &) = delete;
-
-    // 【作用】开启第 io_id 号 I/O 线程的批量提交作用域，期间入队任务暂存至本地唤醒位图。
-    // 【原理】直接委托 Dispatcher::begin_submit_batch(io_id)。
-    void begin_submit_batch(std::size_t io_id) noexcept {
-        dispatcher_.begin_submit_batch(io_id);
-    }
-
-    // 【作用】结束第 io_id 号 I/O 线程的批量提交作用域并统一唤醒本批次触达的沉睡 Worker。
-    // 【原理】直接委托 Dispatcher::flush_submit_batch(io_id)。
-    void flush_submit_batch(std::size_t io_id) noexcept {
-        dispatcher_.flush_submit_batch(io_id);
-    }
 
     // 【作用】供第 io_id 号 I/O 线程非阻塞提交一个 Normal 或 Blocking 任务。
     // 【原理】直接委托给 Dispatcher::try_submit()；若正在停机或合法通道全满，返回 false 且不消耗
@@ -155,6 +105,7 @@ class WorkerPool {
         if (!stopping_.exchange(true, std::memory_order_seq_cst)) {
             std::atomic_thread_fence(std::memory_order_seq_cst);
             const std::size_t count = dispatcher_.worker_cnt();
+
             for (std::size_t w = 0; w < count; ++w) {
                 auto &slot = dispatcher_.worker(w);
                 std::uint64_t cur = slot.wake_epoch.load(std::memory_order_relaxed);
@@ -166,12 +117,7 @@ class WorkerPool {
             }
         }
 
-        for (pthread_t thread : threads_) {
-            if (::pthread_join(thread, nullptr) != 0)
-                std::terminate();
-        }
-        threads_.clear();
-        contexts_.clear();
+        affinity::join_threads(threads_);
     }
 
     // 【作用】统计当前全池尚未执行完的任务总数（包含已预留、队列中等待、以及正在运行的任务）。
@@ -180,7 +126,7 @@ class WorkerPool {
         std::size_t total = 0;
         for (std::size_t w = 0; w < dispatcher_.worker_cnt(); ++w)
             total += static_cast<std::size_t>(
-                dispatcher_.r_only_worker(w).state.load(std::memory_order_relaxed) & kCountMask);
+                dispatcher_.worker(w).state.load(std::memory_order_relaxed) & kCountMask);
         return total;
     }
 
@@ -189,40 +135,8 @@ class WorkerPool {
         return dispatcher_;
     }
 
-    // 只读版本：暴露底层 Dispatcher 引用。
-    [[nodiscard]] const Dispatcher &r_only_dispatcher() const noexcept {
-        return dispatcher_;
-    }
-
   private:
-    struct WorkerContext {
-        WorkerPool *pool{nullptr};
-        std::size_t worker_id{0};
-        std::optional<unsigned> pin_cpu;
-        std::shared_ptr<std::latch> ready;
-        std::exception_ptr *error{nullptr};
-    };
-
-    // 【作用】pthread 要求的 C 风格静态线程入口函数。
-    // 【原理】写入当前线程的 thread_local 编号 -> 若开启绑核则执行 pin_thread_to_cpu 并回读校验 ->
-    //         把启动结果（成功或异常）通过 latch 通知构造函数 -> 正式进入 worker_loop() 主循环。
-    static void *entry(void *arg) noexcept {
-        auto *ctx = static_cast<WorkerContext *>(arg);
-        t_current_worker_id = ctx->worker_id;
-        try {
-            if (ctx->pin_cpu)
-                affinity::pin_thread_to_cpu(*ctx->pin_cpu);
-        } catch (...) {
-            *ctx->error = std::current_exception();
-            ctx->ready->count_down();
-            return nullptr;
-        }
-        ctx->ready->count_down();
-        ctx->pool->worker_loop(ctx->worker_id);
-        return nullptr;
-    }
-
-    // 【作用】从当前 Worker 专属的 4 条 SPSC lane 中公平地取出一个任务。
+    // 【作用】从当前 Worker 专属的各条 SPSC lane 中公平地取出一个任务。
     // 【原理】从本线程栈上的私有游标 lane_cursor 开始依次尝试 try_pop()；一旦在第 idx 条 lane
     // 取到任务，
     //         立即把下次扫描起点移到 (idx + 1) % io_count，防止某条高负载 I/O 通道饿死其他通道。
@@ -280,13 +194,13 @@ class WorkerPool {
 
     // 【作用】单个 Worker 线程的主调度循环：高速轮询取活 -> 空载挂 IDLE 牌子 -> 休眠等唤醒 ->
     // 优雅退出。 【原理】
-    //   - 热路径：只要 4 条 SPSC lane 有活，完全不触碰 wake_epoch、不做任何 CAS
+    //   - 热路径：只要任何一条 SPSC lane 有活，完全不触碰 wake_epoch、不做任何 CAS
     //   或睡眠检查，直接执行；
-    //   - 冷路径（4 条 lane 全空）：
+    //   - 冷路径（所有 lane 都为空）：
     //     1. 若正在停机且 state 低 63 位为 0（连已预留未入队的任务也没了），直接安全退出；
     //     2. 若未停机且 state == 0，用 CAS(0, kIdleBit) 挂出空闲牌子允许借用；
     //     3. 挂上 kSleepingBit（fetch_or）并执行 seq_cst 栅栏（与生产者 flush 时的 seq_cst 栅栏构成
-    //        严格 Dekker 全序，杜绝丢唤醒），然后二次扫描 4 条 lane 并复查停机退出条件；
+    //        严格 Dekker 全序，杜绝丢唤醒），然后二次扫描全部 lane 并复查停机退出条件；
     //     4. 仍无任务则调 wake_epoch.wait(parked_epoch) 休眠；醒来后清掉残留 kSleepingBit
     //     回到热路径。
     void worker_loop(std::size_t worker_id) noexcept {
@@ -331,11 +245,9 @@ class WorkerPool {
         }
     }
 
-    ServerConfig config_;
     std::atomic<bool> stopping_{false};
     Dispatcher dispatcher_;
 
-    std::vector<std::unique_ptr<WorkerContext>> contexts_;
     std::vector<pthread_t> threads_;
 };
 

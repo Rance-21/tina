@@ -26,7 +26,7 @@ export namespace server {
 //      确认未变化后 rename 原子替换原文件 -> 取得新文件 revision -> 释放锁并返回 OK + [u64
 //      newRevision]。
 void handle_workspace_write_file(Frame &frame) {
-    auto req = decode_workspace_write_file(frame.payload);
+    auto req = decode_workspace_write_file_view(frame.payload);
     if (!req) {
         frame.status = Status::invalid_argument;
         frame.payload = "invalid workspace_write_file payload";
@@ -127,7 +127,7 @@ void handle_workspace_write_file(Frame &frame) {
         auto cached = std::make_shared<ReadFileResponse>(ReadFileResponse{
             .file_size = static_cast<std::uint64_t>(st_new.st_size),
             .revision = new_rev,
-            .content = std::move(req->content),
+            .content = std::string(req->content),
         });
         cache.put_file_after_write(req->path, std::move(cached));
     } else {

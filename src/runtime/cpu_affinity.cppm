@@ -304,4 +304,74 @@ class ScopedThreadAttr {
     pthread_attr_t attr_{};
 };
 
+// 两类线程池共用启动和回收过程。调用方持有 pthread 句柄，负责先让自己的循环退出，
+// 再 join。构造线程池时传入空句柄表，cpus 为空表示继承亲和性，否则每个线程对应一个核。
+void start_threads(std::vector<pthread_t> &threads, std::size_t count,
+                   std::span<const unsigned> cpus, auto run) {
+    struct Startup {
+        decltype(run) work;
+        std::size_t index;
+        std::optional<unsigned> cpu;
+        std::latch &ready;
+        std::exception_ptr error{};
+    };
+
+    std::latch ready(static_cast<std::ptrdiff_t>(count));
+    std::vector<Startup> startup;
+    startup.reserve(count); // pthread_create 接收元素地址，启动期间不能移动它。
+    threads.reserve(count);
+
+    auto enter = [](void *arg) noexcept -> void * {
+        auto &args = *static_cast<Startup *>(arg);
+        auto work = args.work;
+        const auto index = args.index;
+        try {
+            if (args.cpu)
+                pin_thread_to_cpu(*args.cpu); // 在线程内回读核掩码，向创建者报告失败。
+        } catch (...) {
+            args.error = std::current_exception();
+            args.ready.count_down();
+            return nullptr;
+        }
+
+        args.ready.count_down();
+        // 创建线程现在可以销毁整批启动参数；此后只使用本线程栈上的闭包与编号。
+        work(index);
+        return nullptr;
+    };
+
+    try {
+        for (std::size_t i = 0; i < count; ++i) {
+            auto &args = startup.emplace_back(Startup{
+                run, i, cpus.empty() ? std::nullopt : std::optional{cpus[i]}, ready});
+            ScopedThreadAttr attr;
+            if (args.cpu)
+                attr.set_affinity(*args.cpu);
+            pthread_t thread{};
+            const int rc = ::pthread_create(&thread, args.cpu ? attr.get() : nullptr, enter, &args);
+            if (rc != 0)
+                throw std::system_error(rc, std::generic_category(), "pthread_create");
+            threads.push_back(thread);
+        }
+    } catch (...) {
+        // 未创建的线程不会到达屏障。补足它们的份额，再等已启动线程结束对参数的访问。
+        ready.arrive_and_wait(static_cast<std::ptrdiff_t>(count - threads.size()));
+        throw;
+    }
+
+    ready.wait();
+    for (const auto &args : startup) {
+        if (args.error)
+            std::rethrow_exception(args.error);
+    }
+}
+
+void join_threads(std::vector<pthread_t> &threads) noexcept {
+    for (auto thread : threads) {
+        if (::pthread_join(thread, nullptr) != 0)
+            std::terminate();
+    }
+    threads.clear();
+}
+
 } // namespace runtime::affinity

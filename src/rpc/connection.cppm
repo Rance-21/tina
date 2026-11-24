@@ -53,11 +53,8 @@ class Connection {
     }
 
     // 在可读事件中最多 recv 八轮，每轮直接写入输入缓冲，再拆出其中全部完整帧。
-    // 快路径响应入队成功后才登记目录订阅。只有提交给 Worker 的帧才占用在途名额。
-    // 返回 false 表示收到非法帧，或发送队列、在途上限、Worker 队列已无法接收请求。
-    template <typename FastHandle, typename OnInlineEnqueued, typename Submit>
-    bool read_requests(FastHandle &&fast_handle, OnInlineEnqueued &&on_inline_enqueued,
-                       Submit &&submit) {
+    // 每拆出一帧就交给调用方；协议错误或调用方拒绝本帧时立即断开。
+    bool read_requests(auto &&on_request) {
         for (int i = 0; i < 8; ++i) {
             input_.ensure_writable(8192);
             auto n = socket_.try_recv(input_.writable_data(), input_.writable_bytes());
@@ -75,29 +72,31 @@ class Connection {
             input_.commit_write(*n);
 
             while (auto request = decode_frame(input_)) {
-                if (request->kind != Kind::request)
+                if (request->kind != Kind::request || !on_request(*request))
                     return false;
-                if (fast_handle(*request)) {
-                    if (!enqueue_direct_response(*request))
-                        return false;
-                    on_inline_enqueued(*request);
-                    continue;
-                }
-                if (pending_ >= max_inflight || !submit(std::move(*request)))
-                    return false;
-                ++pending_;
             }
         }
 
         return true;
     }
 
+    // 先检查名额再构造和投递任务。队列满时不增加 pending_，Worker 的每个成功回包核销一次。
+    bool try_submit_worker_request(auto &&submit) {
+        if (pending_ >= max_inflight || !submit())
+            return false;
+        ++pending_;
+        return true;
+    }
+
     // I/O 线程快路径直接响应入队（直接复用 FrameSendQueue::enqueue，不占用 pending_ 计数）：
-    //   - 当单条连接在一次 read_requests() 流水线中连续命中多条快路径请求时，先发响应会暂存在 output_ 中；
+    //   - 当单条连接在一次 read_requests() 流水线中连续命中多条快路径请求时，先发响应会暂存在
+    //   output_ 中；
     //   - 为避免突发大流量在尚未退出收包循环前就撑爆 4 MiB 的 max_output 上限，
-    //     在积压达到 256 KiB 或首次 enqueue 放不下时，立即尝试一次非阻塞 ::writev() 刷出数据再入队；
-    //   - 若刷写后依然超出 max_output（说明对端读太慢且内核发送缓冲区已满），返回 false 断开慢连接。
-    bool enqueue_direct_response(Frame &response) {
+    //     在积压达到 256 KiB 或首次 enqueue 放不下时，立即尝试一次非阻塞 ::writev()
+    //     刷出数据再入队；
+    //   - 若刷写后依然超出 max_output（说明对端读太慢且内核发送缓冲区已满），返回 false
+    //   断开慢连接。
+    bool enqueue_inline_response(Frame &response) {
         if (output_.readable_bytes() >= 256 * 1024)
             output_.write(socket_);
         if (output_.enqueue(response, max_output))
@@ -107,7 +106,8 @@ class Connection {
     }
 
     // Worker 算完响应后由所属 I/O 线程调用：
-    // 核销一个在途请求（--pending_），编码 17B 帧头并直接 std::move 接管 response.payload（不拷贝负载）。
+    // 核销一个在途请求（--pending_），编码 17B 帧头并直接 std::move 接管
+    // response.payload（不拷贝负载）。
     bool enqueue_response(Frame &response) {
         if (pending_ == 0 || !output_.enqueue(response, max_output))
             return false;
@@ -148,21 +148,24 @@ class Connection {
 
 // 每个 I/O 线程独占一张连接表。表节点直接拥有 socket，rehash 也不会移动节点里的 Connection。
 // epoll 回调可在注册至注销之间借用节点；异步回包和目录订阅跨越此期限，只保存 (fd, id)。
-class LoopConnections {
+class IoConnections {
   public:
-    explicit LoopConnections(net::EventLoop &loop) : loop_(loop) {
+    explicit IoConnections(net::EventLoop &loop) : loop_(loop) {
     }
 
     void add(net::Socket socket, auto on_event) {
         const int fd = socket.native_handle();
         auto [it, inserted] = active_.try_emplace(fd, std::move(socket), next_id_++);
+
         if (!inserted)
             throw std::logic_error("connection fd already registered");
+
         Connection &conn = it->second;
         try {
             loop_.add_event(fd, conn.interests(), [&conn, on_event](net::EpollEvent event) {
                 on_event(conn, event);
             });
+
         } catch (...) {
             active_.erase(it);
             throw;
@@ -175,10 +178,10 @@ class LoopConnections {
     }
 
     // fd 在 close 后可立即复用；迟到的回包和目录事件必须同时匹配原连接的世代号。
-    [[nodiscard]] Connection *find(int fd, std::uint64_t id) {
-        auto *conn = find(fd);
-        return conn && conn->id() == id ? conn : nullptr;
-    }
+    // [[nodiscard]] Connection *find(int fd, std::uint64_t id) {
+    //     auto *conn = find(fd);
+    //     return conn && conn->id() == id ? conn : nullptr;
+    // }
 
     void close(int fd) {
         loop_.del_event(fd); // 先注销借用节点的回调，再销毁 socket。
@@ -218,6 +221,7 @@ class LoopConnections {
     std::future<void> begin_drain() {
         std::promise<void> complete;
         auto drained = complete.get_future();
+
         for (auto it = active_.begin(); it != active_.end();) {
             Connection &conn = (it++)->second; // rearm_or_close 可能删除当前节点。
             conn.stop_reading();

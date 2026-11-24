@@ -32,11 +32,11 @@ export struct alignas(64) RpcTaskContext {
     Frame frame{};
     std::string watched_dir{};
 
-    // 大缓存命中时分类器已取得快照，Worker 直接消费。正常回包和回收无需访问节点尾部。
-    PreparedDispatch prepared{};
+    // 大缓存命中时分类器已取得快照，Worker 编码时取走所有权。I/O 回包和回收均无需读取快照。
+    WorkspaceSnapshot snapshot{};
 };
 
-static_assert(sizeof(RpcTaskContext) == 4 * 64, "RPC task must fit in four cache lines");
+static_assert(sizeof(RpcTaskContext) == 3 * 64, "RPC task must fit in three cache lines");
 
 export struct alignas(64) IoSlotContext {
     // 启动时装配，之后只读。Worker 借用这些组件的生命周期到 shutdown / join 为止。
@@ -49,14 +49,15 @@ export struct alignas(64) IoSlotContext {
     const std::shared_ptr<server::TerminalManager> terminal_mgr;
 
     // 从新缓存行开始，避免 I/O 线程修改连接表和任务池时使 Worker 的只读缓存行失效。
-    alignas(64) LoopConnections connections;
+    alignas(64) IoConnections connections;
     const std::shared_ptr<service::DirWatcher> watcher;
 
     IoSlotContext(net::EventLoop &loop, runtime::WorkerPool &workers, KvState &kv,
                   std::size_t io_id, std::size_t inline_threshold)
         : loop(loop), workers(workers), kv(kv), io_id(io_id), inline_threshold(inline_threshold),
           terminal_mgr(std::make_shared<server::TerminalManager>(
-              loop, [this](int fd, Frame &&event) {
+              loop,
+              [this](int fd, Frame &&event) {
                   // PTY 回调由同一 EventLoop 执行；停读之后只发已接受请求的响应。
                   auto *conn = connections.find(fd);
                   if (conn && conn->accepting_requests())
@@ -76,8 +77,7 @@ export struct alignas(64) IoSlotContext {
 
     // 从本线程空闲栈借节点。只有所有节点都在途时才分配，借出后由 Worker 独占，
     // 直至回包任务投回本线程。slot 在构造时绑定，跨多次请求都指向同一线程。
-    RpcTaskContext *acquire_task(const Connection &conn, Frame &&request,
-                                 PreparedDispatch &&prepared) {
+    RpcTaskContext *acquire_task(const Connection &conn, Frame &&request) {
         RpcTaskContext *ctx;
         if (task_pool_.empty()) {
             ctx = new RpcTaskContext{*this};
@@ -88,7 +88,6 @@ export struct alignas(64) IoSlotContext {
         ctx->conn_fd = conn.fd();
         ctx->conn_id = conn.id();
         ctx->frame = std::move(request);
-        ctx->prepared = std::move(prepared);
         return ctx;
     }
 

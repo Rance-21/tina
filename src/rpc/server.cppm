@@ -35,7 +35,8 @@ namespace {
 class StopSignals {
   public:
     // 【作用】屏蔽本线程（及后续所有子线程继承）的 SIGINT/SIGTERM，并创建非阻塞 signalfd。
-    // 【原理】先调 pthread_sigmask(SIG_BLOCK) 拦截默认杀进程行为，再通过 signalfd() 接管这两个信号。
+    // 【原理】先调 pthread_sigmask(SIG_BLOCK) 拦截默认杀进程行为，再通过 signalfd()
+    // 接管这两个信号。
     StopSignals() {
         ::sigemptyset(&mask_);
         ::sigaddset(&mask_, SIGINT);
@@ -108,14 +109,18 @@ void run_on_io_threads(const std::vector<std::unique_ptr<rpc::detail::IoSlotCont
     completed.reserve(slots.size());
     try {
         for (const auto &slot : slots) {
-            std::packaged_task<void()> task([&action, &io = *slot] { action(io); });
+            std::packaged_task<void()> task([&action, &io = *slot] {
+                action(io);
+            });
             auto done = task.get_future();
+
             if (!slot->loop.post_task(std::move(task)))
                 throw std::runtime_error("I/O EventLoop rejected lifecycle task");
             completed.push_back(std::move(done));
         }
         for (auto &done : completed)
             done.get();
+
     } catch (...) {
         for (auto &done : completed) {
             if (done.valid())
@@ -129,24 +134,30 @@ void run_on_io_threads(const std::vector<std::unique_ptr<rpc::detail::IoSlotCont
 
 export namespace rpc {
 
-// 【作用】Tina RPC 服务端主生命周期函数：负责拓扑校验、核绑定、启动各线程池、接收连接与五阶段优雅停机。
+// 【作用】Tina RPC
+// 服务端主生命周期函数：负责拓扑校验、核绑定、启动各线程池、接收连接与五阶段优雅停机。
 // 【原理】按严格依赖顺序推进：
 //   启动阶段：
 //     1. 校验 ServerConfig，第一时间创建 StopSignals 屏蔽退出信号（必须早于所有后台线程创建）；
-//     2. 校验物理核与 SMT 拓扑，将当前 Acceptor 主线程绑定到 Worker E-core 集合（后续 spdlog 异步线程会继承）；
-//     3. 依次启动 4 个绑核 EventLoop 线程（P-core 0,2,4,8）和 8 个绑核 Worker 线程（E-core 16~23）；
-//     4. 为每个 I/O 线程挂好专属 DirWatcher / TerminalManager（及 slots[0] 上的全局 FileWatcher），用 latch 等就绪；
+//     2. 校验物理核与 SMT 拓扑，将当前 Acceptor 主线程绑定到 Worker E-core 集合（后续 spdlog
+//     异步线程会继承）；
+//     3. 依次启动 4 个绑核 EventLoop 线程（P-core 0,2,4,8）和 8 个绑核 Worker 线程（E-core
+//     16~23）；
+//     4. 为每个 I/O 线程挂好专属 DirWatcher / TerminalManager（及 slots[0] 上的全局
+//     FileWatcher），用 latch 等就绪；
 //   运行阶段：
-//     Acceptor 在 accept_epoll.wait() 中监听新连接与退出信号，单次最多 accept 64 条连接并按普通 Round Robin
-//     轮流投递给 4 个 EventLoop；
+//     Acceptor 在 accept_epoll.wait() 中监听新连接与退出信号，单次最多 accept 64 条连接并按普通
+//     Round Robin 轮流投递给 4 个 EventLoop；
 //   五阶段优雅停机（收到 SIGINT/SIGTERM 后）：
-//     阶段 1 停监听 -> 阶段 2 冻结所有 I/O 线程不再接收新请求/提交新任务 -> 阶段 3 排空并 join WorkerPool ->
-//     阶段 4 等待 I/O 线程发完剩余响应（超时 5 秒强关慢连接）-> 阶段 5 停止并 join 所有 I/O 线程。
+//     阶段 1 停监听 -> 阶段 2 冻结所有 I/O 线程不再接收新请求/提交新任务 -> 阶段 3 排空并 join
+//     WorkerPool -> 阶段 4 等待 I/O 线程发完剩余响应（超时 5 秒强关慢连接）-> 阶段 5 停止并 join
+//     所有 I/O 线程。
 void run_server(std::string_view port, runtime::ServerConfig config = {}) {
     config.validate();
 
-    // 必须在创建任何后台线程（包括 spdlog 异步日志线程池、I/O 池、Worker 池）之前屏蔽 SIGINT/SIGTERM，
-    // 保证所有子线程继承阻塞掩码，从而确保退出信号稳定进入 Acceptor 的 signalfd 触发优雅停机。
+    // 必须在创建任何后台线程（包括 spdlog 异步日志线程池、I/O 池、Worker 池）之前屏蔽
+    // SIGINT/SIGTERM， 保证所有子线程继承阻塞掩码，从而确保退出信号稳定进入 Acceptor 的 signalfd
+    // 触发优雅停机。
     StopSignals signals;
 
     // 在初始化异步日志与派生子线程之前完成拓扑校验并绑定 Acceptor/Logger 到 E-core 集合，
@@ -175,16 +186,16 @@ void run_server(std::string_view port, runtime::ServerConfig config = {}) {
     if (config.enable_cpu_affinity)
         io_cpu_span = config.io_cpus;
 
-    // 析构顺序：先回收 Worker，再回收 I/O 线程，最后销毁各 I/O 线程的 IoSlotContext（含连接登记表与任务池）。
-    // 使用 unique_ptr 固定每个 IoSlotContext 的 64B 对齐内存地址，防止 vector 扩容移动破坏内部自引用回调指针。
+    // 析构顺序：先回收 Worker，再回收 I/O 线程，最后销毁各 I/O 线程的
+    // IoSlotContext（含连接登记表与任务池）。 使用 unique_ptr 固定每个 IoSlotContext 的 64B
+    // 对齐内存地址，防止 vector 扩容移动破坏内部自引用回调指针。
     std::vector<std::unique_ptr<detail::IoSlotContext>> slots;
     net::EventLoopThreadPool io_pool(config.io_threads_cnt(), io_cpu_span);
     runtime::WorkerPool workers(config);
 
-    slots.reserve(config.io_threads_cnt());
     for (std::size_t i = 0; i < config.io_threads_cnt(); ++i) {
-        slots.push_back(std::make_unique<detail::IoSlotContext>(
-            io_pool.loop_at(i), workers, kv, i, config.io_inline_threshold));
+        slots.push_back(std::make_unique<detail::IoSlotContext>(io_pool.loop_at(i), workers, kv, i,
+                                                                config.io_inline_threshold));
     }
 
     run_on_io_threads(slots, [](detail::IoSlotContext &slot) {
@@ -203,13 +214,13 @@ void run_server(std::string_view port, runtime::ServerConfig config = {}) {
         " | workers=" + std::to_string(config.worker_threads()) +
         " (normal=" + std::to_string(config.non_blk_worker_cnt) +
         ", blocking=" + std::to_string(config.blocking_workers()) + ")" +
-        format_cpu_list(config.worker_cpus) +
-        " | lane_cap=" + std::to_string(config.queue_cap) +
+        format_cpu_list(config.worker_cpus) + " | lane_cap=" + std::to_string(config.queue_cap) +
         " | inline_bytes=" + std::to_string(config.io_inline_threshold) +
         " | affinity=" + (config.enable_cpu_affinity ? "on" : "off"));
 
     std::size_t next_io = 0;
     bool stopping = false;
+
     while (!stopping) {
         auto events = accept_epoll.wait();
 
@@ -229,6 +240,7 @@ void run_server(std::string_view port, runtime::ServerConfig config = {}) {
 
             if (event.error() || event.hangup())
                 throw std::runtime_error("listener error");
+
             if (!event.readable())
                 continue;
 
@@ -257,9 +269,12 @@ void run_server(std::string_view port, runtime::ServerConfig config = {}) {
     std::vector<std::future<void>> drained(slots.size());
     run_on_io_threads(slots, [&drained](detail::IoSlotContext &slot) {
         slot.watcher->stop();
+
         if (slot.io_id == 0)
             service::global_file_watcher().stop();
+
         slot.terminal_mgr->stop();
+
         try {
             drained[slot.io_id] = slot.connections.begin_drain();
         } catch (...) {

@@ -100,7 +100,6 @@ class RpcClient {
     };
 
     net::EventLoopThreadPool io_pool_;
-    net::EventLoop *loop_;
     std::shared_ptr<State> state_;
 };
 

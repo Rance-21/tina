@@ -3,6 +3,22 @@ export module ide.server_protocol;
 import std;
 export import ide.protocol;
 
+namespace {
+
+// 三种工作区请求的路径前缀相同：[u16 pathLength][path bytes]。
+// 视图借用请求帧，业务处理完之前须保持 payload 有效；路径是否允许访问由业务层判断。
+std::optional<std::string_view> read_workspace_path(PayloadReader &reader) noexcept {
+    auto length = reader.read_int<std::uint16_t>();
+    if (!length || *length == 0)
+        return std::nullopt;
+    auto path = reader.read_bytes(*length);
+    if (!path || path->find('\0') != std::string_view::npos)
+        return std::nullopt;
+    return path;
+}
+
+} // namespace
+
 export namespace server {
 
 // ============================================================================
@@ -15,11 +31,6 @@ bool decode_workspace_list_projects(std::string_view payload) {
     return payload.empty();
 }
 
-// 0x0202 (workspace_list_dir) 零拷贝视图，直接引用 Frame::payload 切片。
-struct ListDirRequestView {
-    std::string_view path;
-};
-
 // 0x0203 (workspace_read_file) 零拷贝视图，直接引用 Frame::payload 切片。
 struct ReadFileRequestView {
     std::string_view path;
@@ -27,20 +38,11 @@ struct ReadFileRequestView {
     std::uint32_t max_bytes{};
 };
 
-// 零拷贝解码 0x0202 (workspace_list_dir) 请求负载：
-// 格式：[u16 pathLength][path bytes]
-std::optional<ListDirRequestView>
-decode_workspace_list_dir_view(std::string_view payload) noexcept {
+// list_dir 的完整请求只有路径，不允许尾随字节。
+std::optional<std::string_view> decode_workspace_list_dir_view(std::string_view payload) noexcept {
     PayloadReader reader(payload);
-    auto path_len = reader.read_int<std::uint16_t>();
-    if (!path_len || *path_len == 0)
-        return std::nullopt;
-
-    auto path = reader.read_bytes(*path_len);
-    if (!path || !reader.finished() || path->find('\0') != std::string_view::npos)
-        return std::nullopt;
-
-    return ListDirRequestView{.path = *path};
+    auto path = read_workspace_path(reader);
+    return reader.finished() ? path : std::nullopt;
 }
 
 // 零拷贝解码 0x0203 (workspace_read_file) 请求负载：
@@ -48,16 +50,11 @@ decode_workspace_list_dir_view(std::string_view payload) noexcept {
 std::optional<ReadFileRequestView>
 decode_workspace_read_file_view(std::string_view payload) noexcept {
     PayloadReader reader(payload);
-    auto path_len = reader.read_int<std::uint16_t>();
-    if (!path_len || *path_len == 0)
-        return std::nullopt;
-
-    auto path = reader.read_bytes(*path_len);
+    auto path = read_workspace_path(reader);
     auto offset = reader.read_int<std::uint64_t>();
     auto max_bytes = reader.read_int<std::uint32_t>();
 
-    if (!path || !offset || !max_bytes || !reader.finished() ||
-        path->find('\0') != std::string_view::npos)
+    if (!path || !offset || !max_bytes || !reader.finished())
         return std::nullopt;
 
     if (*max_bytes == 0 || *max_bytes > max_file_read_bytes)
@@ -70,25 +67,22 @@ decode_workspace_read_file_view(std::string_view payload) noexcept {
     };
 }
 
-// 解码 0x0204 (workspace_write_file) 请求负载：
-// 格式：[u16 pathLen][path bytes][u64 revision][content bytes...]
-std::optional<WriteFileRequest> decode_workspace_write_file(std::string_view payload) {
+// write_file 的路径和正文都借用 Worker 独占的请求帧。冲突返回和超大文件写盘
+// 都不需要复制正文；只有成功写入并进入文件缓存时，缓存才需要拥有独立的字节。
+struct WriteFileRequestView {
+    std::string_view path;
+    std::uint64_t expected_revision;
+    std::string_view content;
+};
+
+std::optional<WriteFileRequestView>
+decode_workspace_write_file_view(std::string_view payload) noexcept {
     PayloadReader reader(payload);
-    auto path_len = reader.read_int<std::uint16_t>();
-    if (!path_len || *path_len == 0)
-        return std::nullopt;
-
-    auto path = reader.read_bytes(*path_len);
+    auto path = read_workspace_path(reader);
     auto revision = reader.read_int<std::uint64_t>();
-    if (!path || !revision || path->find('\0') != std::string_view::npos)
+    if (!path || !revision)
         return std::nullopt;
-
-    auto content = reader.remaining_bytes();
-    return WriteFileRequest{
-        .path = std::string(*path),
-        .expected_revision = *revision,
-        .content = std::string(content),
-    };
+    return WriteFileRequestView{*path, *revision, reader.remaining_bytes()};
 }
 
 // 零拷贝解码 0x0205 (workspace_close_dir) 请求负载：
@@ -147,28 +141,53 @@ void encode_workspace_list_projects_into(const std::vector<std::string> &project
 // 原地编码 0x0202 (workspace_list_dir) 响应与目录变化 Event 负载进 out。
 // 头部为所属目录相对路径 [u16 dirPathLen][dirPath bytes]，
 // 随后每个文件/文件夹编码为 [u8 type][u16 nameLen][name bytes]，流式紧密拼接。
+// 给 I/O 分类器传入内联预算，给普通编码器传入无限预算。预算不足或字段非法时返回
+// false，out 仍保留原请求，Worker 可以继续编码或按原来的错误路径处理。
+bool try_encode_list_dir(std::string_view dir_path, const std::vector<DirEntry> &entries,
+                         std::string &out, std::size_t budget) {
+    constexpr auto max_name = std::numeric_limits<std::uint16_t>::max();
+    if (dir_path.empty() || dir_path.size() > max_name)
+        return false;
+
+    std::size_t size = 2 + dir_path.size();
+    // 每个合法目录项至少占四字节（类型、长度、一个名字节）。条目数已超预算时，
+    // I/O 线程可以直接交给 Worker，连名字都无需遍历。
+    if (size > budget || entries.size() > (budget - size) / 4)
+        return false;
+    for (const auto &entry : entries) {
+        if (entry.name.empty() || entry.name.size() > max_name)
+            return false;
+        size += 3 + entry.name.size();
+    }
+    if (size > budget)
+        return false;
+
+    // 上面已算出精确长度。逐项直接写入最终位置，每个名字只拷贝一次，
+    // 避免对短小目录项反复扩展 string、检查容量并写结尾的 NUL。
+    out.clear(); // 扩容时也不用复制原请求里的路径前缀。
+    out.resize_and_overwrite(size, [&](char *data, std::size_t) noexcept {
+        auto write_name = [](char *dst, std::string_view name) {
+            write_be(dst, static_cast<std::uint16_t>(name.size()));
+            std::memcpy(dst + 2, name.data(), name.size());
+            return dst + 2 + name.size();
+        };
+        char *next = write_name(data, dir_path);
+        for (const auto &entry : entries) {
+            *next++ = static_cast<char>(entry.type);
+            next = write_name(next, entry.name);
+        }
+        return size;
+    });
+    return true;
+}
+
 void encode_workspace_list_dir_into(std::string_view dir_path, const std::vector<DirEntry> &entries,
                                     std::string &out) {
+    if (try_encode_list_dir(dir_path, entries, out, std::numeric_limits<std::size_t>::max()))
+        return;
     if (dir_path.empty() || dir_path.size() > std::numeric_limits<std::uint16_t>::max())
         throw std::invalid_argument("directory path exceeds u16 length limit");
-
-    std::size_t total_size = 2 + dir_path.size();
-    for (const auto &entry : entries) {
-        if (entry.name.empty() || entry.name.size() > std::numeric_limits<std::uint16_t>::max())
-            throw std::invalid_argument("dir entry name exceeds u16 length limit");
-        total_size += 1 + 2 + entry.name.size();
-    }
-
-    out.clear();
-    out.reserve(total_size);
-    append_be(out, static_cast<std::uint16_t>(dir_path.size()));
-    out.append(dir_path);
-
-    for (const auto &entry : entries) {
-        append_be(out, std::to_underlying(entry.type));
-        append_be(out, static_cast<std::uint16_t>(entry.name.size()));
-        out.append(entry.name);
-    }
+    throw std::invalid_argument("dir entry name exceeds u16 length limit");
 }
 
 // 原地编码 0x0203 (workspace_read_file) 响应负载进 out：

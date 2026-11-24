@@ -19,21 +19,20 @@ import rpc.protocol;
 namespace rpc {
 
 RpcClient::RpcClient(std::string_view host, std::string_view port)
-    : io_pool_(1), loop_(&io_pool_.next_loop()),
-      state_(std::make_shared<State>(net::Socket::connect_tcp_nonblocking(host, port), *loop_)) {
-    auto ready = std::make_shared<std::promise<void>>();
-    auto future = ready->get_future();
+    : io_pool_(1),
+      state_(std::make_shared<State>(net::Socket::connect_tcp_nonblocking(host, port),
+                                     io_pool_.loop_at(0))) {
+    std::promise<void> ready;
+    auto future = ready.get_future();
 
-    bool posted = loop_->post_task([state = state_, ready] {
+    bool posted = state_->loop.post_task([state = state_, ready = std::move(ready)]() mutable {
         try {
             State::start(state);
-
-            // promise 唤醒 ready
-            ready->set_value();
+            ready.set_value();
         } catch (...) {
             auto error = std::current_exception();
             state->fail(error);
-            ready->set_exception(error);
+            ready.set_exception(error);
         }
     });
 
@@ -46,7 +45,7 @@ RpcClient::RpcClient(std::string_view host, std::string_view port)
 RpcClient::~RpcClient() {
     // 不允许与 async_call 并发析构。
     try {
-        (void)loop_->post_task([state = state_] {
+        (void)state_->loop.post_task([state = state_] {
             state->fail(std::make_exception_ptr(std::runtime_error("RPC client destroyed")));
         });
     } catch (...) {
@@ -56,7 +55,7 @@ RpcClient::~RpcClient() {
 }
 
 void RpcClient::set_event_handler(EventHandler handler) {
-    (void)loop_->post_task([state = state_, handler = std::move(handler)]() mutable {
+    (void)state_->loop.post_task([state = state_, handler = std::move(handler)]() mutable {
         state->event_handler = std::move(handler);
     });
 }
@@ -80,8 +79,8 @@ std::future<Frame> RpcClient::async_call(Method method, std::string payload,
     const auto deadline = Clock::now() + timeout;
 
     try {
-        if (!loop_->post_task([state = state_, method, payload = std::move(payload), deadline,
-                               promise]() mutable {
+        if (!state_->loop.post_task([state = state_, method, payload = std::move(payload), deadline,
+                                    promise]() mutable {
                 try {
                     state->send(method, std::move(payload), deadline, promise);
                 } catch (...) {

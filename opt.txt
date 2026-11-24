@@ -1,86 +1,14 @@
-# Tina 性能优化与架构改进清单 (Optimization Notes)
+src/rpc/server.cppm：
+182 187  std::unique_ptr<detail::IoSlotContext>; 去 atomic
+while for signal for listener 俩 for 改成一个
 
-## 一、 系统调用与 Epoll 事件驱动优化
----
+src/rpc/connection.cppm
+void close() loop_.del_event() 重复？
+enqueue_response() enqueue_inline_response() enqueue_event() send_event() try_submit_worker_request() 统一全部或部分
 
-## 二、 内存分配、拷贝与零拷贝（Zero-Copy）优化
+src/net/event_loop.cppm
+226  std::unordered_map<int, std::shared_ptr<Handler>> event_handlers_; 去 atomic
 
-### 7. 大文件/大负载传输的零拷贝（`sendfile` / `MSG_ZEROCOPY`）
-- **现状**：Remote IDE 后续涉及 `workspace_read_file` 等大文件读取，
-走传统 `read(file) + send(socket)` 会经历 4 次上下文切换与多次内核/用户态拷贝。
-- **优化方案**：
-  - **文件直传**：先用普通 `send` 发送 17B 帧头，再用 `::sendfile()`（或 `splice`）在内核态直接将文件页缓存（Page Cache）送入网卡缓冲区；
-  - **用户态大块内存发送**：对大于 10KB~64KB 的动态生成缓冲，可开启 `SO_ZEROCOPY` 
-  并使用 `send(..., MSG_ZEROCOPY)` 避免内核拷贝（需配合处理 `MSG_ERRQUEUE` 异步完成通知后再释放用户态缓冲，小包切勿开启以免通知开销反超拷贝开销）。
-
----
-
-## 三、 信号、错误处理与 Socket 细节优化
-
-### 8. `EINTR` 重试、异步信号安全与 `signalfd` 的配合
-- **现状**：多处 I/O 函数（`try_recv`、`try_send`、`try_accept`、`epoll_wait`）手写了 `if (errno == EINTR) continue;` 循环。
-- **说明与优化**：
-  - 进程启动时 `StopSignals` 已经通过 `pthread_sigmask(SIG_BLOCK)` 
-  在所有线程屏蔽了 `SIGINT` 和 `SIGTERM`，并交由 `signalfd` 同步读取，
-  规避了传统异步信号处理函数（Signal Handler）的非异步信号安全问题；
-  - 若未来注册其他信号处理函数，应在 `sigaction` 中开启 `SA_RESTART` 
-  让内核自动重启被中断的系统调用；保留 `EINTR` 分支仅作为防御性兜底（例如 `gdb` 调试挂起恢复时内核仍可能使 `epoll_wait` 返回 `EINTR`）。
-
-### 9. `Socket::try_accept()` 的非阻塞循环与瞬态错误容错
-- **现状**：`src/net/socket.cppm` 中 `try_accept()` 使用 `while (true)` 包裹 `accept4`，
-除 `EINTR` 和 `EAGAIN` 外遇到任何 `errno` 直接 `throw std::runtime_error` 导致整个 Acceptor 线程崩溃退出。
-- **优化方案**：TCP 服务端 `accept4` 遇到客户端在三次握手刚完成就发 RST 断开时，
-Linux 可能返回 `ECONNABORTED`、`EPROTO` 或 `EPERM`（防火墙拦截），
-甚至暂时达到文件描述符上限 `EMFILE`/`ENFILE`。这些属于**单条客户端连接的瞬态错误**，
-不应 `throw` 搞垮整个 Server，而应记录日志后忽略（或返回 `nullopt`）继续服务后续连接。
-
-### 10. UDP 分支单应用帧限制在 `<= 1460`（或 `1472`）字节以内
-- **原理与说明**：以太网标准 MTU 为 `1500` 字节（扣除 20B IP 头 + 8B UDP 头 = `1472` 字节；
-若考虑 PPPoE 或隧道开销，安全载荷常取 `1400~1460` 字节）。
-UDP 本身不负责分段，一旦单帧超过 MTU 触发 **IP 层分片（IP Fragmentation）**，
-任何一个分片在公网丢失都会导致整个 UDP 报文被内核丢弃，丢包率呈指数级恶化。因此 UDP 分支的应用层协议必须严格将单包控制在 MTU 以内。
-
----
-
-## 四、 并发、锁粒度与运行时调度优化
-
-### 11. `KvState` / 连接共享状态使用分片锁（Sharded Lock / 分块锁）
-- **现状**：`src/rpc/connection_handler.cppm` 中所有 Worker 线程访问 `KvState` 时共用同一把全局 `std::mutex`，高并发读写下锁竞争严重，多核 Worker 退化为串行执行。
-- **优化方案**：
-  - 将 `KvService` 内部哈希表按 `hash(key) & (N - 1)` 拆分为 $N$ 个分片（如 16 或 64 个 Bucket/Shard），每个分片独立持有一把 `std::shared_mutex`（读多写少时 `kv_get` 用共享读锁 `shared_lock`，`kv_set`/`kv_del` 用独占写锁 `unique_lock`），大幅降低锁冲突。
-
-### 12. 线程的 CPU 核心亲和性分配（CPU Affinity / Thread Pinning）
-- **现状**：I/O 线程池（`EventLoopThreadPool`）与业务线程池（`WorkerPool`）由操作系统自由调度，频繁跨核迁移会导致 L1/L2 Cache 失效和上下文切换开销。
-- **优化方案**：使用 `pthread_setaffinity_np()` 将每个 I/O 线程绑定到固定的物理核心（例如 Core $0 \dots M-1$），将 Worker 线程绑定到其余核心（Core $M \dots K$），实现 I/O 与计算核隔离，最大化缓存局部性。
-
-### 13. 异步日志机制（避免同步日志阻塞 I/O 与 Worker 线程）
-- **现状**：`src/runtime/log.cppm` 当前使用 `spdlog::stdout_color_mt` 或同步文件 sink，在 I/O 线程或 Worker 线程打日志时会竞争全局锁并触发阻塞式磁盘/终端 `write` 系统调用。
-- **优化方案**：切换为 `spdlog::async_logger`（或双缓冲 RingBuffer 后台刷盘线程），前台业务与 I/O 线程只做无锁/微秒级内存入队，由独立的单个后台日志线程批量落盘，彻底隔离磁盘 I/O 抖动。
-
-### 14. `service::git::run_git_command` 的“伪非阻塞”与 Worker 线程同步阻塞问题（新增）
-- **现状与问题验证**：
-  - 当前 `run_git_command` 将 `out_pipe[0]` 与 `err_pipe[0]` 设为 `O_NONBLOCK` 并在 `while` 循环中调用 `::poll()`。
-  - **为什么说它对 Worker 线程而言本质上仍是阻塞的？**
-    1. 这里的 `O_NONBLOCK` + `poll()` 仅仅解决了**单个子进程内部 `stdout` 与 `stderr` 双管道之间的死锁问题**（防止子进程写满 64KB `stderr` 管道而父进程还在阻塞读 `stdout`），以及提供了超时控制（`timeout_ms`）。
-    2. 但对执行该函数的 **Worker 线程** 而言，在 `git` 子进程完成磁盘扫描、对象解压、Diff 计算并退出的整个生命周期（数毫秒至数百毫秒）内，**Worker 线程一直被挂起在内核的 `::poll()` 与 `::waitpid()` 上空等子进程 I/O**，期间完全无法回线程池处理其他 RPC 请求！
-    3. 一旦客户端并发发起多个耗时 `git` 请求（达到 `worker_threads` 数量），所有 Worker 线程都会睡在 `poll()` 上，导致 `kv_get`、`system_ping` 等微秒级纯内存请求在队列中发生严重的**队头阻塞（Head-of-Line Blocking）**。
-- **真正的异步非阻塞优化方案（`epoll` + `pidfd` 托管）**：
-  - Worker 线程（甚至直接在 I/O 线程使用 `posix_spawn`）仅负责启动 `git` 子进程并拿到 `out_pipe[0]`、`err_pipe[0]` 以及 `pidfd_open(pid, PIDFD_NONBLOCK)`（Linux 5.3+ 无竞态进程描述符），随后**立即返回释放 Worker 线程**；
-  - 将管道读端和 `pidfd` 挂载到所属连接 I/O 线程的 `EventLoop (epoll)` 上监听 `EPOLLIN | EPOLLHUP`；
-  - 当内核管道有数据时由 I/O 线程非阻塞读入 `net::Buffer`；当 `pidfd` 触发可读事件（子进程退出）时，调用 `waitid` 回收退出码，并将编码好的响应帧直接发回客户端，实现 **Worker 零阻塞等待**。
-
-### 15. C++23 模块（`.cppm`）滥用 `inline` 导致 L1 I-Cache（指令缓存）失效率上升（新增）
-- **原理说明**：
-  - 传统 C++ 头文件（`.h`）被迫在非模板函数上加 `inline` 是为了绕过单定义规则（ODR）。但在 **C++20/23 命名模块（Named Modules）** 中，模块接口文件（`.cppm`）中的普通函数拥有模块归属（Module Linkage / External Linkage），只会在该模块对应的 `.o` 中生成一份机器码，**根本不需要靠 `inline` 来满足 ODR**。
-  - 现代 CPU 每个物理核心的 **L1 Instruction Cache（L1i）通常只有 32 KB ~ 64 KB**。如果将包含循环、系统调用（`fork`/`poll`/`read`）、状态机解析、图拓扑构建等上百条汇编指令的中大型函数标记为 `inline`，编译器在跨模块调用处展开函数体会导致代码体积（Code Size）膨胀，挤占宝贵的 L1i 缓存行（Cache Line），导致 `EventLoop` 与 RPC 热路径频繁发生 **I-Cache Miss（指令缓存未命中，每次惩罚约十几个至数十个时钟周期）**。
-- **规范准则**：
-  - **仅对 1~3 行的超轻量热路径访问器加 `inline`**（如 `read_be`、`write_be`、`append_be`、`Buffer::readable_bytes`、`stdout_view` 等，函数体本身比一次 `call/ret` 指令还短）；
-  - **严禁对包含循环、分支状态机、系统调用或容器构建的中大型业务函数加 `inline`**。
-
-handle_workspace_read_file while 可能空转
-增加close dir / file
-缓存功能，减少disk io
-GitExecResult run_git_command 实现 async
-inotify 防抖 ，利用 timerfd
-
-
+handle_conn_event() 减少防御
+post_connection() 直接让loop add，connection add 中让 loop-add？？
+dispatch_requests() 和 dispatch_request() ???
