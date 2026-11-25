@@ -201,8 +201,8 @@ void encode_workspace_read_file_into(std::uint64_t file_size, std::uint64_t revi
     out.append(content);
 }
 
-// 只编码 16 字节文件头；复用缓存已有的控制块保活内容切片，直到 I/O 线程发送完毕。
-void encode_workspace_read_file(Frame &frame, std::shared_ptr<const ReadFileResponse> cached,
+// 只编码 16 字节文件头；移动槽位 Pin 或独立读盘结果，保活内容切片，直到 I/O 线程发送完毕。
+void encode_workspace_read_file(Frame &frame, auto cached,
                                 std::string_view content) {
     frame.payload.resize(16);
     write_be(frame.payload.data(), cached->file_size);

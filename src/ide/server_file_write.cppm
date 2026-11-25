@@ -81,6 +81,12 @@ void handle_workspace_write_file(Frame &frame) {
         service::file::set_errno_error(frame, err, "failed to write temporary file");
         return;
     }
+    // rename 会更新 ctime。保留已 fsync 数据的 inode、长度和 mtime，避免外部
+    // 在 rename 后改写/替换路径时，把请求中的旧正文配上另一个文件的新 revision。
+    auto &cache = service::global_workspace_cache();
+    struct stat written{};
+    const bool can_fill = req->content.size() <= cache.max_cacheable_file_bytes() &&
+                          ::fstat(tmp_fd.get(), &written) == 0;
     tmp_fd.close_now();
 
     // 5. 再次检查原文件 revision（防止写临时文件期间外部进程修改了原文件）。
@@ -100,13 +106,8 @@ void handle_workspace_write_file(Frame &frame) {
         return;
     }
 
-    // 6. 确认未变化后，先注销旧 inode 的 FileWatcher 监听并使旧缓存失效，再执行 rename
-    // 原子替换原文件。
-    auto &cache = service::global_workspace_cache();
+    // 6. 确认未变化后执行 rename，随即撤销旧 inode 监听、使旧版本和在途回填失效。
     auto &file_watcher = service::global_file_watcher();
-    file_watcher.unwatch_file(req->path);
-    cache.invalidate_file(req->path);
-
     if (::rename(tmp_path.c_str(), full_path->c_str()) != 0) {
         const int err = errno;
         (void)::unlink(tmp_path.c_str());
@@ -114,24 +115,34 @@ void handle_workspace_write_file(Frame &frame) {
         return;
     }
 
+    file_watcher.unwatch_file(req->path);
+    const auto epoch = cache.invalidate_file(req->path);
     // 7. 取得替换后的新文件 revision，并为新 inode 注册监听后同步刷新缓存。
     struct stat st_new{};
-    if (::lstat(full_path->c_str(), &st_new) != 0) {
+    service::file::ScopedFd installed(
+        can_fill ? ::open(full_path->c_str(), O_PATH | O_NOFOLLOW | O_CLOEXEC) : -1);
+    const int stat_result = installed.valid() ? ::fstat(installed.get(), &st_new)
+                                              : ::lstat(full_path->c_str(), &st_new);
+    if (stat_result != 0) {
         service::file::set_errno_error(frame, errno, "failed to stat replaced file");
         return;
     }
 
     const auto new_rev = service::file::file_revision(st_new);
-    if (req->content.size() <= cache.max_cacheable_file_bytes()) {
-        file_watcher.watch_file(req->path, *full_path);
-        auto cached = std::make_shared<ReadFileResponse>(ReadFileResponse{
-            .file_size = static_cast<std::uint64_t>(st_new.st_size),
-            .revision = new_rev,
-            .content = std::string(req->content),
-        });
-        cache.put_file_after_write(req->path, std::move(cached));
-    } else {
-        cache.invalidate_file(req->path);
+    if (installed.valid() && st_new.st_dev == written.st_dev && st_new.st_ino == written.st_ino &&
+        st_new.st_size == written.st_size && st_new.st_mtim.tv_sec == written.st_mtim.tv_sec &&
+        st_new.st_mtim.tv_nsec == written.st_mtim.tv_nsec) {
+        // rename 已成功；容量不足、epoch 过期或缓存分配失败都不改变写盘结果。
+        try {
+            auto cached = std::make_shared<ReadFileResponse>(
+                ReadFileResponse{.file_size = static_cast<std::uint64_t>(st_new.st_size),
+                                 .revision = new_rev,
+                                 .content = std::string(req->content)});
+            file_watcher.cache_file_if_current(req->path, *full_path, installed.get(),
+                                               std::move(cached), epoch);
+        } catch (const std::bad_alloc &) {
+            // 仅回填失败，磁盘已完成原子替换。
+        }
     }
 
     // 8. 函数退出自动释放路径锁，返回 OK 及 [u64 newRevision]。
@@ -139,4 +150,4 @@ void handle_workspace_write_file(Frame &frame) {
     encode_workspace_write_file_into(new_rev, frame.payload);
 }
 
-}
+} // namespace server

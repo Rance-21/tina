@@ -23,11 +23,9 @@ std::optional<Frame> build_workspace_list_dir_event(std::string_view rel_path) {
     auto &cache = service::global_workspace_cache();
     const auto epoch = cache.dir_epoch(rel_path);
 
-    auto entries = std::make_shared<std::vector<DirEntry>>();
-    if (service::file::read_directory_entries(*target_path, *entries) != 0)
+    std::vector<DirEntry> entries;
+    if (service::file::read_directory_entries(*target_path, entries) != 0)
         return std::nullopt;
-
-    cache.put_dir(rel_path, entries, epoch);
 
     Frame frame{
         .length = 0,
@@ -37,7 +35,8 @@ std::optional<Frame> build_workspace_list_dir_event(std::string_view rel_path) {
         .status = Status::ok,
         .payload = {},
     };
-    encode_workspace_list_dir_into(rel_path, *entries, frame.payload);
+    encode_workspace_list_dir_into(rel_path, entries, frame.payload);
+    cache.put_dir(rel_path, std::move(entries), epoch);
     if (frame.payload.size() > max_frame_length - min_frame_length)
         return std::nullopt;
     return frame;
@@ -130,18 +129,16 @@ void handle_workspace_list_dir(Frame &frame, std::string *watched_dir = nullptr)
     }
 
     auto &cache = service::global_workspace_cache();
-    auto entries = cache.get_dir(rel_path);
+    std::uint64_t epoch;
+    auto entries = cache.get_dir(rel_path, &epoch);
+    std::vector<DirEntry> scanned;
     if (!entries) {
-        const auto epoch = cache.dir_epoch(rel_path);
-        auto scanned = std::make_shared<std::vector<DirEntry>>();
-        const int rc = service::file::read_directory_entries(*target_path, *scanned);
+        const int rc = service::file::read_directory_entries(*target_path, scanned);
         if (rc != 0) {
             service::file::set_errno_error(frame, std::abs(rc),
                 rc > 0 ? "failed to open target directory" : "failed to read directory entries");
             return;
         }
-        entries = std::move(scanned);
-        cache.put_dir(rel_path, entries, epoch);
     }
 
     // rel_path 借用请求的 payload；原地编码响应前，须先把路径保存到独立的字符串。
@@ -150,7 +147,9 @@ void handle_workspace_list_dir(Frame &frame, std::string *watched_dir = nullptr)
     auto &response_path = watched_dir ? *watched_dir : local_path;
     response_path.assign(rel_path);
     frame.status = Status::ok;
-    encode_workspace_list_dir_into(response_path, *entries, frame.payload);
+    encode_workspace_list_dir_into(response_path, entries ? *entries : scanned, frame.payload);
+    if (!entries)
+        cache.put_dir(response_path, std::move(scanned), epoch);
 }
 
 // 处理 0x0205 (workspace_close_dir)：

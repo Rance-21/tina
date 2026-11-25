@@ -105,6 +105,11 @@ void DirWatcher::on_event(net::EpollEvent event) {
     if (overflow) {
         if (cache_ != nullptr)
             cache_->clear_dirs();
+        // 目录移动事件也可能丢失：子文件的 inode 未变，但它在工作区中的路径已变。
+        if (file_watcher_)
+            file_watcher_->clear_files_and_watches();
+        else if (cache_)
+            cache_->clear_files();
         for (const auto &[wd, _] : watches_)
             changed_wds.insert(wd);
     }

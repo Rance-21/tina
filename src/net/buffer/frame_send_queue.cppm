@@ -98,7 +98,7 @@ class FrameSendQueue {
     struct Item {
         std::array<char, frame_header_size> header;
         std::string payload;
-        std::shared_ptr<const void> payload_owner;
+        PayloadOwner payload_owner;
         std::string_view external_payload;
 
         template <typename F> explicit Item(F &frame) {

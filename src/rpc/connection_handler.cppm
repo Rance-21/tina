@@ -128,7 +128,7 @@ void execute_worker_request(RpcTaskContext *ctx) noexcept {
 // 内联响应入队成功才登记订阅；慢路径直接移动帧和缓存快照，闭包只携带一个池节点指针。
 bool dispatch_requests(Connection &conn, IoSlotContext &slot) {
     // 快路径不会留下快照；提交慢请求时把快照取走。整批共用这些临时量，
-    // 连续的内联命中无需逐帧构造、销毁空的 shared_ptr。
+    // 连续的内联命中无需逐帧构造、销毁空的缓存快照。
     WorkspaceSnapshot snapshot;
     std::string dir_path;
     runtime::WorkerPool::SubmitBatchGuard wake_batch(slot.workers, slot.io_id);

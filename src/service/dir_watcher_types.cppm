@@ -77,8 +77,8 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
             inotify_fd_ = -1;
         }
         // 停机仅发送积压响应并停止主动事件推送，不再继续维护本地 watch 映射。
+        by_path_.clear();
         watches_.clear();
-        path_to_wd_.clear();
     }
 
     // 记录某条客户端连接已获取过 rel_path 目录列表，将该目录加入本 I/O 线程的 inotify 监听。
@@ -87,13 +87,11 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
             return;
         }
 
-        // 多个 conn，直接更新该 wd 对应的 conn 集合
-        if (auto it = path_to_wd_.find(rel_path); it != path_to_wd_.end()) {
-            if (auto wit = watches_.find(it->second); wit != watches_.end()) {
-                wit->second.subscribers[conn.fd()] = conn.id();
-                return;
-            }
-            path_to_wd_.erase(it);
+        // 两个索引指向同一条监听。哈希表扩容不会移动节点，重复订阅只查一次路径。
+        if (auto it = by_path_.find(rel_path); it != by_path_.end()) {
+            auto &[wd, entry] = *it->second;
+            entry.subscribers[conn.fd()] = conn.id();
+            return;
         }
 
         auto full_path = file::resolve_workspace_path(rel_path);
@@ -104,14 +102,19 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
         constexpr std::uint32_t mask = IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO |
                                        IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR;
         const int wd = ::inotify_add_watch(inotify_fd_, full_path->c_str(), mask);
+        // 首次扫描可能早于注册监听。让下一次 list_dir 能看到这段间隙内的变动；
+        // 已经订阅的热路径在上面的路径表命中处直接返回。
+        if (cache_)
+            cache_->invalidate_dir(rel_path);
         if (wd < 0)
             return;
 
-        auto &entry = watches_[wd];
+        auto it = watches_.try_emplace(wd).first;
+        auto &entry = it->second;
         if (entry.rel_path.empty())
             entry.rel_path.assign(rel_path);
         entry.subscribers[conn.fd()] = conn.id();
-        path_to_wd_[entry.rel_path] = wd;
+        by_path_.emplace(entry.rel_path, &*it);
     }
 
     // 取消某条连接对 rel_path 目录的监听（由 workspace_close_dir 触发）。
@@ -120,18 +123,16 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
         if (stopped_ || rel_path.empty())
             return;
 
-        auto it = path_to_wd_.find(rel_path);
-        if (it != path_to_wd_.end()) {
-            if (auto wit = watches_.find(it->second); wit != watches_.end()) {
-                wit->second.subscribers.erase(conn_fd);
-                prune_disconnected_subscribers(wit->second);
-                if (wit->second.subscribers.empty())
-                    remove_watch(it->second, true, false);
-                return;
-            }
-            path_to_wd_.erase(it);
+        auto it = by_path_.find(rel_path);
+        if (it == by_path_.end()) {
+            evict_dir_and_files(rel_path);
+            return;
         }
-        evict_dir_and_files(rel_path);
+        auto &[wd, entry] = *it->second;
+        entry.subscribers.erase(conn_fd);
+        prune_disconnected_subscribers(entry);
+        if (entry.subscribers.empty())
+            remove_watch(wd, true);
     }
 
   private:
@@ -235,7 +236,7 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
             (void)::inotify_rm_watch(inotify_fd_, wd);
 
         evict_dir_and_files(it->second.rel_path, subtree);
-        path_to_wd_.erase(it->second.rel_path);
+        by_path_.erase(it->second.rel_path);
         watches_.erase(it);
     }
 
@@ -263,8 +264,8 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
     bool stopped_{false};
 
     std::unordered_map<int, WatchEntry> watches_;
-    std::unordered_map<std::string, int, detail::TransparentStringHash, std::equal_to<>>
-        path_to_wd_;
+    // key 借用 WatchEntry::rel_path，value 借用同一节点。remove_watch 先移除这个索引。
+    std::unordered_map<std::string_view, decltype(watches_)::value_type *> by_path_;
     std::vector<std::unique_ptr<RefreshTaskContext>> refresh_pool_;
 };
 

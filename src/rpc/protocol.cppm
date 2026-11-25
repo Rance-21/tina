@@ -138,8 +138,8 @@ export struct Frame {
     Method method;
     Status status;       // 仅响应携带结果；请求与事件必须为零。
     std::string payload; // 原样传输的负载字节流。
-    // 外置切片紧随 payload 发送，只引用不可变对象；复用其已有控制块保活。
-    std::shared_ptr<const void> payload_owner{};
+    // 外置切片紧随 payload 发送，由槽位 Pin 或独立正文持有者保活。
+    PayloadOwner payload_owner{};
     std::string_view external_payload{};
 
     [[nodiscard]] std::size_t payload_size() const noexcept {

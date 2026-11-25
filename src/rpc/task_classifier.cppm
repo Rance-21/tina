@@ -11,9 +11,9 @@ export namespace rpc::detail {
 // 只有需要 Worker 编码的缓存命中才填入快照。file 保活不可变内容，slice 可直接跨线程
 // 引用其中的字节；directory 保活目录项。目录名另存在登记订阅所需的同一份字符串里。
 struct WorkspaceSnapshot {
-    std::shared_ptr<const ReadFileResponse> file;
+    service::WorkspaceCache::FileHandle file;
     std::string_view slice;
-    std::shared_ptr<const std::vector<DirEntry>> directory;
+    service::WorkspaceCache::DirHandle directory;
 };
 
 // 每帧只决定一次去向。返回 inline_task 时响应正文已写进 frame；否则保留请求负载，

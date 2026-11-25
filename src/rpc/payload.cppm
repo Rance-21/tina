@@ -81,3 +81,100 @@ export class PayloadReader {
     std::string_view input_;
     std::size_t pos_{0};
 };
+
+// 发送队列只需要保活一段只读内存。缓存借用一个固定槽位；只有最后一个读者遇到
+// retired 才进入回收慢路径。正常发送完成只减一次计数，跨线程移动不触碰计数。
+export class PayloadPin {
+  public:
+    struct Slot {
+        static constexpr std::uint64_t retired = std::uint64_t{1} << 63;
+        std::atomic<std::uint64_t> state{retired};
+        std::shared_ptr<const void> value;
+        void (*reclaim)(Slot &) noexcept;
+    };
+
+    PayloadPin() = default;
+    // 调用者已在 shard 锁下取得一个计数；新发布的槽位直接从 1 开始。
+    explicit PayloadPin(Slot &slot) noexcept : slot_(&slot) {
+    }
+    PayloadPin(PayloadPin &&other) noexcept : slot_(std::exchange(other.slot_, nullptr)) {
+    }
+    PayloadPin &operator=(PayloadPin &&other) noexcept {
+        PayloadPin moved(std::move(other));
+        std::swap(slot_, moved.slot_);
+        return *this;
+    }
+    ~PayloadPin() {
+        if (slot_ && slot_->state.fetch_sub(1, std::memory_order_acq_rel) == Slot::retired + 1)
+            slot_->reclaim(*slot_);
+    }
+
+    explicit operator bool() const noexcept {
+        return slot_ != nullptr;
+    }
+    bool operator==(std::nullptr_t) const noexcept {
+        return !slot_;
+    }
+    const void *get() const noexcept {
+        return slot_ ? slot_->value.get() : nullptr;
+    }
+
+    // 仅显式复制一帧（例如广播）才增加一个读者。原 Pin 保证此时槽位不可能复用。
+    PayloadPin clone() const noexcept {
+        if (!slot_)
+            return {};
+        slot_->state.fetch_add(1, std::memory_order_relaxed);
+        return PayloadPin(*slot_);
+    }
+    std::weak_ptr<const void> weak() const noexcept {
+        return slot_ ? std::weak_ptr<const void>(slot_->value) : std::weak_ptr<const void>{};
+    }
+
+  private:
+    Slot *slot_{};
+};
+
+// 一帧外置正文只有一种所有者。缓存切片移动 Pin；广播正文和未被缓存接纳的
+// 读盘结果持有原对象。两条路径均能原样穿过 Worker、Frame 和部分写队列。
+export class PayloadOwner {
+  public:
+    PayloadOwner() = default;
+    template <class T> PayloadOwner(std::shared_ptr<T> value) noexcept : owner_(std::move(value)) {
+    }
+    PayloadOwner(PayloadPin pin) noexcept : owner_(std::move(pin)) {
+    }
+    PayloadOwner(PayloadOwner &&) noexcept = default;
+    PayloadOwner &operator=(PayloadOwner &&) noexcept = default;
+    PayloadOwner(const PayloadOwner &other) noexcept {
+        if (auto *pin = std::get_if<PayloadPin>(&other.owner_))
+            owner_.emplace<PayloadPin>(pin->clone());
+        else
+            owner_ = std::get<0>(other.owner_);
+    }
+    PayloadOwner &operator=(const PayloadOwner &other) noexcept {
+        return *this = PayloadOwner(other);
+    }
+
+    void reset() noexcept {
+        owner_.emplace<0>();
+    }
+    const void *get() const noexcept {
+        if (auto *pin = std::get_if<PayloadPin>(&owner_))
+            return pin->get();
+        return std::get<0>(owner_).get();
+    }
+    explicit operator bool() const noexcept {
+        return get() != nullptr;
+    }
+    template <class T> bool operator==(const std::shared_ptr<T> &p) const noexcept {
+        return get() == p.get();
+    }
+    operator std::weak_ptr<const void>() const noexcept {
+        if (auto *pin = std::get_if<PayloadPin>(&owner_))
+            return pin->weak();
+        return std::get<0>(owner_);
+    }
+
+  private:
+    std::variant<std::shared_ptr<const void>, PayloadPin> owner_;
+};
