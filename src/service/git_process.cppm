@@ -33,26 +33,19 @@ struct GitExecResult {
     // 简短高频访问器保留 inline，直接返回指向 net::Buffer 内部连续内存的 string_view。
     [[nodiscard]] inline std::string_view stdout_view() const noexcept {
         return out_buf.empty() ? std::string_view{}
-                               : std::string_view(out_buf.data(), out_buf.readable_bytes());
+                               : std::string_view(out_buf.readable_data(), out_buf.readable_bytes());
     }
 
     [[nodiscard]] inline std::string_view stderr_view() const noexcept {
         return err_buf.empty() ? std::string_view{}
-                               : std::string_view(err_buf.data(), err_buf.readable_bytes());
+                               : std::string_view(err_buf.readable_data(), err_buf.readable_bytes());
     }
 };
 
 // ============================================================================
 // 3. Worker 线程通过 Linux pipe2 + fork + dup2 + poll 执行 Git 命令
 // ============================================================================
-// 核心机制说明：
-//   1. 调用方直接传入栈上或编译期静态构造好的 `const char *const *argv`（以 nullptr 结尾），
-//      彻底省去任何 std::vector<std::string> 堆分配与指针数组二次拷贝。
-//   2. 为什么要用两个管道（stdout 管道 + stderr 管道）配合 poll() 同时读取？
-//      Linux 内核管道默认缓冲区约 64 KB。若子进程同时向 stdout 和 stderr
-//      写数据，而父进程只单路阻塞读 stdout， 一旦 stderr 管道写满，子进程阻塞在 write(stderr)
-//      上，父进程阻塞在 read(stdout) 上，将引发死锁。。
-GitExecResult run_git_command(const char *repo_dir, const char *const *argv,
+GitExecResult run_git_command(int repo_fd, const char *const *argv,
                               int timeout_ms = default_git_timeout_ms) {
     GitExecResult result;
 
@@ -98,7 +91,7 @@ GitExecResult run_git_command(const char *repo_dir, const char *const *argv,
             ::_exit(126);
         }
 
-        if (::chdir(repo_dir) != 0) {
+        if (::fchdir(repo_fd) != 0) {
             const char msg[] = "failed to chdir to git repository\n";
             (void)::write(STDERR_FILENO, msg, sizeof(msg) - 1);
             ::_exit(126);

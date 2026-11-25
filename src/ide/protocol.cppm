@@ -4,12 +4,13 @@ import std;
 export import rpc.protocol;
 
 // ping 的请求负载为空，成功响应是四个文本字节 PONG。
-export void handle_ping(Frame &frame) {
-    if (frame.payload.empty()) {
-        frame.payload = "PONG";
+export void handle_ping(std::string_view req_payload, Frame &response) {
+    if (req_payload.empty()) {
+        response.status = Status::ok;
+        response.payload = "PONG";
     } else {
-        frame.status = Status::invalid_argument;
-        frame.payload = "ping requires an empty payload";
+        response.status = Status::invalid_argument;
+        response.payload = "ping requires an empty payload";
     }
 }
 

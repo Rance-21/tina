@@ -71,13 +71,12 @@ void handle_worker_method(RpcTaskContext &ctx) {
     }
 
     case MethodGroup::workspace:
-        // I/O 分类时抓到的快照在这里直接消费。文件切片由响应保活至写完；
-        // 大目录只在此编码，避免阻塞所属 I/O 线程。
+        // I/O 分类时抓到的快照在这里直接挂载外置切片返回，避免重新查缓存或重复编码。
         if (ctx.snapshot.file) {
             server::encode_workspace_read_file(request, std::move(ctx.snapshot.file),
                                                ctx.snapshot.slice);
-        } else if (auto entries = std::move(ctx.snapshot.directory)) {
-            server::encode_workspace_list_dir_into(ctx.watched_dir, *entries, request.payload);
+        } else if (auto dir = std::move(ctx.snapshot.directory)) {
+            server::encode_workspace_list_dir(request, std::move(dir));
         } else {
             server::handle_workspace_request(request, ctx.watched_dir);
         }
@@ -124,20 +123,20 @@ void execute_worker_request(RpcTaskContext *ctx) noexcept {
     slot.loop.post_task(std::move(complete_lambda));
 }
 
-// 一个可读事件内的所有 Worker 提交共用一次唤醒屏障。先分流，再分别处理两种结果：
-// 内联响应入队成功才登记订阅；慢路径直接移动帧和缓存快照，闭包只携带一个池节点指针。
+// 一个可读事件内的所有 Worker 提交共用一次唤醒屏障。先零拷贝分流：
+// 内联任务直接消费输入缓冲视图，入队成功后再登记订阅；慢路径仅在需要时拷贝请求正文。
 bool dispatch_requests(Connection &conn, IoSlotContext &slot) {
-    // 快路径不会留下快照；提交慢请求时把快照取走。整批共用这些临时量，
-    // 连续的内联命中无需逐帧构造、销毁空的缓存快照。
+    Frame inline_response{};
     WorkspaceSnapshot snapshot;
-    std::string dir_path;
+    std::string_view dir_path;
     runtime::WorkerPool::SubmitBatchGuard wake_batch(slot.workers, slot.io_id);
 
-    return conn.read_requests([&](Frame &request) {
-        const auto route = inline_or_blocking(request, slot.inline_threshold, snapshot, dir_path);
+    return conn.read_requests([&](const FrameView &request) {
+        const auto route =
+            inline_or_blocking(request, inline_response, slot.inline_threshold, snapshot, dir_path);
 
         if (route == runtime::TaskClass::inline_task) {
-            if (!conn.enqueue_inline_response(request))
+            if (!conn.enqueue_inline_response(inline_response))
                 return false;
 
             if (request.method == Method::workspace_list_dir)
@@ -146,18 +145,30 @@ bool dispatch_requests(Connection &conn, IoSlotContext &slot) {
             return true;
         }
 
-        if (!conn.reserve_worker_request())
+        if (!conn.reserve_worker_request()) {
+            snapshot = {};
             return false;
-        auto *ctx = slot.acquire_task(conn, std::move(request));
+        }
 
-        // Worker 已取走上次的快照。只有本次确实命中，才写池节点里的相应字段；
-        // 普通任务和缓存未命中都不必初始化整份快照。
-        if (snapshot.file) {
-            ctx->snapshot.file = std::move(snapshot.file);
-            ctx->snapshot.slice = snapshot.slice;
-        } else if (snapshot.directory) {
-            ctx->snapshot.directory = std::move(snapshot.directory);
-            ctx->watched_dir.swap(dir_path);
+        const bool need_payload = !snapshot.file && !snapshot.directory &&
+                                  !is_event_only_method(request.method);
+        RpcTaskContext *ctx = nullptr;
+        try {
+            ctx = slot.acquire_task(conn, request, need_payload);
+            if (snapshot.file) {
+                ctx->snapshot.file = std::move(snapshot.file);
+                ctx->snapshot.slice = snapshot.slice;
+            } else if (snapshot.directory) {
+                ctx->snapshot.directory = std::move(snapshot.directory);
+                ctx->watched_dir.assign(dir_path);
+            }
+        } catch (...) {
+            snapshot = {};
+            if (ctx) {
+                ctx->snapshot = {};
+                slot.recycle_task(ctx);
+            }
+            throw;
         }
 
         if (slot.workers.try_submit(slot.io_id, route, [ctx] {

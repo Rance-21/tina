@@ -177,13 +177,12 @@ void RpcClient::State::send_pending() {
     output.write(*socket);
 }
 
-// 非阻塞从 Socket 循环读取响应字节流（单次事件最多 64 KiB），每读一块就调用 handle_responses() 拆包分发。
+// 非阻塞从 Socket 直接读入 input 可写区（单次事件最多 64 KiB），每读一块就调用 handle_responses() 拆包分发。
 // 分支逻辑：!n 表示内核缓冲区已读空（EAGAIN）；*n == 0 表示服务端关闭连接，抛异常触发 fail()。
 void RpcClient::State::receive() {
-    std::array<char, 8192> chunk{};
-
     for (int i = 0; i < 8; ++i) {
-        auto n = socket->try_recv(chunk.data(), chunk.size());
+        input.ensure_writable(8192);
+        auto n = socket->try_recv(input.writable_data(), input.writable_bytes());
 
         if (!n)
             break;
@@ -191,25 +190,32 @@ void RpcClient::State::receive() {
         if (*n == 0)
             throw std::runtime_error("server closed connection");
 
-        input.append(chunk.data(), *n);
+        input.commit_write(*n);
         handle_responses();
     }
 }
 
-// 从 input 缓冲区循环拆出完整响应帧，按 request_id 匹配在途请求并兑现 Promise。
-// 分支逻辑：
-//   1. pendings 中未找到该 id：检查是否在 expired_ids（此前已超时）中；若是则静默丢弃迟到响应，否则抛异常。
-//   2. 找到对应在途请求：校验响应 method 一致后，从 deadlines 与 pendings 中移除该条目。
-//   3. 截止时间判定：若收到响应时已超过 deadline，仍按 TimeoutError 处理；否则调用 promise->set_value() 唤醒调用方。
-//   4. 若刚完成的请求原本是最早到期的（earliest），调用 update_timer() 为下一个最近到期请求重设 timerfd。
+// 从 input 缓冲区循环零拷贝拆出完整响应视图，按需获取 payload 所有权后再调用 retrieve() 推进读游标。
 void RpcClient::State::handle_responses() {
     while (auto response = decode_frame(input)) {
+        const std::size_t frame_bytes = response->wire_bytes();
         if (response->kind == Kind::event) {
             if (event_handler) {
+                Frame ev{
+                    .length = static_cast<std::uint32_t>(min_frame_length + response->payload.size()),
+                    .kind = Kind::event,
+                    .request_id = 0,
+                    .method = response->method,
+                    .status = response->status,
+                    .payload = std::string(response->payload),
+                };
+                input.retrieve(frame_bytes);
                 try {
-                    event_handler(std::move(*response));
+                    event_handler(std::move(ev));
                 } catch (...) {
                 }
+            } else {
+                input.retrieve(frame_bytes);
             }
             continue;
         }
@@ -220,8 +226,8 @@ void RpcClient::State::handle_responses() {
         auto it = pendings.find(id);
 
         if (it == pendings.end()) {
-            // 已经超时的请求可能晚些时候才返回。
-            // 识别后直接丢弃，不影响其他 Future。
+            // 已经超时的请求直接丢弃视图，不分配 payload。
+            input.retrieve(frame_bytes);
             if (expired_ids.erase(id) == 0)
                 throw std::runtime_error("unknown response id");
 
@@ -239,12 +245,19 @@ void RpcClient::State::handle_responses() {
         pendings.erase(it);
 
         if (Clock::now() >= deadline) {
-            // 即使 timerfd 事件还没有执行，
-            // 已经过期的响应仍然算超时。
-
+            input.retrieve(frame_bytes);
             promise->set_exception(std::make_exception_ptr(TimeoutError{}));
         } else {
-            promise->set_value(std::move(*response));
+            Frame owned{
+                .length = static_cast<std::uint32_t>(min_frame_length + response->payload.size()),
+                .kind = Kind::response,
+                .request_id = id,
+                .method = response->method,
+                .status = response->status,
+                .payload = std::string(response->payload),
+            };
+            input.retrieve(frame_bytes);
+            promise->set_value(std::move(owned));
         }
 
         // 仅当最近的 Deadline 改变时才修改 timerfd。

@@ -1,6 +1,7 @@
 module;
 #include <errno.h>
-#include <sys/stat.h>
+#include <fcntl.h>
+#include <stdlib.h>
 #include <unistd.h>
 
 export module service.git;
@@ -10,54 +11,52 @@ export import :protocol;
 
 import std;
 import service.file;
-import service.terminal;
 
 export namespace service::git {
 
 // ============================================================================
-// 2. 仓库路径解析与 Git 分支名安全校验（非热路径短函数不盲目 inline，保护 L1 I-Cache）
+// 2. 仓库目录 FD 解析与 Git 分支名安全校验
 // ============================================================================
 
-// 将客户端传入的仓库相对路径解析为服务端绝对目录路径：
-//   - 若 rel_path 非空（如 "tina" 或 "demo"），调用 service::file::resolve_workspace_path
-//     解析为 ~/projects/<rel_path>，严格拦截 ".." 路径逃逸；
-//   - 若 rel_path 为空，优先检查 ~/projects，若其本身不是 Git 仓库而当前工作目录 "." 下存在
-//   .git，则回退到 "."。
-std::optional<std::string> resolve_git_repo_path(std::string_view rel_path, int &err_out) {
+// 将客户端传入的仓库相对路径解析为目录 FD（避免拼接绝对路径，供子进程 fchdir 使用）：
+//   - 若 rel_path 非空，在栈上校验并通过 openat(root_fd, ..., O_DIRECTORY) 打开目标目录；
+//   - 若 rel_path 为空，优先检查工作区根目录是否存在 .git，否则若当前目录存在 .git 则打开 "."。
+service::file::ScopedFd open_git_repo_dir(std::string_view rel_path, int &err_out) noexcept {
     err_out = 0;
-    std::string target;
+    const int root_fd = service::file::workspace_root_fd();
+
+    auto open_checked = [&](int dirfd, const char *path) noexcept {
+        service::file::ScopedFd dir(::openat(dirfd, path, O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+        if (!dir.valid())
+            err_out = errno != 0 ? errno : ENOENT;
+        return dir;
+    };
 
     if (!rel_path.empty()) {
-        auto resolved = service::file::resolve_workspace_path(rel_path);
-        if (!resolved) {
+        service::file::RelPath rel(rel_path);
+        if (!rel) {
             err_out = EINVAL;
-            return std::nullopt;
+            return {};
         }
-        target = std::move(*resolved);
-    } else {
-        std::string cwd = service::terminal::default_shell_cwd();
-        cwd.append("/.git");
-        if (::access(cwd.c_str(), F_OK) == 0) {
-            cwd.resize(cwd.size() - 5); // 剥离末尾 "/.git"，原地复用 cwd 内存
-            target = std::move(cwd);
-        } else if (::access(".git", F_OK) == 0) {
-            target = ".";
-        } else {
-            cwd.resize(cwd.size() - 5);
-            target = std::move(cwd);
+        if (root_fd < 0) {
+            const char *home = ::getenv("HOME");
+            err_out = (home == nullptr || home[0] == '\0') ? EINVAL : ENOENT;
+            return {};
         }
+        return open_checked(root_fd, rel.c_str());
     }
 
-    struct stat st{};
-    if (::stat(target.c_str(), &st) != 0) {
-        err_out = errno != 0 ? errno : ENOENT;
-        return std::nullopt;
-    }
-    if (!S_ISDIR(st.st_mode)) {
-        err_out = ENOTDIR;
-        return std::nullopt;
-    }
-    return target;
+    if (root_fd >= 0 && ::faccessat(root_fd, ".git", F_OK, 0) == 0)
+        return open_checked(root_fd, ".");
+    if (::access(".git", F_OK) == 0)
+        return open_checked(AT_FDCWD, ".");
+    if (root_fd >= 0)
+        return open_checked(root_fd, ".");
+
+    const char *home = ::getenv("HOME");
+    if (home != nullptr && home[0] != '\0')
+        return open_checked(AT_FDCWD, home);
+    return open_checked(AT_FDCWD, "/");
 }
 
 // 校验客户端传入的 Git 分支/引用名称是否合法：

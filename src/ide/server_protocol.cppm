@@ -138,56 +138,12 @@ void encode_workspace_list_projects_into(const std::vector<std::string> &project
     }
 }
 
-// 原地编码 0x0202 (workspace_list_dir) 响应与目录变化 Event 负载进 out。
-// 头部为所属目录相对路径 [u16 dirPathLen][dirPath bytes]，
-// 随后每个文件/文件夹编码为 [u8 type][u16 nameLen][name bytes]，流式紧密拼接。
-// 给 I/O 分类器传入内联预算，给普通编码器传入无限预算。预算不足或字段非法时返回
-// false，out 仍保留原请求，Worker 可以继续编码或按原来的错误路径处理。
-bool try_encode_list_dir(std::string_view dir_path, const std::vector<DirEntry> &entries,
-                         std::string &out, std::size_t budget) {
-    constexpr auto max_name = std::numeric_limits<std::uint16_t>::max();
-    if (dir_path.empty() || dir_path.size() > max_name)
-        return false;
-
-    std::size_t size = 2 + dir_path.size();
-    // 每个合法目录项至少占四字节（类型、长度、一个名字节）。条目数已超预算时，
-    // I/O 线程可以直接交给 Worker，连名字都无需遍历。
-    if (size > budget || entries.size() > (budget - size) / 4)
-        return false;
-    for (const auto &entry : entries) {
-        if (entry.name.empty() || entry.name.size() > max_name)
-            return false;
-        size += 3 + entry.name.size();
-    }
-    if (size > budget)
-        return false;
-
-    // 上面已算出精确长度。逐项直接写入最终位置，每个名字只拷贝一次，
-    // 避免对短小目录项反复扩展 string、检查容量并写结尾的 NUL。
-    out.clear(); // 扩容时也不用复制原请求里的路径前缀。
-    out.resize_and_overwrite(size, [&](char *data, std::size_t) noexcept {
-        auto write_name = [](char *dst, std::string_view name) {
-            write_be(dst, static_cast<std::uint16_t>(name.size()));
-            std::memcpy(dst + 2, name.data(), name.size());
-            return dst + 2 + name.size();
-        };
-        char *next = write_name(data, dir_path);
-        for (const auto &entry : entries) {
-            *next++ = static_cast<char>(entry.type);
-            next = write_name(next, entry.name);
-        }
-        return size;
-    });
-    return true;
-}
-
-void encode_workspace_list_dir_into(std::string_view dir_path, const std::vector<DirEntry> &entries,
-                                    std::string &out) {
-    if (try_encode_list_dir(dir_path, entries, out, std::numeric_limits<std::size_t>::max()))
-        return;
-    if (dir_path.empty() || dir_path.size() > std::numeric_limits<std::uint16_t>::max())
-        throw std::invalid_argument("directory path exceeds u16 length limit");
-    throw std::invalid_argument("dir entry name exceeds u16 length limit");
+// 零拷贝封装已编码完成的 0x0202 (workspace_list_dir) 响应或目录变更 Event 负载，
+// 直接挂载外置切片与所有者（缓存槽位 Pin 或独立正文），由 writev 聚集发送。
+void encode_workspace_list_dir(Frame &frame, auto cached) noexcept {
+    frame.payload.clear();
+    frame.external_payload = *cached;
+    frame.payload_owner = std::move(cached);
 }
 
 // 原地编码 0x0203 (workspace_read_file) 响应负载进 out：

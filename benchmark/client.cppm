@@ -72,58 +72,6 @@ inline void pin_current_thread_to_cpu(unsigned cpu) noexcept {
     pin_current_thread_to_cpus(std::span<const unsigned>{&cpu, 1});
 }
 
-// ============================================================================
-// 零拷贝接收帧视图（直接引用 net::Buffer 连续可读区，消除每次收包的 string 堆分配与拷贝）
-// ============================================================================
-struct RxFrameView {
-    std::uint32_t length{};
-    Kind kind{};
-    std::uint64_t request_id{};
-    Method method{};
-    Status status{};
-    std::string_view payload{};
-};
-
-[[nodiscard]] inline bool valid_rx_header(const RxFrameView &frame) noexcept {
-    switch (frame.kind) {
-    case Kind::request:
-        return frame.request_id != 0 && frame.status == Status::ok;
-    case Kind::response:
-        return frame.request_id != 0 && frame.status <= Status::timeout;
-    case Kind::event:
-        return frame.request_id == 0 && frame.status == Status::ok;
-    }
-    return false;
-}
-
-// 【作用】从输入缓冲区零拷贝解析一帧完整 RPC 消息视图；处理完毕后由调用方执行 in.retrieve(4 + length)。
-[[nodiscard]] inline std::optional<RxFrameView> peek_frame_view(const net::Buffer &in) {
-    if (in.readable_bytes() < 4)
-        return std::nullopt;
-
-    const char *bytes = in.data();
-    const auto length = read_be<std::uint32_t>(bytes);
-    if (length < min_frame_length || length > max_frame_length)
-        throw std::invalid_argument("invalid RPC frame length");
-
-    if (in.readable_bytes() < 4 + length)
-        return std::nullopt;
-
-    RxFrameView frame{
-        .length = length,
-        .kind = static_cast<Kind>(bytes[4]),
-        .request_id = read_be<std::uint64_t>(bytes + 5),
-        .method = static_cast<Method>(read_be<std::uint16_t>(bytes + 13)),
-        .status = static_cast<Status>(read_be<std::uint16_t>(bytes + 15)),
-        .payload = std::string_view(bytes + frame_header_size, length - min_frame_length),
-    };
-
-    if (!valid_rx_header(frame))
-        throw std::invalid_argument("invalid RPC frame header");
-
-    return frame;
-}
-
 // BenchConnection：管理单条 TCP Socket 连接、维持 max_inflight 请求流水线、发送请求并解析响应。
 class BenchConnection {
   public:
@@ -147,8 +95,6 @@ class BenchConnection {
 
     BenchConnection(const BenchConnection &) = delete;
     BenchConnection &operator=(const BenchConnection &) = delete;
-    BenchConnection(BenchConnection &&) noexcept = default;
-    BenchConnection &operator=(BenchConnection &&) noexcept = default;
 
     [[nodiscard]] inline int fd() const noexcept {
         return socket_.native_handle();
@@ -263,7 +209,7 @@ class BenchConnection {
     }
 
     [[nodiscard]] static bool validate_view(Method request_method,
-                                            const RxFrameView &response) noexcept {
+                                            const FrameView &response) noexcept {
         if (response.kind != Kind::response || response.method != request_method)
             return false;
 
@@ -296,8 +242,8 @@ class BenchConnection {
             input_.commit_write(*n);
             const auto batch_now = Clock::now();
 
-            while (auto frame = peek_frame_view(input_)) {
-                const auto total_frame_bytes = static_cast<std::size_t>(4 + frame->length);
+            while (auto frame = decode_frame(input_)) {
+                const auto total_frame_bytes = frame->wire_bytes();
                 if (frame->kind == Kind::event) {
                     input_.retrieve(total_frame_bytes);
                     continue;

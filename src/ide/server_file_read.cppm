@@ -1,6 +1,7 @@
 module;
 #include <errno.h>
 #include <fcntl.h>
+#include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -39,19 +40,30 @@ void handle_workspace_read_file(Frame &frame) {
     const std::uint64_t offset = req->offset;
     const std::uint32_t max_bytes = req->max_bytes;
 
-    // I/O 线程已处理热命中。到 Worker 后一次完成路径校验和拼接；
-    // 即使别的 Worker 刚刚回填了缓存，下面的复查仍能省掉 open / pread。
-    auto full_path = service::file::resolve_workspace_path(req->path);
-    if (!full_path) {
+    // I/O 线程已处理热命中。到 Worker 后直接校验相对路径并准备栈上 NUL 终止缓冲；
+    // 非缓存读会直接改写请求 payload，后续均借用栈上的 rel.view()，重试仍然有效。
+    service::file::RelPath rel(req->path);
+    if (!rel) {
         frame.status = Status::invalid_argument;
         frame.payload = "invalid workspace file path";
         return;
     }
 
-    // 非缓存读会直接覆盖请求 payload；路径借用已解析的 full_path，重试仍然有效。
-    const auto rel_path = std::string_view(*full_path).substr(full_path->size() - req->path.size());
+    const int root_fd = service::file::workspace_root_fd();
+    if (root_fd < 0) {
+        const char *home = ::getenv("HOME");
+        if (home == nullptr || home[0] == '\0') {
+            frame.status = Status::invalid_argument;
+            frame.payload = "invalid workspace file path";
+        } else {
+            service::file::set_errno_error(frame, ENOENT, "failed to open file for reading");
+        }
+        return;
+    }
+
+    const auto rel_path = rel.view();
     auto &cache = service::global_workspace_cache();
-    std::uint64_t epoch; // 必须在 open 和注册 watch 前取样，防止旧 inode 读盘覆盖新版本。
+    std::uint64_t epoch; // 必须在 openat 和注册 watch 前取样，防止旧 inode 读盘覆盖新版本。
     if (auto cached = cache.get_file(rel_path, &epoch)) {
         const auto slice = slice_file_content(*cached, offset, max_bytes);
         frame.kind = Kind::response;
@@ -60,7 +72,7 @@ void handle_workspace_read_file(Frame &frame) {
         return;
     }
 
-    service::file::ScopedFd fd(::open(full_path->c_str(), O_RDONLY | O_CLOEXEC));
+    service::file::ScopedFd fd(::openat(root_fd, rel.c_str(), O_RDONLY | O_CLOEXEC));
     if (!fd.valid()) {
         service::file::set_errno_error(frame, errno, "failed to open file for reading");
         return;
@@ -144,8 +156,8 @@ void handle_workspace_read_file(Frame &frame) {
             complete->revision = rev_before;
             // add_watch 后按路径复核了同一 inode 的 revision，已覆盖 pread 的整个区间。
             // 正常回填只做一次读后检查；随后文件再被修改，由 inotify 使缓存失效。
-            if (auto pin = file_watcher.cache_file_if_current(rel_path, *full_path, fd.get(),
-                                                              complete, epoch)) {
+            if (auto pin = file_watcher.cache_file_if_current(rel_path, root_fd, rel.c_str(),
+                                                              fd.get(), complete, epoch)) {
                 const auto slice = slice_file_content(*pin, offset, max_bytes);
                 frame.status = Status::ok;
                 encode_workspace_read_file(frame, std::move(pin), slice);

@@ -1,4 +1,5 @@
 module;
+#include <fcntl.h>
 #include <sys/inotify.h>
 #include <unistd.h>
 
@@ -94,14 +95,22 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
             return;
         }
 
-        auto full_path = file::resolve_workspace_path(rel_path);
-        if (!full_path)
+        const int root_fd = file::workspace_root_fd();
+        file::RelPath rel(rel_path);
+        if (root_fd < 0 || !rel)
             return;
 
-        // 仅监听目录项增删改名及目录自身删除/移动事件；文件内容修改由 FileWatcher 独立负责。
-        constexpr std::uint32_t mask = IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO |
-                                       IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR;
-        const int wd = ::inotify_add_watch(inotify_fd_, full_path->c_str(), mask);
+        file::ScopedFd dir_fd(::openat(root_fd, rel.c_str(), O_PATH | O_DIRECTORY | O_CLOEXEC));
+        int wd = -1;
+        if (dir_fd.valid()) {
+            char inode_path[32] = "/proc/self/fd/";
+            std::to_chars(inode_path + sizeof("/proc/self/fd/") - 1, std::end(inode_path) - 1,
+                          dir_fd.get());
+            // 仅监听目录项增删改名及目录自身删除/移动事件；文件内容修改由 FileWatcher 独立负责。
+            constexpr std::uint32_t mask = IN_CREATE | IN_DELETE | IN_MOVED_FROM | IN_MOVED_TO |
+                                           IN_DELETE_SELF | IN_MOVE_SELF | IN_ONLYDIR;
+            wd = ::inotify_add_watch(inotify_fd_, inode_path, mask);
+        }
         // 首次扫描可能早于注册监听。让下一次 list_dir 能看到这段间隙内的变动；
         // 已经订阅的热路径在上面的路径表命中处直接返回。
         if (cache_)

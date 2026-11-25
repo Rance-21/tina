@@ -2,6 +2,7 @@ module;
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -10,6 +11,19 @@ export module service.file;
 
 import std;
 import ide.protocol;
+
+namespace service::file::detail {
+
+int workspace_root_fd = -2;
+
+struct RootFdCleanup {
+    ~RootFdCleanup() {
+        if (workspace_root_fd >= 0)
+            ::close(workspace_root_fd);
+    }
+} root_fd_cleanup{};
+
+} // namespace service::file::detail
 
 export namespace service::file {
 
@@ -47,12 +61,24 @@ inline std::uint64_t file_revision(const struct stat &st) noexcept {
 // 自动关闭 Linux 文件描述符（fd）的 RAII 守卫。
 class ScopedFd {
   public:
-    explicit ScopedFd(int fd = -1) noexcept : fd_(fd) {
+    ScopedFd() noexcept = default;
+    explicit ScopedFd(int fd) noexcept : fd_(fd) {
     }
 
     ~ScopedFd() {
         if (fd_ >= 0)
             ::close(fd_);
+    }
+
+    ScopedFd(ScopedFd &&other) noexcept : fd_(std::exchange(other.fd_, -1)) {
+    }
+    ScopedFd &operator=(ScopedFd &&other) noexcept {
+        if (this != &other) {
+            if (fd_ >= 0)
+                ::close(fd_);
+            fd_ = std::exchange(other.fd_, -1);
+        }
+        return *this;
     }
 
     ScopedFd(const ScopedFd &) = delete;
@@ -132,33 +158,43 @@ inline void set_errno_error(Frame &frame, int err, std::string_view context) {
     frame.payload = std::string(context);
 }
 
-// 3. 工作区根目录（~/projects）与相对路径安全校验
-// 判断 HOME 环境变量是否有效（零内存分配快速检查，供缓存命中路径复用）。
-inline bool has_projects_root_env() noexcept {
-    const char *home = ::getenv("HOME");
-    return home != nullptr && home[0] != '\0';
-}
+// 3. 工作区根目录（~/projects）FD 管理与相对路径栈缓冲校验
+// 预先打开并持有 ~/projects 目录 FD（服务启动时调用一次；独立单测首次访问时按需打开）。
+int init_workspace_root() noexcept {
+    if (detail::workspace_root_fd >= 0)
+        ::close(detail::workspace_root_fd);
+    detail::workspace_root_fd = -1;
 
-// 拼相对路径时一起预留后缀空间，避免每个缓存未命中请求都重新分配并复制根目录。
-inline std::optional<std::string> projects_root_dir(std::size_t suffix_bytes = 0) {
     const char *home = ::getenv("HOME");
     if (home == nullptr || home[0] == '\0')
-        return std::nullopt;
+        return -1;
 
     std::string_view base(home);
-    if (base.ends_with('/'))
+    while (base.size() > 1 && base.ends_with('/'))
         base.remove_suffix(1);
     constexpr std::string_view projects = "/projects";
-    std::string root;
-    root.reserve(base.size() + projects.size() + suffix_bytes);
-    root.append(base).append(projects);
-    return root;
+    if (base.size() + projects.size() >= PATH_MAX)
+        return -1;
+
+    char root[PATH_MAX];
+    std::memcpy(root, base.data(), base.size());
+    std::memcpy(root + base.size(), projects.data(), projects.size());
+    root[base.size() + projects.size()] = '\0';
+
+    detail::workspace_root_fd = ::open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    return detail::workspace_root_fd;
 }
 
-// 仅做相对路径合法性校验（零堆分配），用于缓存命中路径快速拦截非法越界路径。
+[[nodiscard]] inline int workspace_root_fd() noexcept {
+    if (detail::workspace_root_fd != -2) [[likely]]
+        return detail::workspace_root_fd;
+    return init_workspace_root();
+}
+
+// 仅做相对路径合法性校验（零堆分配）：严格禁止以 "/" 开头或结尾、空段 "//"、"." 与 ".." 逃逸。
 inline bool is_valid_workspace_rel_path(std::string_view rel_path) noexcept {
-    if (rel_path.empty() || rel_path.front() == '/' || rel_path.back() == '/' ||
-        rel_path.find('\0') != std::string_view::npos)
+    if (rel_path.empty() || rel_path.size() >= PATH_MAX || rel_path.front() == '/' ||
+        rel_path.back() == '/' || rel_path.find('\0') != std::string_view::npos)
         return false;
 
     std::size_t start = 0;
@@ -178,34 +214,69 @@ inline bool is_valid_workspace_rel_path(std::string_view rel_path) noexcept {
     return true;
 }
 
-// 校验客户端传入的相对于 ~/projects 的路径（如 "tina" 或 "tina/src/main.cpp"），
-// 严格禁止以 "/" 开头、禁止空路径段 "//"、禁止 "." 与 ".." 越界逃逸。
-std::optional<std::string> resolve_workspace_path(std::string_view rel_path) {
-    if (!is_valid_workspace_rel_path(rel_path))
-        return std::nullopt;
+// 在栈区校验相对路径并补齐结尾 '\0'，供 openat 系列系统调用直接使用（仅写入实际路径长度字节）。
+class RelPath {
+  public:
+    explicit RelPath(std::string_view rel_path) noexcept {
+        if (!is_valid_workspace_rel_path(rel_path))
+            return;
+        size_ = rel_path.size();
+        std::memcpy(buf_, rel_path.data(), size_);
+        buf_[size_] = '\0';
+    }
 
-    auto root = projects_root_dir(1 + rel_path.size());
-    if (!root)
-        return std::nullopt;
+    RelPath(const RelPath &) = delete;
+    RelPath &operator=(const RelPath &) = delete;
 
-    *root += '/';
-    root->append(rel_path);
-    return root;
-}
+    [[nodiscard]] inline bool valid() const noexcept {
+        return size_ != 0;
+    }
+    [[nodiscard]] inline explicit operator bool() const noexcept {
+        return valid();
+    }
+    [[nodiscard]] inline const char *c_str() const noexcept {
+        return buf_;
+    }
+    [[nodiscard]] inline std::string_view view() const noexcept {
+        return {buf_, size_};
+    }
 
-// 枚举指定完整目录路径下的一级子项（深度为 1，不递归展开）。
-// 成功返回 0，失败返回对应的 errno（> 0 表示 open 失败，< 0 表示 readdir 失败的 -errno）。
-int read_directory_entries(const std::string &target_path, std::vector<DirEntry> &entries) {
-    // disk io
-    ScopedDir dir(::opendir(target_path.c_str()));
-    if (!dir)
+  private:
+    std::size_t size_{0};
+    char buf_[PATH_MAX];
+};
+
+// 基于 openat 枚举一级子项并直接按协议格式编码进 out：
+// [u16 dirPathLen][dirPath bytes] + 按名字升序排列的 [u8 type][u16 nameLen][name bytes]...
+// 成功返回 0，失败返回对应的 errno（> 0 表示打开目录失败，< 0 表示 readdir 失败的 -errno）。
+int read_directory_payload(int root_fd, const RelPath &rel, std::string &out) {
+    const std::string_view rel_path = rel.view();
+    if (rel_path.size() > std::numeric_limits<std::uint16_t>::max())
+        return EINVAL;
+
+    const int raw_fd = ::openat(root_fd, rel.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (raw_fd < 0)
         return errno != 0 ? errno : EIO;
 
+    DIR *raw_dir = ::fdopendir(raw_fd);
+    if (!raw_dir) {
+        const int err = errno != 0 ? errno : EIO;
+        ::close(raw_fd);
+        return err;
+    }
+    ScopedDir dir(raw_dir);
     const int dfd = ::dirfd(dir.get());
+
+    struct EntrySpan {
+        std::uint32_t offset;
+        std::uint16_t len;
+        DirEntryType type;
+    };
+    std::vector<EntrySpan> entries;
+    std::string names;
 
     while (true) {
         errno = 0;
-        // syscall （绝大部分一次），会在用户态缓冲
         dirent *entry = ::readdir(dir.get());
         if (entry == nullptr) {
             if (errno != 0)
@@ -214,7 +285,8 @@ int read_directory_entries(const std::string &target_path, std::vector<DirEntry>
         }
 
         std::string_view name(entry->d_name);
-        if (name == "." || name == ".." || name.size() > std::numeric_limits<std::uint16_t>::max())
+        if (name.empty() || name == "." || name == ".." ||
+            name.size() > std::numeric_limits<std::uint16_t>::max())
             continue;
 
         // 忽略服务端原子写文件期间产生的同目录临时文件。
@@ -248,12 +320,36 @@ int read_directory_entries(const std::string &target_path, std::vector<DirEntry>
             break;
         }
 
-        if (type)
-            entries.push_back(DirEntry{.type = *type, .name = std::string(name)});
+        if (type) {
+            if (names.size() > std::numeric_limits<std::uint32_t>::max() - name.size())
+                return EOVERFLOW;
+            entries.push_back(EntrySpan{
+                .offset = static_cast<std::uint32_t>(names.size()),
+                .len = static_cast<std::uint16_t>(name.size()),
+                .type = *type,
+            });
+            names.append(name);
+        }
     }
 
-    std::ranges::sort(entries, [](const DirEntry &a, const DirEntry &b) {
-        return a.name < b.name;
+    std::ranges::sort(entries, [&](const EntrySpan &a, const EntrySpan &b) {
+        return std::string_view(names.data() + a.offset, a.len) <
+               std::string_view(names.data() + b.offset, b.len);
+    });
+
+    const std::size_t total_size = 2 + rel_path.size() + entries.size() * 3 + names.size();
+    out.clear();
+    out.resize_and_overwrite(total_size, [&](char *dst, std::size_t) noexcept {
+        write_be(dst, static_cast<std::uint16_t>(rel_path.size()));
+        std::memcpy(dst + 2, rel_path.data(), rel_path.size());
+        char *next = dst + 2 + rel_path.size();
+        for (const auto &e : entries) {
+            *next++ = static_cast<char>(e.type);
+            write_be(next, e.len);
+            std::memcpy(next + 2, names.data() + e.offset, e.len);
+            next += 2 + e.len;
+        }
+        return total_size;
     });
     return 0;
 }

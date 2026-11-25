@@ -22,7 +22,7 @@ class Buffer {
     }
 
     // 返回当前尚未消费的可读数据起点。
-    [[nodiscard]] inline const char *data() const noexcept {
+    [[nodiscard]] inline const char *readable_data() const noexcept {
         if (empty()) {
             return nullptr;
         }

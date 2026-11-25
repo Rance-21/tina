@@ -313,7 +313,7 @@ class Connection {
         if (ev.error())
             throw std::runtime_error("ide_mixed socket error");
         if (ev.readable() || ev.hangup() || ev.peer_closed()) {
-            // 直接向 input_ 可写区执行零中转 recv，并用 peek_frame_view 原地零拷贝校验响应帧。
+            // 直接向 input_ 可写区执行零中转 recv，并用 decode_frame 原地零拷贝校验响应帧。
             for (int i = 0; i < 32; ++i) {
                 input_.ensure_writable(65536);
                 auto n = socket_.try_recv(input_.writable_data(), input_.writable_bytes());
@@ -323,8 +323,8 @@ class Connection {
                     throw std::runtime_error("server closed ide_mixed connection");
                 input_.commit_write(*n);
                 const auto batch_now = Clock::now();
-                while (auto frame = peek_frame_view(input_)) {
-                    const auto total_bytes = static_cast<std::size_t>(4 + frame->length);
+                while (auto frame = decode_frame(input_)) {
+                    const auto total_bytes = frame->wire_bytes();
                     receive(*frame, batch_now);
                     input_.retrieve(total_bytes);
                 }
@@ -453,7 +453,7 @@ class Connection {
             finish(*p, p->command_ok, now);
     }
 
-    void receive(const RxFrameView &frame, Clock::time_point now) {
+    void receive(const FrameView &frame, Clock::time_point now) {
         const auto bytes = frame_header_size + frame.payload.size();
         if (frame.kind == Kind::event) {
             if (frame.method == Method::workspace_list_dir) {
@@ -542,7 +542,7 @@ class Connection {
                 revision = *result;
         } else if (p.op == Op::control) {
             control_response = Frame{
-                .length = frame.length,
+                .length = static_cast<std::uint32_t>(min_frame_length + frame.payload.size()),
                 .kind = frame.kind,
                 .request_id = frame.request_id,
                 .method = frame.method,

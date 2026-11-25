@@ -21,6 +21,7 @@ import runtime.log;
 
 import rpc.connection;
 import rpc.handler;
+import service.file;
 import service.file_watcher;
 import service.dir_watcher;
 import ide.server_terminal;
@@ -204,6 +205,8 @@ void run_server(std::string_view port, runtime::ServerConfig config = {}) {
     runtime::log::init();
     for (const auto &w : topology_warnings)
         runtime::log::warn("topology: " + w);
+
+    service::file::init_workspace_root();
 
     std::optional<net::Socket> listener{net::Socket::listen_tcp(port)};
     listener->set_non_blocking();

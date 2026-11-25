@@ -163,14 +163,26 @@ export struct Frame {
     }
 };
 
-static bool valid_header(const Frame &frame) {
-    switch (frame.kind) {
+export struct FrameView {
+    Kind kind{};
+    std::uint64_t request_id{};
+    Method method{};
+    Status status{};
+    std::string_view payload{};
+
+    [[nodiscard]] std::size_t wire_bytes() const noexcept {
+        return frame_header_size + payload.size();
+    }
+};
+
+inline bool valid_header(Kind kind, std::uint64_t request_id, Status status) noexcept {
+    switch (kind) {
     case Kind::request:
-        return frame.request_id != 0 && frame.status == Status::ok;
+        return request_id != 0 && status == Status::ok;
     case Kind::response:
-        return frame.request_id != 0 && frame.status <= Status::timeout;
+        return request_id != 0 && status <= Status::timeout;
     case Kind::event:
-        return frame.request_id == 0 && frame.status == Status::ok;
+        return request_id == 0 && status == Status::ok;
     }
     return false;
 }
@@ -183,7 +195,8 @@ export void encode_frame_header(const Frame &frame, char *dst) {
     const std::size_t payload_size = frame.payload_size();
 
     if (frame.external_payload.size() > max_payload ||
-        frame.payload.size() > max_payload - frame.external_payload.size() || !valid_header(frame))
+        frame.payload.size() > max_payload - frame.external_payload.size() ||
+        !valid_header(frame.kind, frame.request_id, frame.status))
         throw std::invalid_argument("invalid RPC frame");
 
     // 17 字节帧头布局：
@@ -199,12 +212,13 @@ export void encode_frame_header(const Frame &frame, char *dst) {
     write_be(dst + 15, std::to_underlying(frame.status));
 }
 
-// 每次只取一帧。半包留在输入缓冲区；非法长度立即报错，不按外部长度预分配。
-export std::optional<Frame> decode_frame(net::Buffer &in) {
+// 零拷贝解码队首完整帧，payload 直接引用 in 的可读区。半包返回 nullopt；非法帧立即抛异常。
+// 调用方须在消费视图或按需拷贝后调用 in.retrieve(frame->wire_bytes())，期间不得触发 in 扩容或紧缩。
+export [[nodiscard]] inline std::optional<FrameView> decode_frame(const net::Buffer &in) {
     if (in.readable_bytes() < 4)
         return std::nullopt;
 
-    const char *bytes = in.data();
+    const char *bytes = in.readable_data();
     const auto length = read_be<std::uint32_t>(bytes);
 
     if (length < min_frame_length || length > max_frame_length)
@@ -213,18 +227,16 @@ export std::optional<Frame> decode_frame(net::Buffer &in) {
     if (in.readable_bytes() < 4 + length)
         return std::nullopt;
 
-    Frame frame{.length = length,
-                .kind = static_cast<Kind>(bytes[4]),
-                .request_id = read_be<std::uint64_t>(bytes + 5),
-                .method = static_cast<Method>(read_be<std::uint16_t>(bytes + 13)),
-                .status = static_cast<Status>(read_be<std::uint16_t>(bytes + 15)),
-                .payload = {}};
+    FrameView frame{
+        .kind = static_cast<Kind>(bytes[4]),
+        .request_id = read_be<std::uint64_t>(bytes + 5),
+        .method = static_cast<Method>(read_be<std::uint16_t>(bytes + 13)),
+        .status = static_cast<Status>(read_be<std::uint16_t>(bytes + 15)),
+        .payload = std::string_view(bytes + frame_header_size, length - min_frame_length),
+    };
 
-    if (!valid_header(frame))
+    if (!valid_header(frame.kind, frame.request_id, frame.status))
         throw std::invalid_argument("invalid RPC frame header");
 
-    // 完整的 payload
-    frame.payload.assign(bytes + frame_header_size, length - min_frame_length);
-    in.retrieve(4 + length);
     return frame;
 }

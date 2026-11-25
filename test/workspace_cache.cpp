@@ -6,6 +6,7 @@ import ide.server_protocol;
 import ide.server;
 import net.buffer;
 import net.event_loop;
+import service.file;
 import service.file_watcher;
 import service.workspace_cache;
 
@@ -50,18 +51,16 @@ int test_lru_and_invalidation() {
     // 1. 验证 epoch 并发保护：读盘期间发生 invalidate，旧读不能回填缓存。
     const auto stale_epoch = cache.dir_epoch("demo");
     cache.invalidate_dir("demo");
-    auto entries = std::make_shared<std::vector<DirEntry>>(
-        std::vector<DirEntry>{{DirEntryType::file, "stale.txt"}});
-    cache.put_dir("demo", entries, stale_epoch);
+    auto stale_dir = std::make_shared<const std::string>("stale-encoded");
+    cache.put_dir("demo", stale_dir, stale_epoch);
     CHECK(cache.get_dir("demo") == nullptr);
 
     // 使用最新 epoch 写入应成功命中。
     const auto fresh_epoch = cache.dir_epoch("demo");
-    auto fresh_entries = std::make_shared<std::vector<DirEntry>>(
-        std::vector<DirEntry>{{DirEntryType::file, "a.txt"}});
-    cache.put_dir("demo", fresh_entries, fresh_epoch);
+    auto fresh_dir = std::make_shared<const std::string>("fresh-encoded");
+    cache.put_dir("demo", fresh_dir, fresh_epoch);
     auto got_dir = cache.get_dir("demo");
-    CHECK(got_dir != nullptr && got_dir->size() == 1 && (*got_dir)[0].name == "a.txt");
+    CHECK(got_dir != nullptr && *got_dir == "fresh-encoded");
 
     // 2. 验证 unwatch 级联淘汰目录自身及其直接子文件，但不误伤子目录或无关目录。
     const auto f1_ep = cache.file_epoch("demo/a.txt");
@@ -71,7 +70,7 @@ int test_lru_and_invalidation() {
     cache.put_file("demo/sub/b.txt",
                    std::make_shared<ReadFileResponse>(ReadFileResponse{5, 2, "world"}), f2_ep);
     const auto d2_ep = cache.dir_epoch("demo2");
-    cache.put_dir("demo2", fresh_entries, d2_ep);
+    cache.put_dir("demo2", fresh_dir, d2_ep);
 
     cache.invalidate_dir_and_files("demo");
     CHECK(cache.get_dir("demo") == nullptr);
@@ -81,7 +80,7 @@ int test_lru_and_invalidation() {
 
     // 3. 验证子树淘汰（严格按 '/' 边界匹配，不误伤 demo2）。
     const auto sub_dir_ep = cache.dir_epoch("demo/sub");
-    cache.put_dir("demo/sub", fresh_entries, sub_dir_ep);
+    cache.put_dir("demo/sub", fresh_dir, sub_dir_ep);
     cache.invalidate_subtree("demo");
     CHECK(cache.get_dir("demo/sub") == nullptr);
     CHECK(cache.get_file("demo/sub/b.txt") == nullptr);
@@ -114,7 +113,7 @@ int test_lru_and_invalidation() {
     for (int i = 0; i < 40; ++i) {
         const std::string key = "proj/d_" + std::to_string(i);
         const auto ep = lru_cache.dir_epoch(key);
-        lru_cache.put_dir(key, fresh_entries, ep);
+        lru_cache.put_dir(key, fresh_dir, ep);
 
         const std::string fkey = "proj/f_" + std::to_string(i);
         const auto fep = lru_cache.file_epoch(fkey);
@@ -230,19 +229,21 @@ int test_handlers_skip_filesystem_on_hit() {
     const char *old_home = ::getenv("HOME");
     const std::string saved_home = old_home ? old_home : "";
     ::setenv("HOME", tmp_root.c_str(), 1);
+    service::file::init_workspace_root();
 
     auto restore_env = [&]() {
         if (old_home)
             ::setenv("HOME", saved_home.c_str(), 1);
         else
             ::unsetenv("HOME");
+        service::file::init_workspace_root();
         std::filesystem::remove_all(tmp_root, ec);
         service::global_workspace_cache().clear();
     };
 
     service::global_workspace_cache().clear();
 
-    // 1. 首次 list_dir 进入文件系统，并将目录项写入缓存。
+    // 1. 首次 list_dir 进入文件系统，并将协议编码后的负载写入缓存。
     Frame list_frame{
         .kind = Kind::request,
         .request_id = 1,
@@ -254,6 +255,10 @@ int test_handlers_skip_filesystem_on_hit() {
     server::handle_workspace_list_dir(list_frame, &watched_dir);
     CHECK(list_frame.status == Status::ok);
     CHECK(watched_dir == "demo");
+    CHECK(list_frame.payload.empty());
+    CHECK(!list_frame.external_payload.empty());
+    CHECK(list_frame.payload_owner.get() ==
+          service::global_workspace_cache().get_dir("demo").get());
 
     // 2. 首次 read_file 读取前 3 字节，底层整文件写入缓存。
     Frame read_frame1{
@@ -287,7 +292,9 @@ int test_handlers_skip_filesystem_on_hit() {
     server::handle_workspace_list_dir(list_hit, &watched_dir);
     CHECK(list_hit.status == Status::ok);
     CHECK(watched_dir == "demo");
-    CHECK(list_hit.payload == list_frame.payload);
+    CHECK(list_hit.payload.empty());
+    CHECK(list_hit.external_payload.data() == list_frame.external_payload.data());
+    CHECK(list_hit.external_payload == list_frame.external_payload);
 
     // 命中缓存且使用不同 offset/maxBytes 分段读取仍应返回正确切片 "def"。
     Frame read_hit{
@@ -316,8 +323,9 @@ int test_handlers_skip_filesystem_on_hit() {
     CHECK(!read_eof.payload_owner && read_eof.external_payload.empty());
     CHECK(read_be<std::uint64_t>(read_eof.payload.data()) == 6);
 
-    // 4. 模拟 unwatch 淘汰后，再次访问会回落到 Linux 文件系统并返回 not_found。
+    // 4. 模拟 unwatch 淘汰后，已外借的切片仍然有效，再次访问会回落到 Linux 文件系统并返回 not_found。
     service::global_workspace_cache().invalidate_dir_and_files("demo");
+    CHECK(list_hit.external_payload == list_frame.external_payload);
     CHECK(read_frame1.external_payload == "abc");
     CHECK(read_hit.external_payload == "def");
 

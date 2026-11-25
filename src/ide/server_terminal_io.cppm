@@ -25,7 +25,7 @@ void TerminalManager::on_pty_event(const std::shared_ptr<Session> &session, net:
     // EPOLLOUT。
     if (event.writable() && !session->write_buffer.empty()) {
         while (!session->write_buffer.empty()) {
-            ssize_t n = ::write(session->master_fd, session->write_buffer.data(),
+            ssize_t n = ::write(session->master_fd, session->write_buffer.readable_data(),
                                 session->write_buffer.readable_bytes());
             if (n > 0) {
                 session->write_buffer.retrieve(static_cast<std::size_t>(n));

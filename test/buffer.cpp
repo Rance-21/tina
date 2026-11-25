@@ -15,7 +15,7 @@ int main() {
     // 2. 消费 2 字节，剩余内容应当是 "llo"。
     buffer.retrieve(2);
 
-    std::string_view remaining(buffer.data(), buffer.readable_bytes());
+    std::string_view remaining(buffer.readable_data(), buffer.readable_bytes());
 
     if (remaining != "llo") {
         std::cerr << "retrieve failed\n";

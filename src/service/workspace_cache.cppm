@@ -36,8 +36,8 @@ class WorkspaceCache {
         return max_per_file_bytes_;
     }
 
-    // ---- 目录列表缓存（workspace_list_dir，缓存 std::vector<DirEntry>） ----
-    using DirHandle = detail::CacheHandle<std::vector<DirEntry>>;
+    // ---- 目录列表缓存（workspace_list_dir，直接缓存协议编码后的 Payload） ----
+    using DirHandle = detail::CacheHandle<std::string>;
     using FileHandle = detail::CacheHandle<ReadFileResponse>;
 
     [[nodiscard]] DirHandle get_dir(std::string_view rel_path,
@@ -49,21 +49,12 @@ class WorkspaceCache {
         return dirs_.epoch(rel_path);
     }
 
-    DirHandle put_dir(std::string_view rel_path,
-                      std::shared_ptr<const std::vector<DirEntry>> entries,
+    DirHandle put_dir(std::string_view rel_path, std::shared_ptr<const std::string> payload,
                       std::uint64_t expected_epoch) {
-        if (!entries)
+        if (!payload)
             return {};
-        const std::size_t approx_bytes = estimate_dir_bytes(rel_path, *entries);
-        return dirs_.put(rel_path, std::move(entries), approx_bytes, expected_epoch);
-    }
-
-    // 调用者已经独立编码了响应，扫描结果直接移交缓存。控制块分配失败只放弃回填。
-    void put_dir(std::string_view path, std::vector<DirEntry> &&entries, std::uint64_t epoch) {
-        try {
-            put_dir(path, std::make_shared<const std::vector<DirEntry>>(std::move(entries)), epoch);
-        } catch (const std::bad_alloc &) {
-        }
+        const std::size_t approx_bytes = estimate_dir_bytes(rel_path, *payload);
+        return dirs_.put(rel_path, std::move(payload), approx_bytes, expected_epoch);
     }
 
     // ---- 文件内容缓存（workspace_read_file，缓存完整 ReadFileResponse） ----
@@ -157,11 +148,8 @@ class WorkspaceCache {
 
   private:
     [[nodiscard]] static std::size_t
-    estimate_dir_bytes(std::string_view rel_path, const std::vector<DirEntry> &entries) noexcept {
-        std::size_t total = 64 + rel_path.size() + entries.size() * sizeof(DirEntry);
-        for (const auto &entry : entries)
-            total += entry.name.size();
-        return total;
+    estimate_dir_bytes(std::string_view rel_path, const std::string &payload) noexcept {
+        return 64 + rel_path.size() + sizeof(std::string) + payload.size();
     }
 
     [[nodiscard]] static std::size_t
@@ -170,7 +158,7 @@ class WorkspaceCache {
     }
 
     const std::size_t max_per_file_bytes_;
-    detail::ShardedLruCache<std::vector<DirEntry>> dirs_;
+    detail::ShardedLruCache<std::string> dirs_;
     detail::ShardedLruCache<ReadFileResponse> files_;
 };
 

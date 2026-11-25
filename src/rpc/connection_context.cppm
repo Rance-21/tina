@@ -76,19 +76,27 @@ export struct alignas(64) IoSlotContext {
     IoSlotContext &operator=(const IoSlotContext &) = delete;
 
     // 从本线程空闲栈借节点。只有所有节点都在途时才分配，借出后由 Worker 独占，
-    // 直至回包任务投回本线程。slot 在构造时绑定，跨多次请求都指向同一线程。
-    RpcTaskContext *acquire_task(const Connection &conn, Frame &&request) {
-        RpcTaskContext *ctx;
+    // 直至回包任务投回本线程。仅当 Worker 需要解析请求负载时才拷贝进池化缓冲。
+    RpcTaskContext *acquire_task(const Connection &conn, const FrameView &request,
+                                 bool copy_payload) {
+        std::unique_ptr<RpcTaskContext> guard;
         if (task_pool_.empty()) {
-            ctx = new RpcTaskContext{*this};
+            guard = std::make_unique<RpcTaskContext>(*this);
         } else {
-            ctx = task_pool_.back().release();
+            guard = std::move(task_pool_.back());
             task_pool_.pop_back();
         }
-        ctx->conn_fd = conn.fd();
-        ctx->conn_id = conn.id();
-        ctx->frame = std::move(request);
-        return ctx;
+        guard->conn_fd = conn.fd();
+        guard->conn_id = conn.id();
+        guard->frame.kind = Kind::request;
+        guard->frame.request_id = request.request_id;
+        guard->frame.method = request.method;
+        guard->frame.status = Status::ok;
+        if (copy_payload)
+            guard->frame.payload.assign(request.payload);
+        else
+            guard->frame.payload.clear();
+        return guard.release();
     }
 
     void recycle_task(RpcTaskContext *ctx) noexcept {

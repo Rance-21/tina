@@ -68,8 +68,8 @@ void handle_git_status(Frame &frame) {
     }
 
     int err = 0;
-    auto repo_dir = service::git::resolve_git_repo_path(*rel_path, err);
-    if (!repo_dir) {
+    auto repo_dir = service::git::open_git_repo_dir(*rel_path, err);
+    if (!repo_dir.valid()) {
         service::file::set_errno_error(frame, err, "invalid git repository path");
         return;
     }
@@ -86,7 +86,7 @@ void handle_git_status(Frame &frame) {
         nullptr,
     };
 
-    auto res = service::git::run_git_command(repo_dir->c_str(), argv.data());
+    auto res = service::git::run_git_command(repo_dir.get(), argv.data());
     if (res.timed_out || res.output_overflow || res.exit_code != 0) {
         set_git_exec_error(frame, res, "git status failed");
         return;
@@ -116,8 +116,8 @@ void handle_git_diff(Frame &frame) {
     }
 
     int err = 0;
-    auto repo_dir = service::git::resolve_git_repo_path(req->path, err);
-    if (!repo_dir) {
+    auto repo_dir = service::git::open_git_repo_dir(req->path, err);
+    if (!repo_dir.valid()) {
         service::file::set_errno_error(frame, err, "invalid git repository path");
         return;
     }
@@ -127,14 +127,14 @@ void handle_git_diff(Frame &frame) {
         static constexpr std::array<const char *, 7> head_argv{
             "git", "--no-pager", "-c", "core.quotepath=false", "diff", "HEAD", nullptr,
         };
-        res = service::git::run_git_command(repo_dir->c_str(), head_argv.data());
+        res = service::git::run_git_command(repo_dir.get(), head_argv.data());
 
         if (res.exit_code != 0 && !res.timed_out && !res.output_overflow &&
             res.stderr_view().find("HEAD") != std::string_view::npos) {
             static constexpr std::array<const char *, 6> wt_argv{
                 "git", "--no-pager", "-c", "core.quotepath=false", "diff", nullptr,
             };
-            res = service::git::run_git_command(repo_dir->c_str(), wt_argv.data());
+            res = service::git::run_git_command(repo_dir.get(), wt_argv.data());
         }
     } else {
         // 原地复用 frame.payload 缓冲区为 base_branch 补齐结尾 '\0'（借用前面已读完的 2B base_len 末字节），
@@ -157,7 +157,7 @@ void handle_git_diff(Frame &frame) {
             target_cstr,
             nullptr,
         };
-        res = service::git::run_git_command(repo_dir->c_str(), branch_argv.data());
+        res = service::git::run_git_command(repo_dir.get(), branch_argv.data());
     }
 
     if (res.timed_out || res.output_overflow || res.exit_code != 0) {
@@ -181,8 +181,8 @@ void handle_git_log(Frame &frame) {
     }
 
     int err = 0;
-    auto repo_dir = service::git::resolve_git_repo_path(*rel_path, err);
-    if (!repo_dir) {
+    auto repo_dir = service::git::open_git_repo_dir(*rel_path, err);
+    if (!repo_dir.valid()) {
         service::file::set_errno_error(frame, err, "invalid git repository path");
         return;
     }
@@ -202,7 +202,7 @@ void handle_git_log(Frame &frame) {
         nullptr,
     };
 
-    auto res = service::git::run_git_command(repo_dir->c_str(), argv.data());
+    auto res = service::git::run_git_command(repo_dir.get(), argv.data());
     if (res.timed_out || res.output_overflow) {
         set_git_exec_error(frame, res, "git log failed");
         return;

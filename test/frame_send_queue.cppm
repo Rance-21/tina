@@ -164,6 +164,7 @@ void check_batch_writes() {
                             decoded->method == frame.method && decoded->status == frame.status &&
                             decoded->payload == frame.payload,
                         "fragmented frame differs from the enqueued frame");
+                input.retrieve(decoded->wire_bytes());
             }
         }
         require(index == expected.size() && input.empty(), "frame stream was not fully consumed");
@@ -202,8 +203,12 @@ void check_external_payload_lifetime() {
     net::Buffer input;
     input.append(socket.bytes.data(), socket.bytes.size());
     auto decoded = decode_frame(input);
-    require(decoded && decoded->payload == "prefix" + std::string(1024, 'z') && input.empty(),
-            "external frame changed on the wire");
+    require(decoded &&
+                decoded->payload.data() == input.readable_data() + frame_header_size &&
+                decoded->payload == "prefix" + std::string(1024, 'z'),
+            "external frame changed on the wire or copied payload");
+    input.retrieve(decoded->wire_bytes());
+    require(input.empty(), "decoded frame was not retrieved");
 }
 
 void check_broadcast_lifetime() {
@@ -244,6 +249,41 @@ void check_broadcast_lifetime() {
     require(lifetime.expired(), "disconnected subscriber retained the event");
 }
 
+void check_ring_wrap_and_compaction() {
+    // 1. 先在单次 writev 批次（<=32 帧）内发送前 19 帧并将第 20 帧停在半包偏移处（head_ = 19, front_offset_ > 0），
+    //    再连续入队 100 帧触发跨越槽位 63->0 回绕及回绕态下的 64->128 扩容。
+    net::FrameSendQueue queue;
+    std::size_t first_20_bytes = 0;
+    for (std::uint64_t id = 1; id <= 20; ++id) {
+        auto f = request(id, "p" + std::to_string(id));
+        first_20_bytes += frame_header_size + f.payload.size();
+        require(queue.enqueue(f), "initial wrap enqueue failed");
+    }
+    RecordingSocket socket{.limit = first_20_bytes - 2};
+    queue.write(socket);
+    require(queue.readable_bytes() == 2, "partial 20th frame offset mismatch");
+
+    for (std::uint64_t id = 21; id <= 120; ++id)
+        require(queue.enqueue(request(id, "p" + std::to_string(id))), "wrapped grow enqueue failed");
+    socket.limit = std::numeric_limits<std::size_t>::max();
+    queue.write(socket);
+    require(queue.empty(), "wrapped grow drain failed");
+
+    // 2. 将全部 120 帧字节流灌入 Buffer，越过 4096B 紧缩阈值，验证先消费视图、再 retrieve 的零拷贝正确性。
+    net::Buffer input(1024);
+    input.append(socket.bytes.data(), socket.bytes.size());
+    for (std::uint64_t id = 1; id <= 120; ++id) {
+        auto view = decode_frame(input);
+        require(view.has_value(), "missing wrapped frame");
+        require(view->payload.data() == input.readable_data() + frame_header_size,
+                "decode_frame did not reference Buffer storage directly");
+        require(view->request_id == id && view->payload == "p" + std::to_string(id),
+                "wrapped frame order or payload corrupted across ring grow / buffer compaction");
+        input.retrieve(view->wire_bytes());
+    }
+    require(input.empty(), "wrapped frame stream left unread bytes");
+}
+
 void check_buffer_reuse() {
     net::Buffer buffer(8192);
     std::string data(8192, 'a');
@@ -254,7 +294,7 @@ void check_buffer_reuse() {
     require(buffer.writable_bytes() == 0, "buffer compacted before the threshold");
     buffer.retrieve(1);
     require(buffer.writable_bytes() == 4096, "buffer did not compact at the threshold");
-    require(std::string_view(buffer.data(), buffer.readable_bytes()) ==
+    require(std::string_view(buffer.readable_data(), buffer.readable_bytes()) ==
                 std::string_view(data).substr(4096),
             "compaction changed unread bytes");
 
@@ -268,14 +308,14 @@ void check_buffer_reuse() {
     });
     require(buffer.readable_bytes() == remaining, "rejected operation changed readable bytes");
     buffer.retrieve(remaining);
-    require(buffer.empty() && buffer.data() == nullptr, "drained buffer was not reset");
+    require(buffer.empty() && buffer.readable_data() == nullptr, "drained buffer was not reset");
     const auto capacity = buffer.writable_bytes();
     std::memcpy(buffer.begin_write(3), "abc", 3);
     buffer.clear();
     require(buffer.empty() && buffer.writable_bytes() == capacity, "clear discarded storage");
     std::memcpy(buffer.writable_data(), "xyz", 3);
     buffer.commit_write(3);
-    require(std::string_view(buffer.data(), buffer.readable_bytes()) == "xyz",
+    require(std::string_view(buffer.readable_data(), buffer.readable_bytes()) == "xyz",
             "direct write after clear changed data");
 }
 
@@ -287,6 +327,7 @@ int main() {
         check_batch_writes();
         check_external_payload_lifetime();
         check_broadcast_lifetime();
+        check_ring_wrap_and_compaction();
         check_buffer_reuse();
         std::cout << "frame send queue test passed\n";
         return 0;

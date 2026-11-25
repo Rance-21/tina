@@ -2,7 +2,9 @@ module;
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <stdlib.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 export module ide.server:directory;
 
@@ -16,15 +18,18 @@ export namespace server {
 // 当 inotify 监听到目录变化时，由 Worker 线程重新扫描目录并构造 Kind::event 帧，同时刷新缓存。
 // 事件负载格式与 workspace_list_dir 响应完全一致：[u16 dirPathLen][dirPath bytes][entries...]。
 std::optional<Frame> build_workspace_list_dir_event(std::string_view rel_path) {
-    auto target_path = service::file::resolve_workspace_path(rel_path);
-    if (!target_path)
+    const int root_fd = service::file::workspace_root_fd();
+    service::file::RelPath rel(rel_path);
+    if (root_fd < 0 || !rel)
         return std::nullopt;
 
     auto &cache = service::global_workspace_cache();
-    const auto epoch = cache.dir_epoch(rel_path);
+    const auto epoch = cache.dir_epoch(rel.view());
 
-    std::vector<DirEntry> entries;
-    if (service::file::read_directory_entries(*target_path, entries) != 0)
+    auto encoded = std::make_shared<std::string>();
+    if (service::file::read_directory_payload(root_fd, rel, *encoded) != 0)
+        return std::nullopt;
+    if (encoded->size() > max_frame_length - min_frame_length)
         return std::nullopt;
 
     Frame frame{
@@ -35,10 +40,10 @@ std::optional<Frame> build_workspace_list_dir_event(std::string_view rel_path) {
         .status = Status::ok,
         .payload = {},
     };
-    encode_workspace_list_dir_into(rel_path, entries, frame.payload);
-    cache.put_dir(rel_path, std::move(entries), epoch);
-    if (frame.payload.size() > max_frame_length - min_frame_length)
-        return std::nullopt;
+    if (auto pin = cache.put_dir(rel.view(), encoded, epoch))
+        encode_workspace_list_dir(frame, std::move(pin));
+    else
+        encode_workspace_list_dir(frame, std::move(encoded));
     return frame;
 }
 
@@ -55,18 +60,31 @@ void handle_workspace_list_projects(Frame &frame) {
         return;
     }
 
-    auto root = service::file::projects_root_dir();
-    if (!root) {
-        frame.status = Status::internal;
-        frame.payload = "HOME environment variable is not set";
+    const int root_fd = service::file::workspace_root_fd();
+    if (root_fd < 0) {
+        const char *home = ::getenv("HOME");
+        if (home == nullptr || home[0] == '\0') {
+            frame.status = Status::internal;
+            frame.payload = "HOME environment variable is not set";
+        } else {
+            service::file::set_errno_error(frame, ENOENT, "failed to open ~/projects");
+        }
         return;
     }
 
-    service::file::ScopedDir dir(::opendir(root->c_str()));
-    if (!dir) {
+    const int raw_fd = ::openat(root_fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (raw_fd < 0) {
         service::file::set_errno_error(frame, errno, "failed to open ~/projects");
         return;
     }
+    DIR *raw_dir = ::fdopendir(raw_fd);
+    if (!raw_dir) {
+        const int err = errno;
+        ::close(raw_fd);
+        service::file::set_errno_error(frame, err, "failed to open ~/projects");
+        return;
+    }
+    service::file::ScopedDir dir(raw_dir);
 
     const int dfd = ::dirfd(dir.get());
     std::vector<std::string> projects;
@@ -107,9 +125,8 @@ void handle_workspace_list_projects(Frame &frame) {
 
 // 处理 0x0202 (workspace_list_dir)：
 // 枚举 ~/projects/<path> 下的一级文件与文件夹（深度为 1，不递归展开子目录）。
-// 优先命中内存缓存（std::vector<DirEntry>），命中时完全不进入 Linux 文件系统；
-// 未命中时扫描目录并将结果按失效版本号写入缓存。
-// 若调用方传入 watched_dir，成功时将请求里的相对路径保存在其中，供 I/O 线程注册 inotify。
+// 优先命中编码后负载缓存，命中时直接挂载外置切片零拷贝返回；
+// 未命中时基于 openat 扫描编码并将不可变 Payload 按失效版本号写入缓存。
 void handle_workspace_list_dir(Frame &frame, std::string *watched_dir = nullptr) {
     auto path = decode_workspace_list_dir_view(frame.payload);
     if (!path) {
@@ -118,38 +135,56 @@ void handle_workspace_list_dir(Frame &frame, std::string *watched_dir = nullptr)
         return;
     }
 
-    const std::string_view rel_path = *path;
-    // I/O 线程已处理热命中。Worker 只解析一次路径；排队期间若有其他线程回填，
-    // 这里再查一次缓存就能省掉目录扫描。
-    auto target_path = service::file::resolve_workspace_path(rel_path);
-    if (!target_path) {
+    service::file::RelPath rel(*path);
+    if (!rel) {
         frame.status = Status::invalid_argument;
         frame.payload = "invalid workspace directory path";
         return;
     }
 
-    auto &cache = service::global_workspace_cache();
-    std::uint64_t epoch;
-    auto entries = cache.get_dir(rel_path, &epoch);
-    std::vector<DirEntry> scanned;
-    if (!entries) {
-        const int rc = service::file::read_directory_entries(*target_path, scanned);
-        if (rc != 0) {
-            service::file::set_errno_error(frame, std::abs(rc),
-                rc > 0 ? "failed to open target directory" : "failed to read directory entries");
-            return;
+    const int root_fd = service::file::workspace_root_fd();
+    if (root_fd < 0) {
+        const char *home = ::getenv("HOME");
+        if (home == nullptr || home[0] == '\0') {
+            frame.status = Status::invalid_argument;
+            frame.payload = "invalid workspace directory path";
+        } else {
+            service::file::set_errno_error(frame, ENOENT, "failed to open target directory");
         }
+        return;
     }
 
-    // rel_path 借用请求的 payload；原地编码响应前，须先把路径保存到独立的字符串。
-    // 有订阅者时直接使用回包节点的字符串，没有时只需保存到本次编码结束。
-    std::string local_path;
-    auto &response_path = watched_dir ? *watched_dir : local_path;
-    response_path.assign(rel_path);
+    auto &cache = service::global_workspace_cache();
+    std::uint64_t epoch;
+    if (auto cached = cache.get_dir(rel.view(), &epoch)) {
+        if (watched_dir)
+            watched_dir->assign(rel.view());
+        frame.status = Status::ok;
+        encode_workspace_list_dir(frame, std::move(cached));
+        return;
+    }
+
+    auto encoded = std::make_shared<std::string>();
+    const int rc = service::file::read_directory_payload(root_fd, rel, *encoded);
+    if (rc != 0) {
+        service::file::set_errno_error(
+            frame, std::abs(rc),
+            rc > 0 ? "failed to open target directory" : "failed to read directory entries");
+        return;
+    }
+    if (encoded->size() > max_frame_length - min_frame_length) {
+        frame.status = Status::resource_exhausted;
+        frame.payload = "directory listing exceeds maximum frame length";
+        return;
+    }
+
+    if (watched_dir)
+        watched_dir->assign(rel.view());
     frame.status = Status::ok;
-    encode_workspace_list_dir_into(response_path, entries ? *entries : scanned, frame.payload);
-    if (!entries)
-        cache.put_dir(response_path, std::move(scanned), epoch);
+    if (auto pin = cache.put_dir(rel.view(), encoded, epoch))
+        encode_workspace_list_dir(frame, std::move(pin));
+    else
+        encode_workspace_list_dir(frame, std::move(encoded));
 }
 
 // 处理 0x0205 (workspace_close_dir)：
@@ -165,8 +200,9 @@ void handle_workspace_close_dir(Frame &frame, std::string &unwatched_dir) {
         return;
     }
 
-    auto target_path = service::file::resolve_workspace_path(*req_path);
-    if (!target_path) {
+    if (!service::file::is_valid_workspace_rel_path(*req_path) ||
+        (service::file::workspace_root_fd() < 0 &&
+         (::getenv("HOME") == nullptr || ::getenv("HOME")[0] == '\0'))) {
         frame.status = Status::invalid_argument;
         frame.payload = "invalid workspace directory path";
         return;

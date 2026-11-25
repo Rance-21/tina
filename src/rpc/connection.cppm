@@ -72,8 +72,10 @@ class Connection {
             input_.commit_write(*n);
 
             while (auto request = decode_frame(input_)) {
+                const std::size_t frame_bytes = request->wire_bytes();
                 if (request->kind != Kind::request || !on_request(*request))
                     return false;
+                input_.retrieve(frame_bytes);
             }
         }
 
@@ -113,13 +115,11 @@ class Connection {
 
     net::Socket socket_;
     const std::uint64_t id_;
-    net::Buffer input_;
-    net::FrameSendQueue output_;
-
     // 已提交、但尚未收到业务执行结果的 RPC 数量。
     std::size_t pending_{0};
-
     bool accepting_requests_{true};
+    net::Buffer input_;
+    net::FrameSendQueue output_;
 };
 
 // 每个 I/O 线程独占一张连接表。表节点直接拥有 socket，rehash 也不会移动节点里的 Connection。

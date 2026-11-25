@@ -16,21 +16,31 @@ struct WorkspaceSnapshot {
     service::WorkspaceCache::DirHandle directory;
 };
 
-// 每帧只决定一次去向。返回 inline_task 时响应正文已写进 frame；否则保留请求负载，
+// 每帧只决定一次去向。返回 inline_task 时响应已写入 response；否则按需产出快照，
 // Normal Worker 消费快照或处理轻任务，Blocking Worker 可以执行磁盘访问或等待子进程。
-runtime::TaskClass inline_or_blocking(Frame &frame, std::size_t inline_threshold,
-                                      WorkspaceSnapshot &snapshot, std::string &dir_path) {
+runtime::TaskClass inline_or_blocking(const FrameView &request, Frame &response,
+                                      std::size_t inline_threshold, WorkspaceSnapshot &snapshot,
+                                      std::string_view &dir_path) {
     using enum runtime::TaskClass;
 
-    switch (frame.method) {
+    auto init_inline_response = [&]() noexcept {
+        response.kind = Kind::response;
+        response.request_id = request.request_id;
+        response.method = request.method;
+        response.status = Status::ok;
+    };
+
+    switch (request.method) {
     case Method::system_ping:
-        handle_ping(frame);
+        init_inline_response();
+        response.clear_external_payload();
+        handle_ping(request.payload, response);
         return inline_task;
 
     case Method::workspace_read_file: {
-        auto req = server::decode_workspace_read_file_view(frame.payload);
+        auto req = server::decode_workspace_read_file_view(request.payload);
         if (!req || !service::file::is_valid_workspace_rel_path(req->path) ||
-            !service::file::has_projects_root_env())
+            service::file::workspace_root_fd() < 0)
             return normal;
         auto file = service::global_workspace_cache().get_file(req->path);
 
@@ -40,7 +50,8 @@ runtime::TaskClass inline_or_blocking(Frame &frame, std::size_t inline_threshold
         const auto slice = server::slice_file_content(*file, req->offset, req->max_bytes);
         // 阈值为零时，连 EOF 的空切片也交给 Worker。正阈值按正文大小判断，不含元数据头。
         if (inline_threshold && slice.size() <= inline_threshold) {
-            server::encode_workspace_read_file(frame, std::move(file), slice);
+            init_inline_response();
+            server::encode_workspace_read_file(response, std::move(file), slice);
             return inline_task;
         }
 
@@ -50,21 +61,23 @@ runtime::TaskClass inline_or_blocking(Frame &frame, std::size_t inline_threshold
     }
 
     case Method::workspace_list_dir: {
-        auto path = server::decode_workspace_list_dir_view(frame.payload);
+        auto path = server::decode_workspace_list_dir_view(request.payload);
         if (!path || !service::file::is_valid_workspace_rel_path(*path) ||
-            !service::file::has_projects_root_env())
+            service::file::workspace_root_fd() < 0)
             return normal;
 
-        auto entries = service::global_workspace_cache().get_dir(*path);
-        if (!entries)
+        auto cached = service::global_workspace_cache().get_dir(*path);
+        if (!cached)
             return blocking;
 
-        // 路径视图指向即将被编码器改写的 payload。先保存一次，回包后仍可用来订阅。
-        dir_path.assign(*path);
-        if (server::try_encode_list_dir(dir_path, *entries, frame.payload, inline_threshold))
+        dir_path = *path;
+        if (inline_threshold && cached->size() <= inline_threshold) {
+            init_inline_response();
+            server::encode_workspace_list_dir(response, std::move(cached));
             return inline_task;
+        }
 
-        snapshot.directory = std::move(entries);
+        snapshot.directory = std::move(cached);
         return normal;
     }
 

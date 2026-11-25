@@ -1,5 +1,6 @@
 module;
 #include <errno.h>
+#include <fcntl.h>
 #include <sys/inotify.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -121,8 +122,8 @@ class FileWatcher : public std::enable_shared_from_this<FileWatcher> {
     // 版本和被监听的路径对应起来，覆盖 open、rename、add_watch 之间的窗口。
     // watch 之后的变更由 inotify 推进 epoch；若容量或 epoch 不允许入缓存，
     // 本次 RPC 仍可发送自己已持有的结果，同时释放没有缓存依赖的 watch。
-    WorkspaceCache::FileHandle cache_file_if_current(std::string_view path,
-                                                     const std::string &full_path, int fd,
+    WorkspaceCache::FileHandle cache_file_if_current(std::string_view path, int root_fd,
+                                                     const char *rel_cstr, int fd,
                                                      std::shared_ptr<const ReadFileResponse> value,
                                                      std::uint64_t epoch) {
         // 通过已打开的 fd 监听实际读写的 inode。即使路径在两次系统调用间
@@ -130,7 +131,8 @@ class FileWatcher : public std::enable_shared_from_this<FileWatcher> {
         char inode_path[32] = "/proc/self/fd/";
         std::to_chars(inode_path + sizeof("/proc/self/fd/") - 1, std::end(inode_path) - 1, fd);
         struct stat current{};
-        if (cache_ && watch_inode(path, inode_path) && ::stat(full_path.c_str(), &current) == 0 &&
+        if (cache_ && watch_inode(path, inode_path) &&
+            ::fstatat(root_fd, rel_cstr, &current, 0) == 0 &&
             file::file_revision(current) == value->revision) {
             if (auto pin = cache_->put_file(path, std::move(value), epoch))
                 return pin;
