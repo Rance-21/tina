@@ -21,6 +21,7 @@ struct WorkspaceSnapshot {
 runtime::TaskClass inline_or_blocking(Frame &frame, std::size_t inline_threshold,
                                       WorkspaceSnapshot &snapshot, std::string &dir_path) {
     using enum runtime::TaskClass;
+
     switch (frame.method) {
     case Method::system_ping:
         handle_ping(frame);
@@ -32,14 +33,17 @@ runtime::TaskClass inline_or_blocking(Frame &frame, std::size_t inline_threshold
             !service::file::has_projects_root_env())
             return normal;
         auto file = service::global_workspace_cache().get_file(req->path);
+
         if (!file)
             return blocking;
+
         const auto slice = server::slice_file_content(*file, req->offset, req->max_bytes);
         // 阈值为零时，连 EOF 的空切片也交给 Worker。正阈值按正文大小判断，不含元数据头。
         if (inline_threshold && slice.size() <= inline_threshold) {
             server::encode_workspace_read_file(frame, std::move(file), slice);
             return inline_task;
         }
+
         snapshot.file = std::move(file);
         snapshot.slice = slice;
         return normal;
@@ -50,13 +54,16 @@ runtime::TaskClass inline_or_blocking(Frame &frame, std::size_t inline_threshold
         if (!path || !service::file::is_valid_workspace_rel_path(*path) ||
             !service::file::has_projects_root_env())
             return normal;
+
         auto entries = service::global_workspace_cache().get_dir(*path);
         if (!entries)
             return blocking;
+
         // 路径视图指向即将被编码器改写的 payload。先保存一次，回包后仍可用来订阅。
         dir_path.assign(*path);
         if (server::try_encode_list_dir(dir_path, *entries, frame.payload, inline_threshold))
             return inline_task;
+
         snapshot.directory = std::move(entries);
         return normal;
     }

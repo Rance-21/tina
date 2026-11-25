@@ -87,28 +87,29 @@ void TerminalManager::start_shell(Frame &frame, int conn_fd) {
     std::weak_ptr<Session> weak_session = session;
     std::weak_ptr<TerminalManager> weak = shared_from_this();
 
-    if (!loop_.post_task([&loop = loop_, weak, weak_session, registered]() {
-            auto s = weak_session.lock();
-            if (!s || s->closed.load() || s->master_fd < 0) {
-                registered->set_value(false);
-                return;
-            }
-            try {
-                // epoll 回调仅持有 weak_session，不强引用 Session
-                loop.add_event(s->master_fd, net::EpollInterest::read,
-                               [weak, weak_session](net::EpollEvent ev) {
-                                   auto sess = weak_session.lock();
-                                   if (!sess)
-                                       return;
-                                   if (auto mgr = weak.lock())
-                                       mgr->on_pty_event(sess, ev);
-                               });
-                registered->set_value(true);
-            } catch (...) {
-                registered->set_value(false);
-            }
-        }) ||
-        !future.get()) {
+    loop_.post_task([&loop = loop_, weak, weak_session, registered]() {
+        auto s = weak_session.lock();
+        if (!s || s->closed || s->master_fd < 0) {
+            registered->set_value(false);
+            return;
+        }
+        try {
+            // epoll 回调仅持有 weak_session，不强引用 Session
+            loop.add_event(s->master_fd, net::EpollInterest::read,
+                           [weak, weak_session](net::EpollEvent ev) {
+                               auto sess = weak_session.lock();
+                               if (!sess)
+                                   return;
+                               if (auto mgr = weak.lock())
+                                   mgr->on_pty_event(sess, ev);
+                           });
+            registered->set_value(true);
+        } catch (...) {
+            registered->set_value(false);
+        }
+    });
+
+    if (!future.get()) {
         {
             std::lock_guard lock(mutex_);
             sessions_.erase(terminal_id);
@@ -141,19 +142,18 @@ void TerminalManager::close_shell(Frame &frame, int conn_fd, std::uint32_t termi
         return;
     }
 
-    session->closed.store(true);
     auto unhooked = std::make_shared<std::promise<void>>();
     auto future = unhooked->get_future();
 
-    if (loop_.post_task([&loop = loop_, fd = session->master_fd, unhooked]() {
-            try {
-                loop.del_event(fd);
-            } catch (...) {
-            }
-            unhooked->set_value();
-        })) {
-        future.wait();
-    }
+    loop_.post_task([&loop = loop_, session, unhooked]() {
+        session->closed = true;
+        try {
+            loop.del_event(session->master_fd);
+        } catch (...) {
+        }
+        unhooked->set_value();
+    });
+    future.wait();
 
     cleanup_session(*session, false);
     frame.status = Status::ok;
@@ -162,11 +162,13 @@ void TerminalManager::close_shell(Frame &frame, int conn_fd, std::uint32_t termi
 
 // 释放 master_fd 并终止、回收 Shell 子进程。
 void TerminalManager::cleanup_session(Session &session, bool on_io_thread) noexcept {
-    session.closed.store(true);
-    if (on_io_thread && session.master_fd >= 0) {
-        try {
-            loop_.del_event(session.master_fd);
-        } catch (...) {
+    if (on_io_thread) {
+        session.closed = true;
+        if (session.master_fd >= 0) {
+            try {
+                loop_.del_event(session.master_fd);
+            } catch (...) {
+            }
         }
     }
     service::terminal::terminate_pty_child(session.master_fd, session.child_pid);

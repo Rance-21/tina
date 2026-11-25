@@ -45,10 +45,10 @@ class EventLoopThreadPool {
         return *loops_.at(index);
     }
 
-    // 停止接受新投递。run() 返回前会处理完最后一批已入队任务，join 后才能销毁 loop。
+    // 通知已启动的循环退出并等待最后一批已入队任务跑完，join 后才能销毁 loop。
     void shutdown() noexcept {
-        for (auto &loop : loops_)
-            loop->stop();
+        for (std::size_t i = 0; i < threads_.size(); ++i)
+            loops_[i]->stop();
         runtime::affinity::join_threads(threads_);
     }
 

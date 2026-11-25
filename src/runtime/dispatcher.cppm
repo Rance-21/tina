@@ -194,9 +194,6 @@ class Dispatcher {
         const std::size_t max_attempts = worker_count_ * 2;
 
         for (std::size_t attempt = 0; attempt < max_attempts; ++attempt) {
-            if (stopping.load(std::memory_order_acquire))
-                return false;
-
             const auto cand = select_candidate(io, task_class, excluded_mask);
             if (!cand)
                 return false;

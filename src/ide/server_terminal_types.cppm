@@ -49,20 +49,20 @@ class TerminalManager : public std::enable_shared_from_this<TerminalManager> {
         int master_fd{-1};
         pid_t child_pid{-1};
 
-        // 仅在所属 I/O 线程读写的收发缓冲：
+        // 仅在所属 I/O 线程读写的状态与收发缓冲：
         net::Buffer write_buffer{1024}; // 待通过 EPOLLOUT 写入 master_fd 的命令数据
         std::string read_carry;         // 跨 read() 块匹配 PROMPT_COMMAND 结束标记的残留缓冲
+        bool running_command{false};
+        bool closed{false};
 
-        std::atomic<bool> running_command{false};
         std::atomic<bool> tab_completing{false};
-        std::atomic<bool> closed{false};
         std::mutex tab_mutex;
     };
 
     std::shared_ptr<Session> find_session(std::uint32_t terminal_id, int conn_fd) {
         std::lock_guard lock(mutex_);
         auto it = sessions_.find(terminal_id);
-        if (it == sessions_.end() || it->second->conn_fd != conn_fd || it->second->closed.load())
+        if (it == sessions_.end() || it->second->conn_fd != conn_fd)
             return nullptr;
         return it->second;
     }

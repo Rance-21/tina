@@ -158,10 +158,10 @@ int test_file_watcher_independent() {
     });
 
     auto started = std::make_shared<std::latch>(1);
-    CHECK(loop.post_task([&loop, watcher, started] {
+    loop.post_task([&loop, watcher, started] {
         watcher->start(loop);
         started->count_down();
-    }));
+    });
     started->wait();
 
     // 写入缓存并独立注册 FileWatcher（未经过 DirWatcher）。
@@ -200,11 +200,11 @@ int test_file_watcher_independent() {
     CHECK(watcher->watched_count() <= 33);
 
     auto stopped = std::make_shared<std::latch>(1);
-    CHECK(loop.post_task([&loop, watcher, stopped] {
+    loop.post_task([&loop, watcher, stopped] {
         watcher->stop();
         loop.stop();
         stopped->count_down();
-    }));
+    });
     stopped->wait();
     loop_thread.join();
 

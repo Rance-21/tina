@@ -37,7 +37,7 @@ class Buffer {
 
     // 只有 retrieve 会增大已消费前缀，它在那里按阈值紧缩。追加数据只会
     // 增大写游标，无法让前缀重新满足紧缩条件，尾部放不下时直接扩容即可。
-    void ensure_writable(std::size_t bytes) {
+    inline void ensure_writable(std::size_t bytes) {
         if (writable_bytes() >= bytes)
             return;
         if (bytes > storage_.max_size() - write_index_)

@@ -158,10 +158,9 @@ void DirWatcher::schedule_refresh(int wd) {
                           std::is_nothrow_move_constructible_v<decltype(complete_lambda)>,
                           "DirWatcher completion task must fit in std::move_only_function 24B SBO");
 
-            if (self->loop_.post_task(std::move(complete_lambda)))
-                return;
+            self->loop_.post_task(std::move(complete_lambda));
+            return;
         }
-        // 仅当 DirWatcher 已销毁或 EventLoop 已停止拒绝新任务时，在 Worker 线程兜底释放 ctx。
         delete ctx;
     };
     static_assert(sizeof(worker_lambda) <= 24 && alignof(decltype(worker_lambda)) <= 8 &&

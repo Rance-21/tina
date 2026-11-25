@@ -121,9 +121,7 @@ void execute_worker_request(RpcTaskContext *ctx) noexcept {
                       std::is_nothrow_move_constructible_v<decltype(complete_lambda)>,
                   "EventLoop completion task must fit in std::move_only_function 24B SBO");
 
-    if (!slot.loop.post_task(std::move(complete_lambda))) {
-        delete ctx;
-    }
+    slot.loop.post_task(std::move(complete_lambda));
 }
 
 // 一个可读事件内的所有 Worker 提交共用一次唤醒屏障。先分流，再分别处理两种结果：
@@ -196,8 +194,8 @@ void handle_connection_event(Connection &conn, IoSlotContext &slot,
 } // namespace
 
 // Acceptor 只转移 socket 所有权。建连接表节点和注册 epoll 必须在选中的 I/O 线程连续完成。
-export bool post_accepted_socket(net::Socket socket, IoSlotContext &slot) {
-    return slot.loop.post_task([socket = std::move(socket), &slot]() mutable {
+export void post_accepted_socket(net::Socket socket, IoSlotContext &slot) {
+    slot.loop.post_task([socket = std::move(socket), &slot]() mutable {
         slot.connections.register_conn(std::move(socket),
                                        [&slot](Connection &conn, net::EpollEvent event) {
                                            handle_connection_event(conn, slot, event);

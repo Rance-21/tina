@@ -61,14 +61,13 @@ void TerminalManager::handle_terminal_input(Frame &frame, int conn_fd) {
 
     // 直接复用当前 RPC 请求帧的 payload 缓冲区：在末尾追加 '\r' 后整块 move 给 I/O 线程，零额外拷贝。
     frame.payload.push_back('\r');
-    session->running_command.store(true);
     std::weak_ptr<Session> weak_session = session;
 
-    // 仅捕获 weak_session 与 loop_ 引用，在 I/O 线程只锁当前 Session，不锁整个 TerminalManager。
-    bool posted = loop_.post_task([&loop = loop_, weak_session, raw = std::move(frame.payload)]() {
+    loop_.post_task([&loop = loop_, weak_session, raw = std::move(frame.payload)]() {
         auto s = weak_session.lock();
-        if (!s || s->closed.load() || s->master_fd < 0)
+        if (!s || s->closed || s->master_fd < 0)
             return;
+        s->running_command = true;
         // 跳过前 8 字节头部（[u32 len][u32 terminal_id]），直接将命令 + '\r' 写入发送缓冲
         s->write_buffer.append(raw.data() + 8, raw.size() - 8);
         try {
@@ -78,12 +77,6 @@ void TerminalManager::handle_terminal_input(Frame &frame, int conn_fd) {
         }
     });
 
-    if (!posted) {
-        session->running_command.store(false);
-        frame.status = Status::unavailable;
-        frame.payload = encode_terminal_input(terminal_id, "event loop stopped");
-        return;
-    }
     frame.status = Status::ok;
     frame.payload = encode_terminal_input(terminal_id, "OK");
 }
@@ -114,11 +107,11 @@ void TerminalManager::handle_terminal_on_tab(Frame &frame, int conn_fd) {
     }
 
     std::lock_guard tab_lock(session->tab_mutex);
-    session->tab_completing.store(true);
+    session->tab_completing.store(true, std::memory_order_relaxed);
     struct ResetGuard {
         std::atomic<bool> &flag;
         ~ResetGuard() {
-            flag.store(false);
+            flag.store(false, std::memory_order_relaxed);
         }
     } guard{session->tab_completing};
 

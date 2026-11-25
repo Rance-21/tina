@@ -113,8 +113,7 @@ void run_on_io_threads(std::deque<rpc::detail::IoSlotContext> &slots, auto actio
             });
             auto done = task.get_future();
 
-            if (!slot.loop.post_task(std::move(task)))
-                throw std::runtime_error("I/O EventLoop rejected lifecycle task");
+            slot.loop.post_task(std::move(task));
             completed.push_back(std::move(done));
         }
         for (auto &done : completed)
@@ -156,8 +155,7 @@ void accept_until_stop(net::Epoll &epoll, net::Socket &listener, StopSignals &si
             if (!client)
                 break;
 
-            if (!rpc::detail::post_accepted_socket(std::move(*client), slots[next_io]))
-                runtime::log::warn("I/O EventLoop rejected connection");
+            rpc::detail::post_accepted_socket(std::move(*client), slots[next_io]);
 
             next_io = (next_io + 1) % slots.size();
         }

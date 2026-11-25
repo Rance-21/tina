@@ -18,7 +18,7 @@ namespace server {
 // I/O 线程 Epoll 事件回调（处理 master_fd 的 EPOLLOUT 命令写入与 EPOLLIN 输出读取）
 // ========================================================================
 void TerminalManager::on_pty_event(const std::shared_ptr<Session> &session, net::EpollEvent event) {
-    if (session->closed.load() || session->master_fd < 0)
+    if (session->closed || session->master_fd < 0)
         return;
 
     // 1. 处理可写事件（EPOLLOUT）：将 write_buffer 中的命令写入 master_fd，写完立即撤销
@@ -45,14 +45,14 @@ void TerminalManager::on_pty_event(const std::shared_ptr<Session> &session, net:
     }
 
     // 2. 处理可读事件（EPOLLIN）：若 Worker 正在做 Tab 补全则暂不抢读 master_fd。
-    if (session->tab_completing.load())
+    if (session->tab_completing.load(std::memory_order_relaxed))
         return;
 
     bool child_exited = false;
     if (event.readable() || event.hangup() || event.error()) {
         std::array<char, 8192> buf{};
         for (int i = 0; i < 8; ++i) {
-            if (session->tab_completing.load())
+            if (session->tab_completing.load(std::memory_order_relaxed))
                 break;
 
             ssize_t n = ::read(session->master_fd, buf.data(), buf.size());
@@ -96,7 +96,7 @@ void TerminalManager::process_pty_output(Session &session, bool flush_all) {
                                    std::string_view(session.read_carry).substr(0, pos));
 
             session.read_carry.erase(0, pos + service::terminal::prompt_done_marker.size());
-            if (session.running_command.exchange(false))
+            if (std::exchange(session.running_command, false))
                 send_state_event(session.conn_fd, session.terminal_id);
             continue;
         }

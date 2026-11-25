@@ -117,7 +117,7 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
     // 取消某条连接对 rel_path 目录的监听（由 workspace_close_dir 触发）。
     // 若移除后该目录已无任何存活订阅者，则立即调用 inotify_rm_watch 释放内核槽位并淘汰缓存。
     void unwatch(std::string_view rel_path, int conn_fd) noexcept {
-        if (stopped_ || rel_path.empty() || inotify_fd_ < 0)
+        if (stopped_ || rel_path.empty())
             return;
 
         auto it = path_to_wd_.find(rel_path);

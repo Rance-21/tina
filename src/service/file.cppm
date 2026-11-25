@@ -259,7 +259,7 @@ int read_directory_entries(const std::string &target_path, std::vector<DirEntry>
 }
 
 // ============================================================================
-// 4. 路径锁（Striped Path Mutex）
+// 4. 路径锁
 // ============================================================================
 
 // 使用 64 个分片互斥锁按完整文件路径哈希加锁：
@@ -275,13 +275,16 @@ inline bool write_all(int fd, std::string_view data) noexcept {
     std::size_t written = 0;
     while (written < data.size()) {
         ssize_t n = ::write(fd, data.data() + written, data.size() - written);
+
         if (n < 0) {
             if (errno == EINTR)
                 continue;
             return false;
         }
+
         written += static_cast<std::size_t>(n);
     }
+
     return true;
 }
 

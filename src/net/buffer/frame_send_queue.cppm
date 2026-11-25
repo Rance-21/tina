@@ -45,11 +45,13 @@ class FrameSendQueue {
             // 只有队头可能发过一部分。skip 先跨过完整段，再截去首个未发段的前缀；
             // 此后它为零，可以直接把本帧和后续帧的剩余段交给 writev。
             std::size_t skip = front_offset_;
+
             auto append_segment = [&](std::string_view bytes) {
                 if (skip >= bytes.size()) {
                     skip -= bytes.size();
                     return true;
                 }
+
                 bytes.remove_prefix(skip);
                 skip = 0;
                 iov[iov_count++] = {const_cast<char *>(bytes.data()), bytes.size()};
@@ -116,8 +118,9 @@ class FrameSendQueue {
 
     template <typename F> bool append_frame(F &frame, std::size_t max_bytes) {
         const auto size = frame_header_size + frame.payload_size();
-        if (queued_bytes_ > max_bytes || size > max_bytes - queued_bytes_)
+        if (size > max_bytes - queued_bytes_)
             return false;
+
         frames_.emplace_back(frame);
         queued_bytes_ += size;
         return true;

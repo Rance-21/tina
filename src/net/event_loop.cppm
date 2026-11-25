@@ -25,6 +25,7 @@ class EventLoop {
 
         try {
             epoll_.add(wake_fd_, EpollInterest::read);
+            tasks_.reserve(64);
         } catch (...) {
             ::close(wake_fd_);
             throw;
@@ -74,30 +75,20 @@ class EventLoop {
         epoll_.remove(fd);
     }
 
-    // 跨线程投递任务到本 I/O 线程执行。
-    // 分支逻辑：若 Loop 正在停止则拒绝入队返回 false；否则入队并通过 wake_fd_ 唤醒 I/O 线程。
-    [[nodiscard]] bool post_task(Task task) {
+    // 跨线程投递任务到本 I/O 线程执行；队列从空变非空时通过 wake_fd_ 唤醒 I/O 线程。
+    void post_task(Task task) {
         if (!task)
-            return false;
+            return;
 
         bool empty;
-
         {
             std::lock_guard lock(mutex_);
-
             empty = tasks_.empty();
-
-            if (stopping_.load())
-                return false;
-
             tasks_.push_back(std::move(task));
         }
 
-        if (empty) {
+        if (empty)
             wakeup();
-        }
-
-        return true;
     }
 
     // I/O 线程主事件循环。
@@ -106,11 +97,9 @@ class EventLoop {
     //   2. 若就绪 fd 是普通 Socket/timerfd：查找对应回调并执行；若回调抛异常则注销该 fd
     //   防止反复触发。
     void run() {
-        if (started_.exchange(true))
-            throw std::logic_error("EventLoop already started");
-
         std::vector<Task> pending; // 两个队列交换容量，整批任务在锁外执行。
-        while (!stopping_.load()) {
+        pending.reserve(64);
+        while (!stopping_) {
             for (const auto event : epoll_.wait()) {
                 if (event.fd == wake_fd_) {
                     drain_wakeup();
@@ -150,14 +139,9 @@ class EventLoop {
         run_pending_tasks(pending);
     }
 
-    // 可以由其他线程调用。
-    void stop() noexcept {
-        {
-            std::lock_guard lock(mutex_);
-            stopping_.store(true);
-        }
-
-        wakeup();
+    // 通过任务队列把停机切回所属 I/O 线程执行，stopping_ 纯单线程读写，无锁无原子。
+    void stop() {
+        post_task([this] { stopping_ = true; });
     }
 
   private:
@@ -225,19 +209,17 @@ class EventLoop {
 
     Epoll epoll_;
     int wake_fd_{-1};
+    bool stopping_{false};
 
     // 只有 run() 所在线程操作回调表。rehash 保持节点地址稳定。
     std::unordered_map<int, Handler> event_handlers_;
     Handler *running_slot_{nullptr};
 
-    // 多生产者、单消费者任务队列。
-    std::mutex mutex_;
+    // 多生产者、单消费者任务队列（独占缓存行，避免 Worker 投递写锁失效 I/O 线程私有状态）。
+    alignas(64) std::mutex mutex_;
 
     // Worker 线程 post 到此
     std::vector<Task> tasks_;
-
-    std::atomic<bool> stopping_{false};
-    std::atomic<bool> started_{false};
 };
 
 } // namespace net

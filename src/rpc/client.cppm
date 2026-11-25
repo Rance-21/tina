@@ -25,7 +25,7 @@ RpcClient::RpcClient(std::string_view host, std::string_view port)
     std::promise<void> ready;
     auto future = ready.get_future();
 
-    bool posted = state_->loop.post_task([state = state_, ready = std::move(ready)]() mutable {
+    state_->loop.post_task([state = state_, ready = std::move(ready)]() mutable {
         try {
             State::start(state);
             ready.set_value();
@@ -36,16 +36,13 @@ RpcClient::RpcClient(std::string_view host, std::string_view port)
         }
     });
 
-    if (!posted)
-        throw std::runtime_error("RPC client I/O thread stopped");
-
     future.get();
 }
 
 RpcClient::~RpcClient() {
     // 不允许与 async_call 并发析构。
     try {
-        (void)state_->loop.post_task([state = state_] {
+        state_->loop.post_task([state = state_] {
             state->fail(std::make_exception_ptr(std::runtime_error("RPC client destroyed")));
         });
     } catch (...) {
@@ -55,7 +52,7 @@ RpcClient::~RpcClient() {
 }
 
 void RpcClient::set_event_handler(EventHandler handler) {
-    (void)state_->loop.post_task([state = state_, handler = std::move(handler)]() mutable {
+    state_->loop.post_task([state = state_, handler = std::move(handler)]() mutable {
         state->event_handler = std::move(handler);
     });
 }
@@ -64,7 +61,7 @@ void RpcClient::set_event_handler(EventHandler handler) {
 // 分支逻辑：
 //   1. timeout <= 0：不进队列直接令 Promise 以 TimeoutError 失败。
 //   2. 在调用方线程提前算好绝对截止时间 deadline，通过 post_task 投递给 I/O 线程执行 State::send()。
-//   3. 若 I/O 线程已停止导致投递失败，或执行中抛出异常，均捕获并注入到 Promise 中防止调用方 future.get() 永久挂起。
+//   3. 投递或执行中若抛出异常，均捕获并注入到 Promise 中防止调用方 future.get() 永久挂起。
 std::future<Frame> RpcClient::async_call(Method method, std::string payload,
                                             std::chrono::milliseconds timeout) {
     auto promise = std::make_shared<std::promise<Frame>>();
@@ -79,23 +76,20 @@ std::future<Frame> RpcClient::async_call(Method method, std::string payload,
     const auto deadline = Clock::now() + timeout;
 
     try {
-        if (!state_->loop.post_task([state = state_, method, payload = std::move(payload), deadline,
-                                    promise]() mutable {
-                try {
-                    state->send(method, std::move(payload), deadline, promise);
-                } catch (...) {
-                    auto error = std::current_exception();
-                    state->fail(error);
+        state_->loop.post_task([state = state_, method, payload = std::move(payload), deadline,
+                                promise]() mutable {
+            try {
+                state->send(method, std::move(payload), deadline, promise);
+            } catch (...) {
+                auto error = std::current_exception();
+                state->fail(error);
 
-                    try {
-                        promise->set_exception(error);
-                    } catch (...) {
-                    }
+                try {
+                    promise->set_exception(error);
+                } catch (...) {
                 }
-            })) {
-            promise->set_exception(
-                std::make_exception_ptr(std::runtime_error("RPC client I/O thread stopped")));
-        }
+            }
+        });
     } catch (...) {
         promise->set_exception(std::current_exception());
     }

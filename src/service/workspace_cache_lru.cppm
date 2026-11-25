@@ -55,10 +55,8 @@ template <typename Value, bool TrackParentDir> class ShardedLruCache {
               std::max<std::size_t>(1, (total_max_bytes + kShardCount - 1) / kShardCount)) {
     }
 
-    // 注册容量淘汰回调（在分片互斥锁释放后调用，避免锁嵌套引发死锁）。
+    // 启动期注册容量淘汰回调（并发读写开始前设置一次，分片互斥锁释放后只读调用）。
     void set_evict_callback(EvictCallback cb) {
-        std::lock_guard lock(evict_cb_mutex_);
-        has_evict_cb_.store(static_cast<bool>(cb), std::memory_order_relaxed);
         evict_cb_ = std::move(cb);
     }
 
@@ -133,16 +131,9 @@ template <typename Value, bool TrackParentDir> class ShardedLruCache {
         auto evicted_keys = evict_if_needed_locked(shard);
         lock.unlock();
 
-        if (!evicted_keys.empty()) {
-            EvictCallback cb;
-            {
-                std::lock_guard lock(evict_cb_mutex_);
-                cb = evict_cb_;
-            }
-            if (cb) {
-                for (const std::string &evicted : evicted_keys)
-                    cb(evicted);
-            }
+        if (evict_cb_) {
+            for (const std::string &evicted : evicted_keys)
+                evict_cb_(evicted);
         }
     }
 
@@ -240,7 +231,7 @@ template <typename Value, bool TrackParentDir> class ShardedLruCache {
 
     struct EmptyIndex {};
 
-    struct Shard {
+    struct alignas(64) Shard {
         mutable std::mutex mutex;
         std::uint64_t epoch{0};
         std::size_t total_bytes{0};
@@ -293,7 +284,7 @@ template <typename Value, bool TrackParentDir> class ShardedLruCache {
 
     [[nodiscard]] std::vector<std::string> evict_if_needed_locked(Shard &shard) {
         std::vector<std::string> evicted_keys;
-        const bool collect_evicted = has_evict_cb_.load(std::memory_order_relaxed);
+        const bool collect_evicted = static_cast<bool>(evict_cb_);
         while ((shard.entries.size() > max_entries_per_shard_ ||
                 shard.total_bytes > max_bytes_per_shard_) &&
                !shard.lru.empty()) {
@@ -313,8 +304,6 @@ template <typename Value, bool TrackParentDir> class ShardedLruCache {
     std::size_t max_entries_per_shard_;
     std::size_t max_bytes_per_shard_;
     std::array<Shard, kShardCount> shards_;
-    mutable std::mutex evict_cb_mutex_;
-    std::atomic<bool> has_evict_cb_{false};
     EvictCallback evict_cb_;
 };
 
