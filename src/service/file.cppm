@@ -139,16 +139,19 @@ inline bool has_projects_root_env() noexcept {
     return home != nullptr && home[0] != '\0';
 }
 
-// 获取 ~/projects 根目录路径。
-inline std::optional<std::string> projects_root_dir() {
+// 拼相对路径时一起预留后缀空间，避免每个缓存未命中请求都重新分配并复制根目录。
+inline std::optional<std::string> projects_root_dir(std::size_t suffix_bytes = 0) {
     const char *home = ::getenv("HOME");
     if (home == nullptr || home[0] == '\0')
         return std::nullopt;
 
-    std::string root(home);
-    if (root.back() == '/')
-        root.pop_back();
-    root.append("/projects");
+    std::string_view base(home);
+    if (base.ends_with('/'))
+        base.remove_suffix(1);
+    constexpr std::string_view projects = "/projects";
+    std::string root;
+    root.reserve(base.size() + projects.size() + suffix_bytes);
+    root.append(base).append(projects);
     return root;
 }
 
@@ -181,7 +184,7 @@ std::optional<std::string> resolve_workspace_path(std::string_view rel_path) {
     if (!is_valid_workspace_rel_path(rel_path))
         return std::nullopt;
 
-    auto root = projects_root_dir();
+    auto root = projects_root_dir(1 + rel_path.size());
     if (!root)
         return std::nullopt;
 

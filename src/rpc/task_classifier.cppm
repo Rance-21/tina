@@ -16,15 +16,13 @@ struct WorkspaceSnapshot {
     std::shared_ptr<const std::vector<DirEntry>> directory;
 };
 
-// 每帧只决定一次去向。返回 inline_task 时响应已写进 frame；否则保留请求负载，
+// 每帧只决定一次去向。返回 inline_task 时响应正文已写进 frame；否则保留请求负载，
 // Normal Worker 消费快照或处理轻任务，Blocking Worker 可以执行磁盘访问或等待子进程。
-runtime::TaskClass prepare_request_for_dispatch(Frame &frame, std::size_t inline_threshold,
-                                                WorkspaceSnapshot &snapshot, std::string &dir_path) {
+runtime::TaskClass inline_or_blocking(Frame &frame, std::size_t inline_threshold,
+                                      WorkspaceSnapshot &snapshot, std::string &dir_path) {
     using enum runtime::TaskClass;
     switch (frame.method) {
     case Method::system_ping:
-        frame.kind = Kind::response;
-        frame.status = Status::ok;
         handle_ping(frame);
         return inline_task;
 
@@ -39,8 +37,6 @@ runtime::TaskClass prepare_request_for_dispatch(Frame &frame, std::size_t inline
         const auto slice = server::slice_file_content(*file, req->offset, req->max_bytes);
         // 阈值为零时，连 EOF 的空切片也交给 Worker。正阈值按正文大小判断，不含元数据头。
         if (inline_threshold && slice.size() <= inline_threshold) {
-            frame.kind = Kind::response;
-            frame.status = Status::ok;
             server::encode_workspace_read_file(frame, std::move(file), slice);
             return inline_task;
         }
@@ -59,11 +55,8 @@ runtime::TaskClass prepare_request_for_dispatch(Frame &frame, std::size_t inline
             return blocking;
         // 路径视图指向即将被编码器改写的 payload。先保存一次，回包后仍可用来订阅。
         dir_path.assign(*path);
-        if (server::try_encode_list_dir(dir_path, *entries, frame.payload, inline_threshold)) {
-            frame.kind = Kind::response;
-            frame.status = Status::ok;
+        if (server::try_encode_list_dir(dir_path, *entries, frame.payload, inline_threshold))
             return inline_task;
-        }
         snapshot.directory = std::move(entries);
         return normal;
     }

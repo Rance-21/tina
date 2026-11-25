@@ -120,8 +120,10 @@ void handle_workspace_list_dir(Frame &frame, std::string *watched_dir = nullptr)
     }
 
     const std::string_view rel_path = *path;
-    if (!service::file::is_valid_workspace_rel_path(rel_path) ||
-        !service::file::has_projects_root_env()) {
+    // I/O 线程已处理热命中。Worker 只解析一次路径；排队期间若有其他线程回填，
+    // 这里再查一次缓存就能省掉目录扫描。
+    auto target_path = service::file::resolve_workspace_path(rel_path);
+    if (!target_path) {
         frame.status = Status::invalid_argument;
         frame.payload = "invalid workspace directory path";
         return;
@@ -130,13 +132,6 @@ void handle_workspace_list_dir(Frame &frame, std::string *watched_dir = nullptr)
     auto &cache = service::global_workspace_cache();
     auto entries = cache.get_dir(rel_path);
     if (!entries) {
-        auto target_path = service::file::resolve_workspace_path(rel_path);
-        if (!target_path) {
-            frame.status = Status::invalid_argument;
-            frame.payload = "invalid workspace directory path";
-            return;
-        }
-
         const auto epoch = cache.dir_epoch(rel_path);
         auto scanned = std::make_shared<std::vector<DirEntry>>();
         const int rc = service::file::read_directory_entries(*target_path, *scanned);

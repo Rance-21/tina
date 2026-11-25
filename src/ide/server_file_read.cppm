@@ -17,13 +17,11 @@ export namespace server {
 // 从已缓存的完整文件响应中按 [offset, max_bytes] 零拷贝切片出响应内容。
 inline std::string_view slice_file_content(const ReadFileResponse &cached, std::uint64_t offset,
                                            std::uint32_t max_bytes) noexcept {
-    if (offset >= cached.file_size || offset >= cached.content.size())
+    // 元数据和实际缓存字节数共同限制可读范围，offset 超过任一末尾即为 EOF。
+    const auto end = std::min<std::uint64_t>(cached.file_size, cached.content.size());
+    if (offset >= end)
         return {};
-
-    const auto available = std::min<std::uint64_t>(
-        cached.file_size - offset, cached.content.size() - static_cast<std::size_t>(offset));
-    const auto to_read = static_cast<std::size_t>(std::min<std::uint64_t>(available, max_bytes));
-    return std::string_view(cached.content).substr(static_cast<std::size_t>(offset), to_read);
+    return {cached.content.data() + offset, std::min<std::uint64_t>(end - offset, max_bytes)};
 }
 
 // 处理 0x0203 (workspace_read_file)：

@@ -27,7 +27,7 @@ export namespace service {
 // 单个 IO 线程对应单个 inotify-fd，因此无须加锁
 class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
   public:
-    DirWatcher(net::EventLoop &loop, rpc::LoopConnections &connections, runtime::WorkerPool &workers,
+    DirWatcher(net::EventLoop &loop, rpc::IoConnections &connections, runtime::WorkerPool &workers,
                std::size_t io_id, WorkspaceCache *cache = &global_workspace_cache(),
                FileWatcher *file_watcher = &global_file_watcher())
         : loop_(loop), connections_(connections), workers_(workers), io_id_(io_id), cache_(cache),
@@ -253,7 +253,7 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
     void complete_refresh(RefreshTaskContext *ctx);
 
     net::EventLoop &loop_;
-    rpc::LoopConnections &connections_;
+    rpc::IoConnections &connections_;
     runtime::WorkerPool &workers_;
     std::size_t io_id_{0};
     WorkspaceCache *cache_;

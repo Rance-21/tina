@@ -194,7 +194,7 @@ void DirWatcher::complete_refresh(RefreshTaskContext *ctx) {
         std::erase_if(entry.subscribers, [&](const auto &subscriber) {
             // 同一 I/O 线程内没有其他回调插入，刚校验过的节点在轮到它时一定存活。
             auto *conn = connections_.find(subscriber.first, subscriber.second);
-            return !connections_.send_event(*conn, *event_frame, broadcast);
+            return !connections_.send_async_frame(*conn, *event_frame, broadcast);
         });
     }
     if (entry.subscribers.empty()) {

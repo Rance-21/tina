@@ -103,18 +103,17 @@ std::string format_cpu_list(std::span<const unsigned> cpus) {
 
 // 启停屏障。向每条 I/O 线程各投一次，全部完成后主线程才进入下一阶段。
 // 若某次投递或执行失败，也要等已投递的操作结束，再让调用方栈上的引用离开作用域。
-void run_on_io_threads(const std::vector<std::unique_ptr<rpc::detail::IoSlotContext>> &slots,
-                       auto action) {
+void run_on_io_threads(std::deque<rpc::detail::IoSlotContext> &slots, auto action) {
     std::vector<std::future<void>> completed;
     completed.reserve(slots.size());
     try {
-        for (const auto &slot : slots) {
-            std::packaged_task<void()> task([&action, &io = *slot] {
-                action(io);
+        for (auto &slot : slots) {
+            std::packaged_task<void()> task([&action, &slot] {
+                action(slot);
             });
             auto done = task.get_future();
 
-            if (!slot->loop.post_task(std::move(task)))
+            if (!slot.loop.post_task(std::move(task)))
                 throw std::runtime_error("I/O EventLoop rejected lifecycle task");
             completed.push_back(std::move(done));
         }
@@ -127,6 +126,41 @@ void run_on_io_threads(const std::vector<std::unique_ptr<rpc::detail::IoSlotCont
                 done.wait();
         }
         throw;
+    }
+}
+
+// Acceptor 只监听 listener 和 signalfd。先记住 listener 事件，等本批全部
+// 看完再 accept，这样即使 listener 排在前面，同批的停机信号也始终优先。
+void accept_until_stop(net::Epoll &epoll, net::Socket &listener, StopSignals &signals,
+                       std::deque<rpc::detail::IoSlotContext> &slots) {
+    std::size_t next_io = 0;
+    for (;;) {
+        net::EpollEvent listener_event{};
+
+        for (const auto event : epoll.wait()) {
+            if (event.fd == signals.fd()) {
+                signals.consume();
+                return;
+            }
+            listener_event = event;
+        }
+
+        if (listener_event.error() || listener_event.hangup())
+            throw std::runtime_error("listener error");
+
+        if (!listener_event.readable())
+            continue;
+
+        for (int i = 0; i < 32; ++i) {
+            auto client = listener.try_accept();
+            if (!client)
+                break;
+
+            if (!rpc::detail::post_accepted_socket(std::move(*client), slots[next_io]))
+                runtime::log::warn("I/O EventLoop rejected connection");
+
+            next_io = (next_io + 1) % slots.size();
+        }
     }
 }
 
@@ -144,7 +178,7 @@ export namespace rpc {
 //     3. 依次启动 4 个绑核 EventLoop 线程（P-core 0,2,4,8）和 8 个绑核 Worker 线程（E-core
 //     16~23）；
 //     4. 为每个 I/O 线程挂好专属 DirWatcher / TerminalManager（及 slots[0] 上的全局
-//     FileWatcher），用 latch 等就绪；
+//     FileWatcher），等待各线程完成注册；
 //   运行阶段：
 //     Acceptor 在 accept_epoll.wait() 中监听新连接与退出信号，单次最多 accept 64 条连接并按普通
 //     Round Robin 轮流投递给 4 个 EventLoop；
@@ -186,16 +220,14 @@ void run_server(std::string_view port, runtime::ServerConfig config = {}) {
     if (config.enable_cpu_affinity)
         io_cpu_span = config.io_cpus;
 
-    // 析构顺序：先回收 Worker，再回收 I/O 线程，最后销毁各 I/O 线程的
-    // IoSlotContext（含连接登记表与任务池）。 使用 unique_ptr 固定每个 IoSlotContext 的 64B
-    // 对齐内存地址，防止 vector 扩容移动破坏内部自引用回调指针。
-    std::vector<std::unique_ptr<detail::IoSlotContext>> slots;
+    // 槽位的回调引用自身。deque 尾插保持引用有效，直接就地构造每个槽位。
+    // 异常退出时同样先 join Worker，再 join I/O 线程，最后销毁它们借用的槽位。
+    std::deque<detail::IoSlotContext> slots;
     net::EventLoopThreadPool io_pool(config.io_threads_cnt(), io_cpu_span);
     runtime::WorkerPool workers(config);
 
     for (std::size_t i = 0; i < config.io_threads_cnt(); ++i) {
-        slots.push_back(std::make_unique<detail::IoSlotContext>(io_pool.loop_at(i), workers, kv, i,
-                                                                config.io_inline_threshold));
+        slots.emplace_back(io_pool.loop_at(i), workers, kv, i, config.io_inline_threshold);
     }
 
     run_on_io_threads(slots, [](detail::IoSlotContext &slot) {
@@ -218,47 +250,7 @@ void run_server(std::string_view port, runtime::ServerConfig config = {}) {
         " | inline_bytes=" + std::to_string(config.io_inline_threshold) +
         " | affinity=" + (config.enable_cpu_affinity ? "on" : "off"));
 
-    std::size_t next_io = 0;
-    bool stopping = false;
-
-    while (!stopping) {
-        auto events = accept_epoll.wait();
-
-        for (const auto event : events) {
-            if (event.fd == signals.fd()) {
-                signals.consume();
-                stopping = true;
-                break;
-            }
-        }
-        if (stopping)
-            break;
-
-        for (const auto event : events) {
-            if (event.fd != listener->native_handle())
-                continue;
-
-            if (event.error() || event.hangup())
-                throw std::runtime_error("listener error");
-
-            if (!event.readable())
-                continue;
-
-            for (int i = 0; i < 64; ++i) {
-                auto client = listener->try_accept();
-                if (!client)
-                    break;
-
-                detail::IoSlotContext &slot = *slots[next_io];
-                next_io = (next_io + 1) % slots.size();
-
-                bool accepted = detail::post_connection(std::move(*client), slot);
-
-                if (!accepted)
-                    runtime::log::warn("I/O EventLoop rejected connection");
-            }
-        }
-    }
+    accept_until_stop(accept_epoll, *listener, signals, slots);
 
     // 阶段 1：停止监听，新连接不再进入。
     accept_epoll.remove(listener->native_handle());

@@ -77,17 +77,20 @@ struct alignas(kCacheLineBytes) IoDispatchContext {
 class Dispatcher {
   public:
     // 【作用】构建 worker_count x io_count 的 SPSC 队列矩阵并初始化各 I/O 线程的私有轮询起点。
-    // 【原理】一次性分配全部 WorkerControl 和每对 I/O、Worker 之间的 SpscQueue；同时按 io_id 错开各 I/O 线程的
+    // 【原理】一次性分配全部 WorkerControl 和每对 I/O、Worker 之间的 SpscQueue；同时按 io_id 错开各
+    // I/O 线程的
     //         初始轮询游标，避免冷启动时 4 个 I/O 线程同时扎堆扑向 Worker 0 / k。
     Dispatcher(std::size_t io_count, std::size_t worker_count, std::size_t normal_workers,
                std::size_t queue_capacity)
         : io_count_(io_count), worker_count_(worker_count), normal_count_(normal_workers),
           workers_(std::make_unique<WorkerControl[]>(worker_count)),
           io_contexts_(std::make_unique<IoDispatchContext[]>(io_count)) {
+
         if (io_count_ == 0 || worker_count_ < 2 || normal_count_ == 0 ||
             normal_count_ >= worker_count_) {
             throw std::invalid_argument("invalid Dispatcher worker topology");
         }
+
         if (worker_count_ > 64) {
             throw std::invalid_argument("Dispatcher supports up to 64 workers");
         }
@@ -116,7 +119,8 @@ class Dispatcher {
         return worker_count_;
     }
 
-    // 按下标获取指定 Worker 的控制块（供 WorkerPool 访问状态字、唤醒号与该 Worker 的各条 SPSC lane）。
+    // 按下标获取指定 Worker 的控制块（供 WorkerPool 访问状态字、唤醒号与该 Worker 的各条 SPSC
+    // lane）。
     [[nodiscard]] WorkerControl &worker(std::size_t worker_id) noexcept {
         return workers_[worker_id];
     }

@@ -61,9 +61,9 @@ export struct alignas(64) IoSlotContext {
                   // PTY 回调由同一 EventLoop 执行；停读之后只发已接受请求的响应。
                   auto *conn = connections.find(fd);
                   if (conn && conn->accepting_requests())
-                      connections.send_event(*conn, event);
+                      connections.send_async_frame(*conn, event);
               })),
-          connections(loop),
+          connections(loop, [this](int fd) noexcept { terminal_mgr->close_for_connection(fd); }),
           watcher(std::make_shared<service::DirWatcher>(loop, connections, workers, io_id)) {
         // 空闲栈预留到上限，保证归还不分配；启动时先准备 64 个节点供首批请求使用。
         task_pool_.reserve(max_pooled_tasks);

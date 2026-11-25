@@ -35,19 +35,14 @@ class Buffer {
         return storage_.data() + write_index_;
     }
 
-    // 确保 Buffer 尾部至少拥有 bytes 字节的连续可写空间：
-    // 先尝试通过 maybe_compact() 回收前端已消费空间；若仍不足则扩容底层 storage_。
+    // 只有 retrieve 会增大已消费前缀，它在那里按阈值紧缩。追加数据只会
+    // 增大写游标，无法让前缀重新满足紧缩条件，尾部放不下时直接扩容即可。
     void ensure_writable(std::size_t bytes) {
-        if (writable_bytes() >= bytes) {
+        if (writable_bytes() >= bytes)
             return;
-        }
-
-        maybe_compact();
-
-        if (writable_bytes() < bytes) {
-            const std::size_t needed = write_index_ + bytes;
-            storage_.resize(std::max(needed, storage_.size() * 2));
-        }
+        if (bytes > storage_.max_size() - write_index_)
+            throw std::length_error("buffer size exceeds maximum");
+        storage_.resize(std::max(write_index_ + bytes, storage_.size() * 2));
     }
 
     // 当外部直接向 writable_data() 写入 bytes 字节后（如 socket.try_recv），推进写游标。
@@ -90,25 +85,6 @@ class Buffer {
             return;
         }
 
-        maybe_compact();
-    }
-
-    void clear() noexcept {
-        read_index_ = 0;
-        write_index_ = 0;
-    }
-
-  private:
-    void maybe_compact() noexcept {
-        if (read_index_ == 0) {
-            return;
-        }
-
-        if (read_index_ == write_index_) {
-            clear();
-            return;
-        }
-
         // 前面至少浪费 4 KB，并且已经占已写入区域的一半以上，才真正搬移剩余未读数据。
         if (read_index_ < 4096 || read_index_ < write_index_ / 2) {
             return;
@@ -120,6 +96,12 @@ class Buffer {
         write_index_ = readable;
     }
 
+    void clear() noexcept {
+        read_index_ = 0;
+        write_index_ = 0;
+    }
+
+  private:
     std::vector<char> storage_;
     std::size_t read_index_{0};
     std::size_t write_index_{0};

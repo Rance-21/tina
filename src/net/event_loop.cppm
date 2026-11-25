@@ -44,36 +44,34 @@ class EventLoop {
         if (fd < 0 || fd == wake_fd_ || !handler)
             throw std::invalid_argument("invalid event handler");
 
-        if (event_handlers_.contains(fd))
+        auto [it, inserted] = event_handlers_.try_emplace(fd, std::move(handler));
+        if (!inserted)
             throw std::logic_error("fd already registered");
-
-        // shared_ptr 保证回调执行期间即使内部调用 del_event() 注销自身也不会悬空。
-        auto callback = std::make_shared<Handler>(std::move(handler));
-        event_handlers_.emplace(fd, std::move(callback));
-
         try {
             epoll_.add(fd, interest);
         } catch (...) {
-            event_handlers_.erase(fd);
+            event_handlers_.erase(it);
             throw;
         }
     }
 
     // 修改已注册 fd 的关注事件掩码（如按需开启/关闭 EPOLLOUT 或重装 EPOLLONESHOT）。
     void modify_event(int fd, EpollInterest interest) {
-        if (!event_handlers_.contains(fd))
-            throw std::logic_error("fd not registered");
-
         epoll_.modify(fd, interest);
     }
 
     // 注销 fd 的事件监听并移除回调（必须在 close(fd) 之前调用）。
     void del_event(int fd) {
-        if (!event_handlers_.contains(fd))
+        auto it = event_handlers_.find(fd);
+        if (it == event_handlers_.end())
             return;
 
+        // 正在执行的回调由 run() 的栈持有。清掉槽位指针，返回时就不会把旧
+        // 回调写进已删除的节点，或盖掉随后注册在相同 fd 上的新回调。
+        if (running_slot_ == &it->second)
+            running_slot_ = nullptr;
+        auto removed = event_handlers_.extract(it); // 其余回调持有的 fd 要活到 DEL 返回。
         epoll_.remove(fd);
-        event_handlers_.erase(fd);
     }
 
     // 跨线程投递任务到本 I/O 线程执行。
@@ -111,11 +109,12 @@ class EventLoop {
         if (started_.exchange(true))
             throw std::logic_error("EventLoop already started");
 
+        std::vector<Task> pending; // 两个队列交换容量，整批任务在锁外执行。
         while (!stopping_.load()) {
             for (const auto event : epoll_.wait()) {
                 if (event.fd == wake_fd_) {
                     drain_wakeup();
-                    run_pending_tasks();
+                    run_pending_tasks(pending);
                     continue;
                 }
 
@@ -123,28 +122,32 @@ class EventLoop {
                 if (it == event_handlers_.end())
                     continue;
 
-                // 拷贝一份 shared_ptr，保证回调执行期间调用 del_event() 销毁 map 条目时闭包仍存活。
-                auto callback = it->second;
-
+                // rehash 不移动节点。把闭包移到栈上执行，它可以在调用中注销自己。
+                running_slot_ = &it->second;
+                auto callback = std::move(*running_slot_);
                 try {
-                    (*callback)(event);
+                    callback(event);
                 } catch (...) {
                     try {
                         runtime::log::error("EventLoop handler failed");
                     } catch (...) {
                     }
-
-                    // 出错的回调不再接收新事件。
-                    try {
-                        del_event(event.fd);
-                    } catch (...) {
+                    if (running_slot_) {
+                        try {
+                            del_event(event.fd);
+                        } catch (...) {
+                        }
                     }
+                }
+                if (running_slot_) {
+                    *running_slot_ = std::move(callback);
+                    running_slot_ = nullptr;
                 }
             }
         }
 
         // 退出循环前排空最后一批已入队的跨线程任务。
-        run_pending_tasks();
+        run_pending_tasks(pending);
     }
 
     // 可以由其他线程调用。
@@ -179,7 +182,8 @@ class EventLoop {
         }
     }
 
-    // 清零 wakefd 计数器
+    // 普通 eventfd 一次成功读取就会将计数归零。随后交换任务队列，
+    // 在交换之后投递的第一项仍会唤醒下一轮，无需再读一次 EAGAIN。
     void drain_wakeup() noexcept {
         std::uint64_t value;
 
@@ -187,7 +191,7 @@ class EventLoop {
             ssize_t n = ::read(wake_fd_, &value, sizeof(value));
 
             if (n == sizeof(value))
-                continue;
+                return;
 
             if (n < 0 && errno == EINTR)
                 continue;
@@ -199,9 +203,7 @@ class EventLoop {
         }
     }
 
-    void run_pending_tasks() {
-        std::deque<Task> pending;
-
+    void run_pending_tasks(std::vector<Task> &pending) {
         {
             std::lock_guard lock(mutex_);
             pending.swap(tasks_);
@@ -218,18 +220,21 @@ class EventLoop {
                 }
             }
         }
+        pending.clear();
     }
 
     Epoll epoll_;
     int wake_fd_{-1};
 
-    std::unordered_map<int, std::shared_ptr<Handler>> event_handlers_;
+    // 只有 run() 所在线程操作回调表。rehash 保持节点地址稳定。
+    std::unordered_map<int, Handler> event_handlers_;
+    Handler *running_slot_{nullptr};
 
     // 多生产者、单消费者任务队列。
     std::mutex mutex_;
 
     // Worker 线程 post 到此
-    std::deque<Task> tasks_;
+    std::vector<Task> tasks_;
 
     std::atomic<bool> stopping_{false};
     std::atomic<bool> started_{false};

@@ -9,10 +9,8 @@ import rpc.protocol;
 export namespace net {
 
 // 基于 ::writev() 的帧发送队列（服务端 Connection、客户端 RpcClient 与压测端共用）。
-// 核心设计：
-//   - 每帧拆分为“17 字节固定帧头（内联数组）”和“直接 std::move 接管的 payload 字符串”，
-//     彻底省去在用户态分配连续大 Buffer 并把 payload 再 memcpy 拷贝一遍的开销。
-//   - 发送时通过 ::writev() 在单次系统调用中将多帧的“17B 帧头 + Payload”一起聚集写入内核。
+// 队列分别保留帧头、内联正文和可选的外置切片。writev 一次最多发送 64 段，
+// 无需把缓存中的文件正文拷贝到连续发送缓冲区。切片的 owner 保留到整帧发完。
 class FrameSendQueue {
   public:
     [[nodiscard]] inline bool empty() const noexcept {
@@ -26,39 +24,16 @@ class FrameSendQueue {
     // 入队一帧（直接移动接管 frame.payload，零拷贝）。
     // 若超出 max_bytes 上限则返回 false。
     bool enqueue(Frame &frame, std::size_t max_bytes = std::numeric_limits<std::size_t>::max()) {
-        const std::size_t frame_size = frame_header_size + frame.payload_size();
-        if (queued_bytes_ > max_bytes || frame_size > max_bytes - queued_bytes_)
-            return false;
-
-        Item item{};
-        encode_frame_header(frame, item.header.data()); // 1. 编码 17 字节固定帧头
-        item.payload = std::move(frame.payload);        // 2. 直接移动接管 payload，不拷贝字节
-        item.payload_owner = std::move(frame.payload_owner);
-        item.external_payload = std::exchange(frame.external_payload, {});
-        frames_.push_back(std::move(item));
-        queued_bytes_ += frame_size;
-        return true;
+        return append_frame(frame, max_bytes);
     }
 
-    // 入队只读帧（如向多个订阅者广播同一个 Event 帧）。
+    // 广播保留原帧，多个发送队列各自持有同一正文的引用。
     bool enqueue(const Frame &frame,
                  std::size_t max_bytes = std::numeric_limits<std::size_t>::max()) {
-        const std::size_t frame_size = frame_header_size + frame.payload_size();
-        if (queued_bytes_ > max_bytes || frame_size > max_bytes - queued_bytes_)
-            return false;
-
-        Item item{};
-        encode_frame_header(frame, item.header.data());
-        item.payload = frame.payload;
-        item.payload_owner = frame.payload_owner;
-        item.external_payload = frame.external_payload;
-        frames_.push_back(std::move(item));
-        queued_bytes_ += frame_size;
-        return true;
+        return append_frame(frame, max_bytes);
     }
 
     // 使用 ::writev() 将队列中待发的“17B 帧头”和“Payload”聚集写入非阻塞 Socket。
-    // 高负载能自己减少 syscall 陷入内核
     template <typename Socket> void write(const Socket &socket) {
         constexpr int kMaxIov = 64;
         std::array<struct iovec, kMaxIov> iov;
@@ -67,39 +42,25 @@ class FrameSendQueue {
             int iov_count = 0;
             std::size_t batch_bytes = 0;
 
-            // 第一步：遍历队列，把每帧还没发完的“17B 帧头”和“Payload”依次挂进 iov 数组。
-            for (auto &item : frames_) {
-                // 1. 若 17B 帧头还没发完，把剩余帧头作为一段 iovec
-                if (item.sent < frame_header_size) {
-                    const std::size_t len = frame_header_size - item.sent;
-                    iov[iov_count++] = {item.header.data() + item.sent, len};
-                    batch_bytes += len;
-                    if (iov_count == kMaxIov)
-                        break;
+            // 只有队头可能发过一部分。skip 先跨过完整段，再截去首个未发段的前缀；
+            // 此后它为零，可以直接把本帧和后续帧的剩余段交给 writev。
+            std::size_t skip = front_offset_;
+            auto append_segment = [&](std::string_view bytes) {
+                if (skip >= bytes.size()) {
+                    skip -= bytes.size();
+                    return true;
                 }
+                bytes.remove_prefix(skip);
+                skip = 0;
+                iov[iov_count++] = {const_cast<char *>(bytes.data()), bytes.size()};
+                batch_bytes += bytes.size();
+                return iov_count < kMaxIov;
+            };
 
-                // 2. 若有 Payload，把剩余未发的 Payload 作为下一段 iovec
-                if (!item.payload.empty() && item.sent < frame_header_size + item.payload.size()) {
-                    const std::size_t offset =
-                        (item.sent > frame_header_size) ? (item.sent - frame_header_size) : 0;
-                    const std::size_t len = item.payload.size() - offset;
-                    iov[iov_count++] = {item.payload.data() + offset, len};
-                    batch_bytes += len;
-                    if (iov_count == kMaxIov)
-                        break;
-                }
-
-                if (!item.external_payload.empty()) {
-                    const std::size_t prefix_size = frame_header_size + item.payload.size();
-                    const std::size_t offset =
-                        item.sent > prefix_size ? item.sent - prefix_size : 0;
-                    const std::size_t len = item.external_payload.size() - offset;
-                    iov[iov_count++] = {const_cast<char *>(item.external_payload.data() + offset),
-                                        len};
-                    batch_bytes += len;
-                    if (iov_count == kMaxIov)
-                        break;
-                }
+            for (const auto &item : frames_) {
+                if (!append_segment({item.header.data(), item.header.size()}) ||
+                    !append_segment(item.payload) || !append_segment(item.external_payload))
+                    break;
             }
 
             // 第二步：单次 ::writev() 系统调用将所有分散数据块一起写入内核。
@@ -111,19 +72,17 @@ class FrameSendQueue {
             std::size_t rem = *n;
             queued_bytes_ -= rem;
 
-            while (rem > 0 && !frames_.empty()) {
-                auto &front = frames_.front();
-                const std::size_t frame_left =
-                    (frame_header_size + front.payload.size() + front.external_payload.size()) -
-                    front.sent;
-
-                if (rem >= frame_left) {
-                    rem -= frame_left;
-                    frames_.pop_front(); // 整帧已发完，弹出并释放其 payload 内存
-                } else {
-                    front.sent += rem; // 部分写（只发了一半）：推进游标，留待下次继续发
-                    rem = 0;
+            while (rem > 0) {
+                const auto &front = frames_.front();
+                const auto left = frame_header_size + front.payload.size() +
+                                  front.external_payload.size() - front_offset_;
+                if (rem < left) {
+                    front_offset_ += rem;
+                    break;
                 }
+                rem -= left;
+                front_offset_ = 0;
+                frames_.pop_front();
             }
 
             // 若本次未写完当前批次，说明内核发送缓冲区已满，直接退出避免多调一次必触发 EAGAIN
@@ -135,15 +94,37 @@ class FrameSendQueue {
 
   private:
     struct Item {
-        std::array<char, frame_header_size> header{};
+        std::array<char, frame_header_size> header;
         std::string payload;
         std::shared_ptr<const void> payload_owner;
         std::string_view external_payload;
-        std::size_t sent{0}; // 当前帧已发送的总字节数（范围：0 .. 17 + payload.size()）
-        // 有外置切片时，上界还包含 external_payload.size()；所有切片均由 payload_owner 保活。
+
+        template <typename F> explicit Item(F &frame) {
+            // 先验证帧头，异常时 deque 不增加元素，调用方仍持有原帧。
+            encode_frame_header(frame, header.data());
+            external_payload = frame.external_payload;
+            if constexpr (std::is_const_v<F>) {
+                payload = frame.payload;
+                payload_owner = frame.payload_owner;
+            } else {
+                payload = std::move(frame.payload);
+                payload_owner = std::move(frame.payload_owner);
+                frame.external_payload = {};
+            }
+        }
     };
 
+    template <typename F> bool append_frame(F &frame, std::size_t max_bytes) {
+        const auto size = frame_header_size + frame.payload_size();
+        if (queued_bytes_ > max_bytes || size > max_bytes - queued_bytes_)
+            return false;
+        frames_.emplace_back(frame);
+        queued_bytes_ += size;
+        return true;
+    }
+
     std::deque<Item> frames_;
+    std::size_t front_offset_{0};
     std::size_t queued_bytes_{0};
 };
 

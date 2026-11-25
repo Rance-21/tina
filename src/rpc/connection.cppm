@@ -80,23 +80,19 @@ class Connection {
         return true;
     }
 
-    // 先检查名额再构造和投递任务。队列满时不增加 pending_，Worker 的每个成功回包核销一次。
-    bool try_submit_worker_request(auto &&submit) {
-        if (pending_ >= max_inflight || !submit())
+    // 在借池节点之前占用一个在途名额。若随后的提交失败，收包路径立即关闭
+    // 整条连接；提交成功则由该请求唯一的一次 Worker 回包归还名额。
+    bool reserve_worker_request() {
+        if (pending_ >= max_inflight)
             return false;
         ++pending_;
         return true;
     }
 
-    // I/O 线程快路径直接响应入队（直接复用 FrameSendQueue::enqueue，不占用 pending_ 计数）：
-    //   - 当单条连接在一次 read_requests() 流水线中连续命中多条快路径请求时，先发响应会暂存在
-    //   output_ 中；
-    //   - 为避免突发大流量在尚未退出收包循环前就撑爆 4 MiB 的 max_output 上限，
-    //     在积压达到 256 KiB 或首次 enqueue 放不下时，立即尝试一次非阻塞 ::writev()
-    //     刷出数据再入队；
-    //   - 若刷写后依然超出 max_output（说明对端读太慢且内核发送缓冲区已满），返回 false
-    //   断开慢连接。
+    // 同一批内联命中共用一次 flush。积压到 256 KiB 提前写，首次放不下再
+    // 尝试写一次，保留 4 MiB 的慢连接上限。内联响应不占 Worker 名额。
     bool enqueue_inline_response(Frame &response) {
+        response.kind = Kind::response;
         if (output_.readable_bytes() >= 256 * 1024)
             output_.write(socket_);
         if (output_.enqueue(response, max_output))
@@ -105,33 +101,13 @@ class Connection {
         return output_.enqueue(response, max_output);
     }
 
-    // Worker 算完响应后由所属 I/O 线程调用：
-    // 核销一个在途请求（--pending_），编码 17B 帧头并直接 std::move 接管
-    // response.payload（不拷贝负载）。
-    bool enqueue_response(Frame &response) {
-        if (pending_ == 0 || !output_.enqueue(response, max_output))
-            return false;
-
-        --pending_;
-        return true;
-    }
-
-    // 单播时发送队列可直接接管正文。广播时第一个订阅者把正文转成共享切片，
-    // 后续队列只拷贝引用。事件没有对应请求，因此不核销 pending_。
-    bool enqueue_event(Frame &event, bool broadcast) {
-        if (broadcast) {
-            event.share_payload();
-            return output_.enqueue(std::as_const(event), max_output);
-        }
-        return output_.enqueue(event, max_output);
-    }
-
     // 使用 ::writev() 将 output_ 队列中的“17B 帧头 + Payload”聚集写入内核 Socket 发送缓冲区。
     void flush_output() {
         output_.write(socket_);
     }
 
   private:
+    friend class IoConnections; // 连接表在异步回包时核销名额、刷新监听或关闭连接。
     static constexpr std::size_t max_inflight = 64;
     static constexpr std::size_t max_output = 4 * 1024 * 1024;
 
@@ -150,10 +126,11 @@ class Connection {
 // epoll 回调可在注册至注销之间借用节点；异步回包和目录订阅跨越此期限，只保存 (fd, id)。
 class IoConnections {
   public:
-    explicit IoConnections(net::EventLoop &loop) : loop_(loop) {
+    IoConnections(net::EventLoop &loop, std::move_only_function<void(int) noexcept> on_close)
+        : loop_(loop), on_close_(std::move(on_close)) {
     }
 
-    void add(net::Socket socket, auto on_event) {
+    void register_conn(net::Socket socket, auto on_event) {
         const int fd = socket.native_handle();
         auto [it, inserted] = active_.try_emplace(fd, std::move(socket), next_id_++);
 
@@ -161,11 +138,12 @@ class IoConnections {
             throw std::logic_error("connection fd already registered");
 
         Connection &conn = it->second;
-        try {
-            loop_.add_event(fd, conn.interests(), [&conn, on_event](net::EpollEvent event) {
-                on_event(conn, event);
-            });
 
+        try {
+            loop_.add_event(fd, conn.interests(),
+                            [&conn, on_event = std::move(on_event)](net::EpollEvent event) {
+                                on_event(conn, event);
+                            });
         } catch (...) {
             active_.erase(it);
             throw;
@@ -178,13 +156,18 @@ class IoConnections {
     }
 
     // fd 在 close 后可立即复用；迟到的回包和目录事件必须同时匹配原连接的世代号。
-    // [[nodiscard]] Connection *find(int fd, std::uint64_t id) {
-    //     auto *conn = find(fd);
-    //     return conn && conn->id() == id ? conn : nullptr;
-    // }
+    [[nodiscard]] Connection *find(int fd, std::uint64_t id) {
+        auto *conn = find(fd);
+        return conn && conn->id() == id ? conn : nullptr;
+    }
 
-    void close(int fd) {
-        loop_.del_event(fd); // 先注销借用节点的回调，再销毁 socket。
+    void close(int fd) noexcept {
+        on_close_(fd); // 在 fd 有机会复用前，清理这条连接的 PTY。
+        try {
+            loop_.del_event(fd);
+        } catch (...) {
+            // 用户态回调已摘下；即使 DEL 失败，关闭最后一个 socket fd 也会解除内核监听。
+        }
         active_.erase(fd);
         if (drain_complete_ && active_.empty()) {
             drain_complete_->set_value();
@@ -200,20 +183,35 @@ class IoConnections {
             loop_.modify_event(conn.fd(), conn.interests());
     }
 
-    // 目录和 PTY 推送共用此路径。背压超限或 socket 出错会关闭这条连接，
-    // 返回 false 让目录监听同时移除相应订阅。调用方已跳过停读的连接。
-    bool send_event(Connection &conn, Frame &event, bool broadcast = false) {
-        const int fd = conn.fd();
+    // Worker 回包、PTY 与目录事件都在 socket 回调之外送达，要立即尝试写。
+    // 只有 Worker 响应对应已占用的名额。广播保留原帧，让各订阅者共享同一份正文。
+    bool send_async_frame(Connection &conn, Frame &frame, bool broadcast = false) {
+        if (frame.kind == Kind::response) {
+            if (conn.pending_ == 0) {
+                close(conn.fd());
+                return false;
+            }
+            --conn.pending_;
+        }
+        const bool had_output = conn.wants_write();
         try {
-            if (conn.enqueue_event(event, broadcast)) {
+            if (broadcast)
+                frame.share_payload();
+            const bool queued =
+                broadcast ? conn.output_.enqueue(std::as_const(frame), Connection::max_output)
+                          : conn.output_.enqueue(frame, Connection::max_output);
+            if (queued) {
                 conn.flush_output();
-                rearm_or_close(conn);
+                // 当前 ONESHOT 仍然有效。只有新增/消除写积压或排空最后一次
+                // 回包才需要动作；socket 就绪回调则每次都要重新武装。
+                if (conn.finished() || conn.wants_write() != had_output)
+                    rearm_or_close(conn);
                 return true;
             }
         } catch (...) {
-            // writev 或重装监听失败，走相同的断连清理。
+            // 编码、writev 或重新武装失败都终止这条连接。
         }
-        close(fd);
+        close(conn.fd());
         return false;
     }
 
@@ -241,6 +239,7 @@ class IoConnections {
 
   private:
     net::EventLoop &loop_;
+    std::move_only_function<void(int) noexcept> on_close_;
     std::unordered_map<int, Connection> active_;
     std::uint64_t next_id_{1};
     std::optional<std::promise<void>> drain_complete_;
