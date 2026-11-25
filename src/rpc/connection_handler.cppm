@@ -126,7 +126,7 @@ void execute_worker_request(RpcTaskContext *ctx) noexcept {
 
 // 一个可读事件内的所有 Worker 提交共用一次唤醒屏障。先分流，再分别处理两种结果：
 // 内联响应入队成功才登记订阅；慢路径直接移动帧和缓存快照，闭包只携带一个池节点指针。
-bool read_and_dispatch_requests(Connection &conn, IoSlotContext &slot) {
+bool dispatch_requests(Connection &conn, IoSlotContext &slot) {
     // 快路径不会留下快照；提交慢请求时把快照取走。整批共用这些临时量，
     // 连续的内联命中无需逐帧构造、销毁空的 shared_ptr。
     WorkspaceSnapshot snapshot;
@@ -149,6 +149,7 @@ bool read_and_dispatch_requests(Connection &conn, IoSlotContext &slot) {
         if (!conn.reserve_worker_request())
             return false;
         auto *ctx = slot.acquire_task(conn, std::move(request));
+
         // Worker 已取走上次的快照。只有本次确实命中，才写池节点里的相应字段；
         // 普通任务和缓存未命中都不必初始化整份快照。
         if (snapshot.file) {
@@ -158,6 +159,7 @@ bool read_and_dispatch_requests(Connection &conn, IoSlotContext &slot) {
             ctx->snapshot.directory = std::move(snapshot.directory);
             ctx->watched_dir.swap(dir_path);
         }
+
         if (slot.workers.try_submit(slot.io_id, route, [ctx] {
                 execute_worker_request(ctx);
             }))
@@ -177,7 +179,7 @@ void handle_connection_event(Connection &conn, IoSlotContext &slot,
         const bool read_ready = event.readable() || event.peer_closed() || event.hangup();
 
         if (event.error() ||
-            (read_ready && conn.accepting_requests() && !read_and_dispatch_requests(conn, slot))) {
+            (read_ready && conn.accepting_requests() && !dispatch_requests(conn, slot))) {
             slot.connections.close(fd);
             return;
         }

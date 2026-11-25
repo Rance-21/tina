@@ -36,7 +36,6 @@ class WorkspaceCache {
     }
 
     // ---- 目录列表缓存（workspace_list_dir，缓存 std::vector<DirEntry>） ----
-
     [[nodiscard]] inline std::shared_ptr<const std::vector<DirEntry>>
     get_dir(std::string_view rel_path) {
         return dirs_.get(rel_path);
@@ -55,7 +54,6 @@ class WorkspaceCache {
     }
 
     // ---- 文件内容缓存（workspace_read_file，缓存完整 ReadFileResponse） ----
-
     [[nodiscard]] std::shared_ptr<const ReadFileResponse> get_file(std::string_view rel_path) {
         return files_.get(rel_path);
     }
