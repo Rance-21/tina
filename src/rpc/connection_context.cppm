@@ -50,6 +50,7 @@ export struct alignas(64) IoSlotContext {
 
     // 从新缓存行开始，避免 I/O 线程修改连接表和任务池时使 Worker 的只读缓存行失效。
     alignas(64) IoConnections connections;
+    Frame inline_response{};
     const std::shared_ptr<service::DirWatcher> watcher;
 
     IoSlotContext(net::EventLoop &loop, runtime::WorkerPool &workers, KvState &kv,
@@ -78,7 +79,7 @@ export struct alignas(64) IoSlotContext {
     // 从本线程空闲栈借节点。只有所有节点都在途时才分配，借出后由 Worker 独占，
     // 直至回包任务投回本线程。仅当 Worker 需要解析请求负载时才拷贝进池化缓冲。
     RpcTaskContext *acquire_task(const Connection &conn, const FrameView &request,
-                                 bool copy_payload) {
+                                 bool copy_payload, std::string_view watched_dir = {}) {
         std::unique_ptr<RpcTaskContext> guard;
         if (task_pool_.empty()) {
             guard = std::make_unique<RpcTaskContext>(*this);
@@ -96,6 +97,8 @@ export struct alignas(64) IoSlotContext {
             guard->frame.payload.assign(request.payload);
         else
             guard->frame.payload.clear();
+        if (!watched_dir.empty())
+            guard->watched_dir.assign(watched_dir);
         return guard.release();
     }
 
@@ -107,7 +110,7 @@ export struct alignas(64) IoSlotContext {
         // 已发送的 payload 通常已经移入发送队列。连接提前关闭时，节点可能还持有
         // 大响应或只读缓存切片。归还前释放外置所有权，仅保留小字符串的容量。
         ctx->frame.clear_external_payload();
-        if (ctx->frame.payload.capacity() > 16 * 1024)
+        if (ctx->frame.payload.capacity() > 128 * 1024)
             std::string{}.swap(ctx->frame.payload);
         else
             ctx->frame.payload.clear();

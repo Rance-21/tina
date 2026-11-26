@@ -39,13 +39,11 @@ runtime::TaskClass inline_or_blocking(const FrameView &request, Frame &response,
 
     case Method::workspace_read_file: {
         auto req = server::decode_workspace_read_file_view(request.payload);
-        if (!req || !service::file::is_valid_workspace_rel_path(req->path) ||
-            service::file::workspace_root_fd() < 0)
+        if (!req || service::file::workspace_root_fd() < 0)
             return normal;
         auto file = service::global_workspace_cache().get_file(req->path);
-
         if (!file)
-            return blocking;
+            return service::file::is_valid_workspace_rel_path(req->path) ? blocking : normal;
 
         const auto slice = server::slice_file_content(*file, req->offset, req->max_bytes);
         // 阈值为零时，连 EOF 的空切片也交给 Worker。正阈值按正文大小判断，不含元数据头。
@@ -62,13 +60,11 @@ runtime::TaskClass inline_or_blocking(const FrameView &request, Frame &response,
 
     case Method::workspace_list_dir: {
         auto path = server::decode_workspace_list_dir_view(request.payload);
-        if (!path || !service::file::is_valid_workspace_rel_path(*path) ||
-            service::file::workspace_root_fd() < 0)
+        if (!path || service::file::workspace_root_fd() < 0)
             return normal;
-
         auto cached = service::global_workspace_cache().get_dir(*path);
         if (!cached)
-            return blocking;
+            return service::file::is_valid_workspace_rel_path(*path) ? blocking : normal;
 
         dir_path = *path;
         if (inline_threshold && cached->size() <= inline_threshold) {

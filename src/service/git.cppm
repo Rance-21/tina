@@ -1,7 +1,6 @@
 module;
 #include <errno.h>
 #include <fcntl.h>
-#include <stdlib.h>
 #include <unistd.h>
 
 export module service.git;
@@ -14,13 +13,7 @@ import service.file;
 
 export namespace service::git {
 
-// ============================================================================
-// 2. 仓库目录 FD 解析与 Git 分支名安全校验
-// ============================================================================
-
-// 将客户端传入的仓库相对路径解析为目录 FD（避免拼接绝对路径，供子进程 fchdir 使用）：
-//   - 若 rel_path 非空，在栈上校验并通过 openat(root_fd, ..., O_DIRECTORY) 打开目标目录；
-//   - 若 rel_path 为空，优先检查工作区根目录是否存在 .git，否则若当前目录存在 .git 则打开 "."。
+// 将客户端传入的仓库相对路径解析为目录 FD（供子进程 fchdir 使用）：
 service::file::ScopedFd open_git_repo_dir(std::string_view rel_path, int &err_out) noexcept {
     err_out = 0;
     const int root_fd = service::file::workspace_root_fd();
@@ -33,17 +26,16 @@ service::file::ScopedFd open_git_repo_dir(std::string_view rel_path, int &err_ou
     };
 
     if (!rel_path.empty()) {
-        service::file::RelPath rel(rel_path);
-        if (!rel) {
+        const char *c_path = service::file::c_rel_path(rel_path);
+        if (!c_path) {
             err_out = EINVAL;
             return {};
         }
         if (root_fd < 0) {
-            const char *home = ::getenv("HOME");
-            err_out = (home == nullptr || home[0] == '\0') ? EINVAL : ENOENT;
+            err_out = ENOENT;
             return {};
         }
-        return open_checked(root_fd, rel.c_str());
+        return open_checked(root_fd, c_path);
     }
 
     if (root_fd >= 0 && ::faccessat(root_fd, ".git", F_OK, 0) == 0)
@@ -52,11 +44,7 @@ service::file::ScopedFd open_git_repo_dir(std::string_view rel_path, int &err_ou
         return open_checked(AT_FDCWD, ".");
     if (root_fd >= 0)
         return open_checked(root_fd, ".");
-
-    const char *home = ::getenv("HOME");
-    if (home != nullptr && home[0] != '\0')
-        return open_checked(AT_FDCWD, home);
-    return open_checked(AT_FDCWD, "/");
+    return open_checked(AT_FDCWD, ".");
 }
 
 // 校验客户端传入的 Git 分支/引用名称是否合法：

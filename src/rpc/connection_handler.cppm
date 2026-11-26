@@ -126,17 +126,16 @@ void execute_worker_request(RpcTaskContext *ctx) noexcept {
 // 一个可读事件内的所有 Worker 提交共用一次唤醒屏障。先零拷贝分流：
 // 内联任务直接消费输入缓冲视图，入队成功后再登记订阅；慢路径仅在需要时拷贝请求正文。
 bool dispatch_requests(Connection &conn, IoSlotContext &slot) {
-    Frame inline_response{};
     WorkspaceSnapshot snapshot;
     std::string_view dir_path;
     runtime::WorkerPool::SubmitBatchGuard wake_batch(slot.workers, slot.io_id);
 
     return conn.read_requests([&](const FrameView &request) {
-        const auto route =
-            inline_or_blocking(request, inline_response, slot.inline_threshold, snapshot, dir_path);
+        const auto route = inline_or_blocking(request, slot.inline_response,
+                                              slot.inline_threshold, snapshot, dir_path);
 
         if (route == runtime::TaskClass::inline_task) {
-            if (!conn.enqueue_inline_response(inline_response))
+            if (!conn.enqueue_inline_response(slot.inline_response))
                 return false;
 
             if (request.method == Method::workspace_list_dir)
@@ -152,23 +151,13 @@ bool dispatch_requests(Connection &conn, IoSlotContext &slot) {
 
         const bool need_payload = !snapshot.file && !snapshot.directory &&
                                   !is_event_only_method(request.method);
-        RpcTaskContext *ctx = nullptr;
-        try {
-            ctx = slot.acquire_task(conn, request, need_payload);
-            if (snapshot.file) {
-                ctx->snapshot.file = std::move(snapshot.file);
-                ctx->snapshot.slice = snapshot.slice;
-            } else if (snapshot.directory) {
-                ctx->snapshot.directory = std::move(snapshot.directory);
-                ctx->watched_dir.assign(dir_path);
-            }
-        } catch (...) {
-            snapshot = {};
-            if (ctx) {
-                ctx->snapshot = {};
-                slot.recycle_task(ctx);
-            }
-            throw;
+        auto *ctx = slot.acquire_task(conn, request, need_payload,
+                                      snapshot.directory ? dir_path : std::string_view{});
+        if (snapshot.file) {
+            ctx->snapshot.file = std::move(snapshot.file);
+            ctx->snapshot.slice = snapshot.slice;
+        } else if (snapshot.directory) {
+            ctx->snapshot.directory = std::move(snapshot.directory);
         }
 
         if (slot.workers.try_submit(slot.io_id, route, [ctx] {

@@ -201,14 +201,7 @@ void RpcClient::State::handle_responses() {
         const std::size_t frame_bytes = response->wire_bytes();
         if (response->kind == Kind::event) {
             if (event_handler) {
-                Frame ev{
-                    .length = static_cast<std::uint32_t>(min_frame_length + response->payload.size()),
-                    .kind = Kind::event,
-                    .request_id = 0,
-                    .method = response->method,
-                    .status = response->status,
-                    .payload = std::string(response->payload),
-                };
+                Frame ev = response->to_frame();
                 input.retrieve(frame_bytes);
                 try {
                     event_handler(std::move(ev));
@@ -248,14 +241,7 @@ void RpcClient::State::handle_responses() {
             input.retrieve(frame_bytes);
             promise->set_exception(std::make_exception_ptr(TimeoutError{}));
         } else {
-            Frame owned{
-                .length = static_cast<std::uint32_t>(min_frame_length + response->payload.size()),
-                .kind = Kind::response,
-                .request_id = id,
-                .method = response->method,
-                .status = response->status,
-                .payload = std::string(response->payload),
-            };
+            Frame owned = response->to_frame();
             input.retrieve(frame_bytes);
             promise->set_value(std::move(owned));
         }

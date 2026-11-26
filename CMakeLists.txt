@@ -95,8 +95,8 @@ set_target_properties(test_buffer PROPERTIES
 # 编译测试依赖的 net.buffer 模块。
 set(NET_BUFFER_MODULES
     src/net/buffer.cppm
-    src/net/buffer/storage.cppm
-    src/net/buffer/frame_send_queue.cppm
+    src/net/storage.cppm
+    src/net/frame_send_queue.cppm
     src/rpc/protocol.cppm
     src/rpc/payload.cppm
 )

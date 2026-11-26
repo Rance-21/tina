@@ -16,13 +16,6 @@ namespace service::file::detail {
 
 int workspace_root_fd = -2;
 
-struct RootFdCleanup {
-    ~RootFdCleanup() {
-        if (workspace_root_fd >= 0)
-            ::close(workspace_root_fd);
-    }
-} root_fd_cleanup{};
-
 } // namespace service::file::detail
 
 export namespace service::file {
@@ -158,11 +151,11 @@ inline void set_errno_error(Frame &frame, int err, std::string_view context) {
     frame.payload = std::string(context);
 }
 
-// 3. 工作区根目录（~/projects）FD 管理与相对路径栈缓冲校验
+// 3. 工作区根目录（~/projects）FD 管理与相对路径校验
 // 预先打开并持有 ~/projects 目录 FD（服务启动时调用一次；独立单测首次访问时按需打开）。
 int init_workspace_root() noexcept {
-    if (detail::workspace_root_fd >= 0)
-        ::close(detail::workspace_root_fd);
+    static ScopedFd holder;
+    holder.close_now();
     detail::workspace_root_fd = -1;
 
     const char *home = ::getenv("HOME");
@@ -181,7 +174,8 @@ int init_workspace_root() noexcept {
     std::memcpy(root + base.size(), projects.data(), projects.size());
     root[base.size() + projects.size()] = '\0';
 
-    detail::workspace_root_fd = ::open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    holder = ScopedFd(::open(root, O_RDONLY | O_DIRECTORY | O_CLOEXEC));
+    detail::workspace_root_fd = holder.get();
     return detail::workspace_root_fd;
 }
 
@@ -214,47 +208,21 @@ inline bool is_valid_workspace_rel_path(std::string_view rel_path) noexcept {
     return true;
 }
 
-// 在栈区校验相对路径并补齐结尾 '\0'，供 openat 系列系统调用直接使用（仅写入实际路径长度字节）。
-class RelPath {
-  public:
-    explicit RelPath(std::string_view rel_path) noexcept {
-        if (!is_valid_workspace_rel_path(rel_path))
-            return;
-        size_ = rel_path.size();
-        std::memcpy(buf_, rel_path.data(), size_);
-        buf_[size_] = '\0';
-    }
-
-    RelPath(const RelPath &) = delete;
-    RelPath &operator=(const RelPath &) = delete;
-
-    [[nodiscard]] inline bool valid() const noexcept {
-        return size_ != 0;
-    }
-    [[nodiscard]] inline explicit operator bool() const noexcept {
-        return valid();
-    }
-    [[nodiscard]] inline const char *c_str() const noexcept {
-        return buf_;
-    }
-    [[nodiscard]] inline std::string_view view() const noexcept {
-        return {buf_, size_};
-    }
-
-  private:
-    std::size_t size_{0};
-    char buf_[PATH_MAX];
-};
+// 校验相对路径并写入线程局部缓冲区补齐 '\0'，供 openat 系列系统调用直接使用。
+[[nodiscard]] const char *c_rel_path(std::string_view rel_path) noexcept {
+    if (!is_valid_workspace_rel_path(rel_path))
+        return nullptr;
+    thread_local char buf[PATH_MAX];
+    std::memcpy(buf, rel_path.data(), rel_path.size());
+    buf[rel_path.size()] = '\0';
+    return buf;
+}
 
 // 基于 openat 枚举一级子项并直接按协议格式编码进 out：
 // [u16 dirPathLen][dirPath bytes] + 按名字升序排列的 [u8 type][u16 nameLen][name bytes]...
-// 成功返回 0，失败返回对应的 errno（> 0 表示打开目录失败，< 0 表示 readdir 失败的 -errno）。
-int read_directory_payload(int root_fd, const RelPath &rel, std::string &out) {
-    const std::string_view rel_path = rel.view();
-    if (rel_path.size() > std::numeric_limits<std::uint16_t>::max())
-        return EINVAL;
-
-    const int raw_fd = ::openat(root_fd, rel.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+int read_directory_payload(int root_fd, const char *c_path, std::string_view rel_path,
+                           std::string &out) {
+    const int raw_fd = ::openat(root_fd, c_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (raw_fd < 0)
         return errno != 0 ? errno : EIO;
 
@@ -289,7 +257,6 @@ int read_directory_payload(int root_fd, const RelPath &rel, std::string &out) {
             name.size() > std::numeric_limits<std::uint16_t>::max())
             continue;
 
-        // 忽略服务端原子写文件期间产生的同目录临时文件。
         if (name.find(".tmp.") != std::string_view::npos)
             continue;
 
@@ -321,8 +288,6 @@ int read_directory_payload(int root_fd, const RelPath &rel, std::string &out) {
         }
 
         if (type) {
-            if (names.size() > std::numeric_limits<std::uint32_t>::max() - name.size())
-                return EOVERFLOW;
             entries.push_back(EntrySpan{
                 .offset = static_cast<std::uint32_t>(names.size()),
                 .len = static_cast<std::uint16_t>(name.size()),

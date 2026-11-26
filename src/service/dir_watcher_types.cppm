@@ -96,11 +96,11 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
         }
 
         const int root_fd = file::workspace_root_fd();
-        file::RelPath rel(rel_path);
-        if (root_fd < 0 || !rel)
+        const char *c_path = file::c_rel_path(rel_path);
+        if (root_fd < 0 || !c_path)
             return;
 
-        file::ScopedFd dir_fd(::openat(root_fd, rel.c_str(), O_PATH | O_DIRECTORY | O_CLOEXEC));
+        file::ScopedFd dir_fd(::openat(root_fd, c_path, O_PATH | O_DIRECTORY | O_CLOEXEC));
         int wd = -1;
         if (dir_fd.valid()) {
             char inode_path[32] = "/proc/self/fd/";

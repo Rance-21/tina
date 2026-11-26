@@ -173,6 +173,15 @@ export struct FrameView {
     [[nodiscard]] std::size_t wire_bytes() const noexcept {
         return frame_header_size + payload.size();
     }
+
+    [[nodiscard]] Frame to_frame() const {
+        return {.length = static_cast<std::uint32_t>(min_frame_length + payload.size()),
+                .kind = kind,
+                .request_id = request_id,
+                .method = method,
+                .status = status,
+                .payload = std::string(payload)};
+    }
 };
 
 inline bool valid_header(Kind kind, std::uint64_t request_id, Status status) noexcept {

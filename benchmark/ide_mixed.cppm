@@ -541,14 +541,7 @@ class Connection {
             if (result)
                 revision = *result;
         } else if (p.op == Op::control) {
-            control_response = Frame{
-                .length = static_cast<std::uint32_t>(min_frame_length + frame.payload.size()),
-                .kind = frame.kind,
-                .request_id = frame.request_id,
-                .method = frame.method,
-                .status = frame.status,
-                .payload = std::string(frame.payload),
-            };
+            control_response = frame.to_frame();
         }
         finish(p, valid, now);
     }
