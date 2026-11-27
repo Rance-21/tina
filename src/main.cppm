@@ -19,8 +19,6 @@ void print_usage() {
         << "  --port <port>              Listen port (default: 3490)\n"
         << "  --normal-workers <k>       Number of Normal Workers, 1 <= k <= 7 (default: 2)\n"
         << "  --queue-capacity <n>       Per-lane SPSC queue capacity, power of 2 (default: 128)\n"
-        << "  --inline-threshold <bytes> Max cache-hit size handled inline on IO loop (default: "
-           "32768)\n"
         << "  --io-cpus <list>           Comma/range CPU list for EventLoops (default: 0,2,4,8)\n"
         << "  --worker-cpus <list>       Comma/range CPU list for Workers (default: 16-23)\n"
         << "  --no-affinity              Disable CPU topology validation and thread pinning\n"
@@ -68,9 +66,6 @@ ServerCliArgs parse_server_args(int argc, char *argv[]) {
         } else if (arg == "--queue-capacity") {
             const auto val = std::stoull(std::string(require_value(arg)));
             parsed.config.queue_cap = static_cast<std::size_t>(val);
-        } else if (arg == "--inline-threshold") {
-            const auto val = std::stoull(std::string(require_value(arg)));
-            parsed.config.io_inline_threshold = static_cast<std::size_t>(val);
         } else if (arg == "--io-cpus") {
             parsed.config.io_cpus = runtime::affinity::parse_cpu_list(require_value(arg));
         } else if (arg == "--worker-cpus") {

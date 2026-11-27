@@ -3,6 +3,7 @@ export module service.workspace_cache;
 export import :lru;
 
 import std;
+import rpc.payload;
 import ide.protocol;
 
 export namespace service {
@@ -53,8 +54,8 @@ class WorkspaceCache {
                       std::uint64_t expected_epoch) {
         if (!payload)
             return {};
-        const std::size_t approx_bytes = estimate_dir_bytes(rel_path, *payload);
-        return dirs_.put(rel_path, std::move(payload), approx_bytes, expected_epoch);
+        const std::size_t bytes = 64 + rel_path.size() + sizeof(std::string) + payload->size();
+        return dirs_.put(rel_path, std::move(payload), bytes, expected_epoch);
     }
 
     // ---- 文件内容缓存（workspace_read_file，缓存完整 ReadFileResponse） ----
@@ -71,19 +72,15 @@ class WorkspaceCache {
                         std::uint64_t expected_epoch) {
         if (!response || response->content.size() > max_per_file_bytes_)
             return {};
-        const std::size_t approx_bytes = estimate_file_bytes(rel_path, *response);
-        return files_.put(rel_path, std::move(response), approx_bytes, expected_epoch);
+        const std::size_t bytes =
+            64 + rel_path.size() + sizeof(ReadFileResponse) + response->content.size();
+        return files_.put(rel_path, std::move(response), bytes, expected_epoch);
     }
 
-    // workspace_write_file 成功落盘后调用：若大小在上限内则直接更新缓存，否则失效旧条目。
+    // workspace_write_file 成功落盘后调用：先推进代数失效旧条目，若大小在上限内则写入新快照。
     void put_file_after_write(std::string_view rel_path,
                               std::shared_ptr<const ReadFileResponse> response) {
-        if (!response || response->content.size() > max_per_file_bytes_) {
-            files_.invalidate(rel_path);
-            return;
-        }
-        const std::size_t approx_bytes = estimate_file_bytes(rel_path, *response);
-        files_.put(rel_path, std::move(response), approx_bytes, std::nullopt);
+        put_file(rel_path, std::move(response), files_.invalidate(rel_path));
     }
 
     // ---- 失效与淘汰接口（供 inotify 事件、unwatch、write_file 调用） ----
@@ -125,38 +122,18 @@ class WorkspaceCache {
         files_.set_evict_callback(std::move(cb));
     }
 
-    void clear_dirs() noexcept {
-        dirs_.clear();
-    }
-
-    void clear_files() noexcept {
-        files_.clear();
-    }
-
+    void clear_dirs() noexcept { dirs_.clear(); }
+    void clear_files() noexcept { files_.clear(); }
     void clear() noexcept {
         dirs_.clear();
         files_.clear();
     }
 
-    [[nodiscard]] std::size_t dir_cache_size() const noexcept {
-        return dirs_.size();
-    }
-
-    [[nodiscard]] std::size_t file_cache_size() const noexcept {
-        return files_.size();
-    }
+    [[nodiscard]] std::size_t dir_cache_size() const noexcept { return dirs_.size(); }
+    [[nodiscard]] std::size_t file_cache_size() const noexcept { return files_.size(); }
 
   private:
-    [[nodiscard]] static std::size_t
-    estimate_dir_bytes(std::string_view rel_path, const std::string &payload) noexcept {
-        return 64 + rel_path.size() + sizeof(std::string) + payload.size();
-    }
-
-    [[nodiscard]] static std::size_t
-    estimate_file_bytes(std::string_view rel_path, const ReadFileResponse &response) noexcept {
-        return 64 + rel_path.size() + sizeof(ReadFileResponse) + response.content.size();
-    }
-
+    friend class WorkspaceHotCache;
     const std::size_t max_per_file_bytes_;
     detail::ShardedLruCache<std::string> dirs_;
     detail::ShardedLruCache<ReadFileResponse> files_;
@@ -167,5 +144,61 @@ class WorkspaceCache {
     static WorkspaceCache instance{};
     return instance;
 }
+
+// 每 I/O 线程独立的直映热表：仅接纳二次命中的真热点，命中时零原子借用 Pin 免除引用计数乒乓。
+class WorkspaceHotCache {
+    template <class T, std::size_t N> struct Table {
+        struct Entry {
+            std::size_t hash{};
+            std::string_view key{};
+            detail::CacheHandle<T> pin{};
+        };
+        std::array<Entry, N> slots{};
+
+        detail::CacheHandle<T> get(detail::ShardedLruCache<T> &cache, std::string_view path,
+                                   std::vector<PayloadPin> &deferred, auto bytes_of) {
+            const auto h = detail::TransparentStringHash{}(path);
+            auto &e = slots[h & (N - 1)];
+            if (e.hash == h && e.pin) {
+                if (e.pin.active()) {
+                    if (e.key == path)
+                        return e.pin.borrow();
+                } else {
+                    deferred.push_back(std::move(e.pin));
+                    e = {};
+                }
+            }
+            std::string_view pinned_key;
+            bool was_hot = false;
+            auto pin = cache.get_hashed(path, h, nullptr, &pinned_key, &was_hot);
+            if (!pin || !was_hot || bytes_of(*pin) > 64 * 1024 || (e.pin && e.pin.active()))
+                return pin;
+            if (e.pin)
+                deferred.push_back(std::move(e.pin));
+            e = {h, pinned_key, std::move(pin)};
+            return e.pin.borrow();
+        }
+    };
+
+  public:
+    WorkspaceHotCache() { deferred_.reserve(32); }
+
+    WorkspaceCache::DirHandle get_dir(WorkspaceCache &cache, std::string_view path) {
+        return dirs_.get(cache.dirs_, path, deferred_, [](const auto &s) { return s.size(); });
+    }
+    WorkspaceCache::FileHandle get_file(WorkspaceCache &cache, std::string_view path) {
+        return files_.get(cache.files_, path, deferred_,
+                          [](const auto &f) { return f.content.size(); });
+    }
+    void end_batch() noexcept {
+        if (!deferred_.empty())
+            deferred_.clear();
+    }
+
+  private:
+    Table<std::string, 512> dirs_;
+    Table<ReadFileResponse, 128> files_;
+    std::vector<PayloadPin> deferred_;
+};
 
 } // namespace service

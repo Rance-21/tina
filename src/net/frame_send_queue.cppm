@@ -26,6 +26,12 @@ class FrameSendQueue {
         return queued_bytes_;
     }
 
+    // 当轮 writev 未排空（EAGAIN）时，将滞留帧上的临时借用 Pin 升级为独立持有。
+    void promote_borrowed() noexcept {
+        for (std::size_t cur = head_; cur != tail_; ++cur)
+            slots_[cur & mask_].payload_owner.promote_borrowed();
+    }
+
     template <typename F>
         requires std::same_as<std::remove_cvref_t<F>, Frame>
     bool enqueue(F &&frame, std::size_t max_bytes = std::numeric_limits<std::size_t>::max()) {

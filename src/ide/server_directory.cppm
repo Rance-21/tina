@@ -104,7 +104,7 @@ void handle_workspace_list_projects(Frame &frame) {
     encode_workspace_list_projects_into(projects, frame.payload);
 }
 
-void handle_workspace_list_dir(Frame &frame, std::string *watched_dir = nullptr) {
+void handle_workspace_list_dir(Frame &frame) {
     auto path = decode_workspace_list_dir_view(frame.payload);
     if (!path) {
         frame.status = Status::invalid_argument;
@@ -128,8 +128,6 @@ void handle_workspace_list_dir(Frame &frame, std::string *watched_dir = nullptr)
     auto &cache = service::global_workspace_cache();
     std::uint64_t epoch;
     if (auto cached = cache.get_dir(rel_path, &epoch)) {
-        if (watched_dir)
-            watched_dir->assign(rel_path);
         frame.status = Status::ok;
         encode_workspace_list_dir(frame, std::move(cached));
         return;
@@ -149,8 +147,6 @@ void handle_workspace_list_dir(Frame &frame, std::string *watched_dir = nullptr)
         return;
     }
 
-    if (watched_dir)
-        watched_dir->assign(rel_path);
     frame.status = Status::ok;
     if (auto pin = cache.put_dir(rel_path, encoded, epoch))
         encode_workspace_list_dir(frame, std::move(pin));
@@ -158,7 +154,7 @@ void handle_workspace_list_dir(Frame &frame, std::string *watched_dir = nullptr)
         encode_workspace_list_dir(frame, std::move(encoded));
 }
 
-void handle_workspace_close_dir(Frame &frame, std::string &unwatched_dir) {
+void handle_workspace_close_dir(Frame &frame) {
     bool canonical_u16 = false;
     auto req_path = decode_workspace_close_dir_view(frame.payload, &canonical_u16);
     if (!req_path) {
@@ -175,9 +171,8 @@ void handle_workspace_close_dir(Frame &frame, std::string &unwatched_dir) {
     }
 
     frame.status = Status::ok;
-    unwatched_dir.assign(*req_path);
     if (!canonical_u16)
-        encode_workspace_close_dir_into(unwatched_dir, frame.payload);
+        encode_workspace_close_dir_into(std::string(*req_path), frame.payload);
 }
 
 } // namespace server

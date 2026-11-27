@@ -24,7 +24,7 @@ export namespace service {
 // - 即使文件所属目录从未调用过 workspace_list_dir，只要文件被 workspace_read_file 缓存，
 //   也能独立获得 inotify 失效保护；
 // - 挂载在某个 I/O 线程的 EventLoop 上接收 epoll 可读通知，供多个 Worker 线程并发注册/注销文件。
-class FileWatcher : public std::enable_shared_from_this<FileWatcher> {
+class FileWatcher {
     using Paths =
         std::unordered_map<std::string, int, detail::TransparentStringHash, std::equal_to<>>;
     // 每个 fd 有独立的 wd 命名空间。冷文件的 add_watch / rm_watch 可以由不同
@@ -60,7 +60,11 @@ class FileWatcher : public std::enable_shared_from_this<FileWatcher> {
     }
 
   public:
-    explicit FileWatcher(WorkspaceCache *cache = &global_workspace_cache()) : cache_(cache) {
+    explicit FileWatcher(WorkspaceCache *cache = &global_workspace_cache()) : cache_(cache) {}
+
+    ~FileWatcher() {
+        if (cache_)
+            cache_->set_file_evict_callback({});
     }
 
     FileWatcher(const FileWatcher &) = delete;
@@ -71,7 +75,6 @@ class FileWatcher : public std::enable_shared_from_this<FileWatcher> {
         if (watches_.front().fd != Watches::unstarted)
             return;
         loop_ = &loop;
-        auto weak = weak_from_this();
         for (auto &w : watches_) {
             std::lock_guard lock(w.mutex);
             w.fd = ::inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
@@ -80,20 +83,15 @@ class FileWatcher : public std::enable_shared_from_this<FileWatcher> {
                 continue;
             }
             try {
-                loop.add_event(w.fd, net::EpollInterest::read, [weak, &w](net::EpollEvent event) {
-                    if (auto self = weak.lock())
-                        self->on_event(w, event);
-                });
+                loop.add_event(w.fd, net::EpollInterest::read,
+                               [this, &w](net::EpollEvent event) { on_event(w, event); });
             } catch (...) {
                 ::close(std::exchange(w.fd, Watches::disabled));
             }
         }
-        if (cache_) {
-            cache_->set_file_evict_callback([weak](std::string_view path) {
-                if (auto self = weak.lock())
-                    self->unwatch_if_uncached(path);
-            });
-        }
+        if (cache_)
+            cache_->set_file_evict_callback(
+                [this](std::string_view path) { unwatch_if_uncached(path); });
     }
 
     void stop() noexcept {
@@ -319,13 +317,9 @@ class FileWatcher : public std::enable_shared_from_this<FileWatcher> {
 };
 
 // 进程级全局 FileWatcher 实例（由主服务端挂载至 I/O 线程 EventLoop 驱动事件）。
-[[nodiscard]] inline const std::shared_ptr<FileWatcher> &global_file_watcher_shared() {
-    static const auto instance = std::make_shared<FileWatcher>();
-    return instance;
-}
-
 [[nodiscard]] inline FileWatcher &global_file_watcher() {
-    return *global_file_watcher_shared();
+    static FileWatcher instance{};
+    return instance;
 }
 
 } // namespace service

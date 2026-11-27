@@ -106,6 +106,7 @@ class Connection {
     // 使用 ::writev() 将 output_ 队列中的“17B 帧头 + Payload”聚集写入内核 Socket 发送缓冲区。
     void flush_output() {
         output_.write(socket_);
+        output_.promote_borrowed();
     }
 
   private:
@@ -183,33 +184,44 @@ class IoConnections {
             loop_.modify_event(conn.fd(), conn.interests());
     }
 
-    // Worker 回包、PTY 与目录事件都在 socket 回调之外送达，要立即尝试写。
-    // 只有 Worker 响应对应已占用的名额。广播保留原帧，让各订阅者共享同一份正文。
-    bool send_async_frame(Connection &conn, Frame &frame, bool broadcast = false) {
-        if (frame.kind == Kind::response) {
-            if (conn.pending_ == 0) {
-                close(conn.fd());
-                return false;
-            }
-            --conn.pending_;
+    bool flush_async(Connection &conn, bool had_output) noexcept {
+        try {
+            conn.flush_output();
+            // 当前 ONESHOT 仍然有效。只有新增/消除写积压或排空最后一次
+            // 回包才需要动作；socket 就绪回调则每次都要重新武装。
+            if (conn.finished() || conn.wants_write() != had_output)
+                rearm_or_close(conn);
+            return true;
+        } catch (...) {
+            close(conn.fd());
+            return false;
         }
+    }
+
+    // PTY 与目录变更事件都在 socket 回调之外送达，要立即尝试写；广播保留原帧共享正文。
+    bool send_async_frame(Connection &conn, Frame &frame, bool broadcast = false) {
         const bool had_output = conn.wants_write();
         try {
             if (broadcast)
                 frame.share_payload();
-            const bool queued =
-                broadcast ? conn.output_.enqueue(std::as_const(frame), Connection::max_output)
-                          : conn.output_.enqueue(frame, Connection::max_output);
-            if (queued) {
-                conn.flush_output();
-                // 当前 ONESHOT 仍然有效。只有新增/消除写积压或排空最后一次
-                // 回包才需要动作；socket 就绪回调则每次都要重新武装。
-                if (conn.finished() || conn.wants_write() != had_output)
-                    rearm_or_close(conn);
-                return true;
-            }
+            if (broadcast ? conn.output_.enqueue(std::as_const(frame), Connection::max_output)
+                          : conn.output_.enqueue(frame, Connection::max_output))
+                return flush_async(conn, had_output);
         } catch (...) {
-            // 编码、writev 或重新武装失败都终止这条连接。
+        }
+        close(conn.fd());
+        return false;
+    }
+
+    // Worker 批量回包先入队并核销在途名额，同连接连续响应合并为单次 writev 系统调用。
+    bool enqueue_worker_response(Connection &conn, Frame &response) {
+        if (conn.pending_ != 0) {
+            --conn.pending_;
+            try {
+                if (conn.enqueue_inline_response(response))
+                    return true;
+            } catch (...) {
+            }
         }
         close(conn.fd());
         return false;

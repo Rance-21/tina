@@ -150,23 +150,11 @@ void DirWatcher::schedule_refresh(int wd) {
         } catch (...) {
             ctx->event_frame.reset();
         }
-
-        if (auto self = ctx->weak_watcher.lock()) {
-            auto complete_lambda = [ctx]() noexcept {
-                if (auto watcher = ctx->weak_watcher.lock()) {
-                    watcher->complete_refresh(ctx);
-                } else {
-                    delete ctx;
-                }
-            };
-            static_assert(sizeof(complete_lambda) <= 24 && alignof(decltype(complete_lambda)) <= 8 &&
-                          std::is_nothrow_move_constructible_v<decltype(complete_lambda)>,
-                          "DirWatcher completion task must fit in std::move_only_function 24B SBO");
-
-            self->loop_.post_task(std::move(complete_lambda));
-            return;
+        try {
+            ctx->watcher.loop_.post_task([ctx]() noexcept { ctx->watcher.complete_refresh(ctx); });
+        } catch (...) {
+            delete ctx;
         }
-        delete ctx;
     };
     static_assert(sizeof(worker_lambda) <= 24 && alignof(decltype(worker_lambda)) <= 8 &&
                   std::is_nothrow_move_constructible_v<decltype(worker_lambda)>,

@@ -29,9 +29,6 @@ struct ServerConfig {
     // 默认 8 * 4 * 128 = 4096 总容量。
     std::size_t queue_cap{128};
 
-    // EventLoop 内联处理 Cache Hit 的最大响应阈值（固定 32 KiB）。
-    std::size_t io_inline_threshold{32 * 1024};
-
     // 是否启用 CPU 拓扑校验与绑核（默认开启；绑核失败明确报错）。
     bool enable_cpu_affinity{true};
 

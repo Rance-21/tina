@@ -14,6 +14,7 @@ class EventLoop {
   public:
     using Task = std::move_only_function<void()>;
     using Handler = std::move_only_function<void(EpollEvent)>;
+    using WakeHandler = std::move_only_function<void() noexcept>;
 
     EventLoop() {
         // 其他线程（如 Worker 或主线程）向 wake_fd_ 写入计数后，
@@ -75,6 +76,20 @@ class EventLoop {
         epoll_.remove(fd);
     }
 
+    // 在所属 I/O 线程注册无锁完成队列排空回调。
+    void set_wake_handler(WakeHandler fn) noexcept { on_wake_ = std::move(fn); }
+
+    void wakeup() noexcept {
+        const std::uint64_t value = 1;
+        for (ssize_t n; (n = ::write(wake_fd_, &value, sizeof(value))) != sizeof(value);) {
+            if (n < 0 && errno == EINTR)
+                continue;
+            if (n < 0 && errno == EAGAIN)
+                return;
+            std::terminate();
+        }
+    }
+
     // 跨线程投递任务到本 I/O 线程执行；队列从空变非空时通过 wake_fd_ 唤醒 I/O 线程。
     void post_task(Task task) {
         if (!task)
@@ -85,6 +100,7 @@ class EventLoop {
             std::lock_guard lock(mutex_);
             empty = tasks_.empty();
             tasks_.push_back(std::move(task));
+            has_tasks_.store(true, std::memory_order_release);
         }
 
         if (empty)
@@ -93,17 +109,22 @@ class EventLoop {
 
     // I/O 线程主事件循环。
     // 分支逻辑：
-    //   1. 若就绪 fd 是 wake_fd_：读空 eventfd 计数器，批量执行跨线程队列 tasks_ 中的任务。
+    //   1. 若就绪 fd 是 wake_fd_：读空 eventfd 计数器，排空无锁完成栈与跨线程任务队列。
     //   2. 若就绪 fd 是普通 Socket/timerfd：查找对应回调并执行；若回调抛异常则注销该 fd
     //   防止反复触发。
     void run() {
         std::vector<Task> pending; // 两个队列交换容量，整批任务在锁外执行。
         pending.reserve(64);
         while (!stopping_) {
-            for (const auto event : epoll_.wait()) {
+            const auto events = epoll_.wait(-1);
+
+            for (const auto event : events) {
                 if (event.fd == wake_fd_) {
                     drain_wakeup();
-                    run_pending_tasks(pending);
+                    if (on_wake_)
+                        on_wake_();
+                    if (has_tasks_.load(std::memory_order_acquire))
+                        run_pending_tasks(pending);
                     continue;
                 }
 
@@ -135,7 +156,9 @@ class EventLoop {
             }
         }
 
-        // 退出循环前排空最后一批已入队的跨线程任务。
+        // 退出循环前排空最后一批已入队的跨线程任务与无锁完成队列。
+        if (on_wake_)
+            on_wake_();
         run_pending_tasks(pending);
     }
 
@@ -145,44 +168,15 @@ class EventLoop {
     }
 
   private:
-    void wakeup() noexcept {
-        std::uint64_t value = 1;
-
-        while (true) {
-            ssize_t n = ::write(wake_fd_, &value, sizeof(value));
-
-            if (n == sizeof(value))
-                return;
-
-            // 连接中断，再试一次
-            if (n < 0 && errno == EINTR)
-                continue;
-
-            // 计数器已满，说明 eventfd 已经可读。
-            if (n < 0 && errno == EAGAIN)
-                return;
-
-            std::terminate();
-        }
-    }
-
     // 普通 eventfd 一次成功读取就会将计数归零。随后交换任务队列，
     // 在交换之后投递的第一项仍会唤醒下一轮，无需再读一次 EAGAIN。
     void drain_wakeup() noexcept {
         std::uint64_t value;
-
-        while (true) {
-            ssize_t n = ::read(wake_fd_, &value, sizeof(value));
-
-            if (n == sizeof(value))
-                return;
-
+        for (ssize_t n; (n = ::read(wake_fd_, &value, sizeof(value))) != sizeof(value);) {
             if (n < 0 && errno == EINTR)
                 continue;
-
             if (n < 0 && errno == EAGAIN)
                 return;
-
             std::terminate();
         }
     }
@@ -191,6 +185,7 @@ class EventLoop {
         {
             std::lock_guard lock(mutex_);
             pending.swap(tasks_);
+            has_tasks_.store(false, std::memory_order_relaxed);
         }
 
         // 不持有队列锁执行任务。
@@ -214,11 +209,13 @@ class EventLoop {
     // 只有 run() 所在线程操作回调表。rehash 保持节点地址稳定。
     std::unordered_map<int, Handler> event_handlers_;
     Handler *running_slot_{nullptr};
+    WakeHandler on_wake_;
 
-    // 多生产者、单消费者任务队列（独占缓存行，避免 Worker 投递写锁失效 I/O 线程私有状态）。
-    alignas(64) std::mutex mutex_;
+    // 多生产者、单消费者控制任务队列（独占缓存行，热路径通过 has_tasks_ 免锁跳过）。
+    alignas(64) std::atomic<bool> has_tasks_{false};
+    std::mutex mutex_;
 
-    // Worker 线程 post 到此
+    // 控制面线程 post 到此
     std::vector<Task> tasks_;
 };
 

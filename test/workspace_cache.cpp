@@ -149,7 +149,7 @@ int test_file_watcher_independent() {
         .max_file_bytes = 1024 * 1024,
         .max_per_file_bytes = 4096,
     });
-    auto watcher = std::make_shared<service::FileWatcher>(&cache);
+    service::FileWatcher watcher(&cache);
 
     net::EventLoop loop;
     std::jthread loop_thread([&loop] {
@@ -157,19 +157,19 @@ int test_file_watcher_independent() {
     });
 
     auto started = std::make_shared<std::latch>(1);
-    loop.post_task([&loop, watcher, started] {
-        watcher->start(loop);
+    loop.post_task([&loop, &watcher, started] {
+        watcher.start(loop);
         started->count_down();
     });
     started->wait();
 
     // 写入缓存并独立注册 FileWatcher（未经过 DirWatcher）。
     const auto ep = cache.file_epoch("unlisted/solo.txt");
-    watcher->watch_file("unlisted/solo.txt", file_path.string());
+    watcher.watch_file("unlisted/solo.txt", file_path.string());
     cache.put_file("unlisted/solo.txt",
                    std::make_shared<ReadFileResponse>(ReadFileResponse{2, 1, "v1"}), ep);
     CHECK(cache.get_file("unlisted/solo.txt") != nullptr);
-    CHECK(watcher->watched_count() == 1);
+    CHECK(watcher.watched_count() == 1);
 
     // 原地修改文件内容，等待 FileWatcher 通过 epoll 收到 IN_MODIFY 并失效文件缓存。
     {
@@ -193,14 +193,14 @@ int test_file_watcher_independent() {
             ofs << "x";
         }
         const auto fep = cache.file_epoch(rel);
-        watcher->watch_file(rel, p.string());
+        watcher.watch_file(rel, p.string());
         cache.put_file(rel, std::make_shared<ReadFileResponse>(ReadFileResponse{1, 1, "x"}), fep);
     }
-    CHECK(watcher->watched_count() <= 33);
+    CHECK(watcher.watched_count() <= 33);
 
     auto stopped = std::make_shared<std::latch>(1);
-    loop.post_task([&loop, watcher, stopped] {
-        watcher->stop();
+    loop.post_task([&loop, &watcher, stopped] {
+        watcher.stop();
         loop.stop();
         stopped->count_down();
     });
@@ -251,12 +251,11 @@ int test_handlers_skip_filesystem_on_hit() {
         .status = Status::ok,
         .payload = encode_list_dir_req("demo"),
     };
-    std::string watched_dir;
-    server::handle_workspace_list_dir(list_frame, &watched_dir);
+    server::handle_workspace_list_dir(list_frame);
     CHECK(list_frame.status == Status::ok);
-    CHECK(watched_dir == "demo");
     CHECK(list_frame.payload.empty());
-    CHECK(!list_frame.external_payload.empty());
+    CHECK(list_frame.external_payload.size() >= 6 &&
+          list_frame.external_payload.substr(2, 4) == "demo");
     CHECK(list_frame.payload_owner.get() ==
           service::global_workspace_cache().get_dir("demo").get());
 
@@ -288,10 +287,8 @@ int test_handlers_skip_filesystem_on_hit() {
         .status = Status::ok,
         .payload = encode_list_dir_req("demo"),
     };
-    watched_dir.clear();
-    server::handle_workspace_list_dir(list_hit, &watched_dir);
+    server::handle_workspace_list_dir(list_hit);
     CHECK(list_hit.status == Status::ok);
-    CHECK(watched_dir == "demo");
     CHECK(list_hit.payload.empty());
     CHECK(list_hit.external_payload.data() == list_frame.external_payload.data());
     CHECK(list_hit.external_payload == list_frame.external_payload);

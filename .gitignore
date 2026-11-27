@@ -48,3 +48,7 @@ benchmark/sweep_20261119_223619
 benchmark/sweep_20261119_224106
 benchmark/sweep_20261119_224333
 benchmark/sweep_20261120_170630
+
+cpu.data
+perf.data
+perf.data.old

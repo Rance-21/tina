@@ -83,7 +83,7 @@ export class PayloadReader {
 };
 
 // 发送队列只需要保活一段只读内存。缓存借用一个固定槽位；只有最后一个读者遇到
-// retired 才进入回收慢路径。正常发送完成只减一次计数，跨线程移动不触碰计数。
+// retired 才进入回收慢路径。线程局部热表命中时可通过最低位标记零原子借用。
 export class PayloadPin {
   public:
     struct Slot {
@@ -94,44 +94,56 @@ export class PayloadPin {
     };
 
     PayloadPin() = default;
-    // 调用者已在 shard 锁下取得一个计数；新发布的槽位直接从 1 开始。
-    explicit PayloadPin(Slot &slot) noexcept : slot_(&slot) {
+    explicit PayloadPin(Slot &slot) noexcept : raw_(reinterpret_cast<std::uintptr_t>(&slot)) {
     }
-    PayloadPin(PayloadPin &&other) noexcept : slot_(std::exchange(other.slot_, nullptr)) {
+    PayloadPin(PayloadPin &&other) noexcept : raw_(std::exchange(other.raw_, 0)) {
     }
     PayloadPin &operator=(PayloadPin &&other) noexcept {
         PayloadPin moved(std::move(other));
-        std::swap(slot_, moved.slot_);
+        std::swap(raw_, moved.raw_);
         return *this;
     }
     ~PayloadPin() {
-        if (slot_ && slot_->state.fetch_sub(1, std::memory_order_acq_rel) == Slot::retired + 1)
-            slot_->reclaim(*slot_);
+        if (raw_ && !(raw_ & 1)) {
+            auto *s = reinterpret_cast<Slot *>(raw_);
+            if (s->state.fetch_sub(1, std::memory_order_acq_rel) == Slot::retired + 1)
+                s->reclaim(*s);
+        }
     }
 
-    explicit operator bool() const noexcept {
-        return slot_ != nullptr;
-    }
-    bool operator==(std::nullptr_t) const noexcept {
-        return !slot_;
-    }
-    const void *get() const noexcept {
-        return slot_ ? slot_->value.get() : nullptr;
+    explicit operator bool() const noexcept { return raw_ != 0; }
+    bool operator==(std::nullptr_t) const noexcept { return !raw_; }
+    const void *get() const noexcept { return raw_ ? slot()->value.get() : nullptr; }
+    bool active() const noexcept {
+        return raw_ && !(slot()->state.load(std::memory_order_acquire) & Slot::retired);
     }
 
-    // 仅显式复制一帧（例如广播）才增加一个读者。原 Pin 保证此时槽位不可能复用。
+    // 同一 I/O 线程在当轮同步 writev 期间临时借用，免除跨核引用计数增减。
+    PayloadPin borrow() const noexcept {
+        PayloadPin p;
+        p.raw_ = raw_ ? (raw_ | 1) : 0;
+        return p;
+    }
+    void promote_borrowed() noexcept {
+        if (raw_ & 1) {
+            raw_ &= ~std::uintptr_t{1};
+            reinterpret_cast<Slot *>(raw_)->state.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
     PayloadPin clone() const noexcept {
-        if (!slot_)
+        auto *s = slot();
+        if (!s)
             return {};
-        slot_->state.fetch_add(1, std::memory_order_relaxed);
-        return PayloadPin(*slot_);
+        s->state.fetch_add(1, std::memory_order_relaxed);
+        return PayloadPin(*s);
     }
     std::weak_ptr<const void> weak() const noexcept {
-        return slot_ ? std::weak_ptr<const void>(slot_->value) : std::weak_ptr<const void>{};
+        return raw_ ? slot()->value : std::weak_ptr<const void>{};
     }
 
   private:
-    Slot *slot_{};
+    Slot *slot() const noexcept { return reinterpret_cast<Slot *>(raw_ & ~std::uintptr_t{1}); }
+    std::uintptr_t raw_{};
 };
 
 // 一帧外置正文只有一种所有者。缓存切片移动 Pin；广播正文和未被缓存接纳的
@@ -157,6 +169,10 @@ export class PayloadOwner {
 
     void reset() noexcept {
         owner_.emplace<0>();
+    }
+    void promote_borrowed() noexcept {
+        if (auto *pin = std::get_if<PayloadPin>(&owner_))
+            pin->promote_borrowed();
     }
     const void *get() const noexcept {
         if (auto *pin = std::get_if<PayloadPin>(&owner_))

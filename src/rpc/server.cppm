@@ -228,12 +228,15 @@ void run_server(std::string_view port, runtime::ServerConfig config = {}) {
     runtime::WorkerPool workers(config);
 
     for (std::size_t i = 0; i < config.io_threads_cnt(); ++i) {
-        slots.emplace_back(io_pool.loop_at(i), workers, kv, i, config.io_inline_threshold);
+        slots.emplace_back(io_pool.loop_at(i), workers, kv, i);
     }
 
     run_on_io_threads(slots, [](detail::IoSlotContext &slot) {
+        slot.loop.set_wake_handler([&slot]() noexcept {
+            detail::drain_worker_responses(slot);
+        });
         try {
-            slot.watcher->start();
+            slot.watcher.start();
             if (slot.io_id == 0)
                 service::global_file_watcher().start(slot.loop);
         } catch (...) {
@@ -248,7 +251,6 @@ void run_server(std::string_view port, runtime::ServerConfig config = {}) {
         " (normal=" + std::to_string(config.non_blk_worker_cnt) +
         ", blocking=" + std::to_string(config.blocking_workers()) + ")" +
         format_cpu_list(config.worker_cpus) + " | lane_cap=" + std::to_string(config.queue_cap) +
-        " | inline_bytes=" + std::to_string(config.io_inline_threshold) +
         " | affinity=" + (config.enable_cpu_affinity ? "on" : "off"));
 
     accept_until_stop(accept_epoll, *listener, signals, slots);
@@ -261,7 +263,7 @@ void run_server(std::string_view port, runtime::ServerConfig config = {}) {
     // 阶段 2：在各 I/O 线程冻结读取与新的 Worker 提交；屏障保证先前 accept 任务已就绪。
     std::vector<std::future<void>> drained(slots.size());
     run_on_io_threads(slots, [&drained](detail::IoSlotContext &slot) {
-        slot.watcher->stop();
+        slot.watcher.stop();
 
         if (slot.io_id == 0)
             service::global_file_watcher().stop();

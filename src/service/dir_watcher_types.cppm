@@ -26,7 +26,7 @@ export namespace service {
 // 再通过 post_task 回到所属 I/O 线程向订阅该目录的存活 Connection 推送 Kind::event 帧；
 // 文件内容与属性监听则由独立的 FileWatcher 负责。
 // 单个 IO 线程对应单个 inotify-fd，因此无须加锁
-class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
+class DirWatcher {
   public:
     DirWatcher(net::EventLoop &loop, rpc::IoConnections &connections, runtime::WorkerPool &workers,
                std::size_t io_id, WorkspaceCache *cache = &global_workspace_cache(),
@@ -51,12 +51,9 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
         if (inotify_fd_ < 0)
             return;
 
-        std::weak_ptr<DirWatcher> weak = shared_from_this();
         try {
-            loop_.add_event(inotify_fd_, net::EpollInterest::read, [weak](net::EpollEvent event) {
-                if (auto self = weak.lock())
-                    self->on_event(event);
-            });
+            loop_.add_event(inotify_fd_, net::EpollInterest::read,
+                            [this](net::EpollEvent event) { on_event(event); });
         } catch (...) {
             ::close(inotify_fd_);
             inotify_fd_ = -1;
@@ -88,10 +85,11 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
             return;
         }
 
-        // 两个索引指向同一条监听。哈希表扩容不会移动节点，重复订阅只查一次路径。
+        // 两个索引指向同一条监听。哈希表扩容不会移动节点，已订阅连接先比较世代号避免脏写节点。
         if (auto it = by_path_.find(rel_path); it != by_path_.end()) {
-            auto &[wd, entry] = *it->second;
-            entry.subscribers[conn.fd()] = conn.id();
+            auto &subs = it->second->second.subscribers;
+            if (auto sit = subs.find(conn.fd()); sit == subs.end() || sit->second != conn.id())
+                subs[conn.fd()] = conn.id();
             return;
         }
 
@@ -153,19 +151,9 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
         bool dirty{false};
     };
 
-    // ============================================================================
-    // 目录异步重扫任务上下文（单 I/O 线程内池化复用，使两层跨线程闭包收敛为 8B 单指针）
-    // ============================================================================
-    // 设计原理：
-    //   1. 原先 schedule_refresh 向 WorkerPool 投递的闭包捕获 [weak, wd, rel_path]（56B），
-    //      Worker 向 EventLoop 回投的闭包捕获 [weak, wd, event_frame]（120B），均超出
-    //      std::move_only_function 的 24B SBO 上限，每次目录变更都会触发 2 次跨线程 new/delete；
-    //   2. 将上述字段集中到 RefreshTaskContext 中，使两层 Lambda 均只捕获 `[ctx]() noexcept`（8B <= 24B），
-    //      100% 命中 SBO 本地存储，实现目录重扫投递与回传零闭包堆分配；
-    //   3. 借出（schedule_refresh）与归还（complete_refresh）均发生在同一所属 I/O 线程，
-    //      通过 refresh_pool_ 单线程无锁复用节点及 rel_path 字符串容量。
+    // 目录异步重扫任务上下文（单 I/O 线程内池化复用，两层跨线程闭包收敛为 8B 单指针命中 24B SBO）。
     struct RefreshTaskContext {
-        std::weak_ptr<DirWatcher> weak_watcher{};
+        DirWatcher &watcher;
         int wd{-1};
         std::string rel_path{};
         std::optional<Frame> event_frame{};
@@ -174,42 +162,32 @@ class DirWatcher : public std::enable_shared_from_this<DirWatcher> {
     static constexpr std::size_t kMaxPooledRefreshTasks = 64;
 
     [[nodiscard]] RefreshTaskContext *acquire_refresh_ctx(int wd, std::string_view rel_path) {
-        RefreshTaskContext *ctx = nullptr;
+        std::unique_ptr<RefreshTaskContext> ctx;
         if (!refresh_pool_.empty()) {
-            ctx = refresh_pool_.back().release();
+            ctx = std::move(refresh_pool_.back());
             refresh_pool_.pop_back();
         } else {
-            ctx = new RefreshTaskContext{};
+            ctx = std::make_unique<RefreshTaskContext>(*this);
         }
-
-        ctx->weak_watcher = shared_from_this();
         ctx->wd = wd;
         ctx->rel_path.assign(rel_path);
         ctx->event_frame.reset();
-        return ctx;
+        return ctx.release();
     }
 
     void release_refresh_ctx(RefreshTaskContext *ctx) noexcept {
-        if (ctx == nullptr)
+        std::unique_ptr<RefreshTaskContext> guard(ctx);
+        if (!guard || refresh_pool_.size() >= kMaxPooledRefreshTasks)
             return;
-
-        ctx->weak_watcher.reset();
-        ctx->wd = -1;
-        if (ctx->rel_path.capacity() > 1024) {
-            ctx->rel_path = {};
-        } else {
-            ctx->rel_path.clear();
+        guard->event_frame.reset();
+        if (guard->rel_path.capacity() > 1024)
+            std::string{}.swap(guard->rel_path);
+        else
+            guard->rel_path.clear();
+        try {
+            refresh_pool_.push_back(std::move(guard));
+        } catch (...) {
         }
-        ctx->event_frame.reset();
-
-        if (refresh_pool_.size() < kMaxPooledRefreshTasks) {
-            try {
-                refresh_pool_.emplace_back(ctx);
-                return;
-            } catch (...) {
-            }
-        }
-        delete ctx;
     }
 
     static inline std::string join_rel_path(std::string_view dir, std::string_view name) {

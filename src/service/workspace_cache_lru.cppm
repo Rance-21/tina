@@ -25,97 +25,115 @@ inline bool is_same_or_under(std::string_view path, std::string_view dir) noexce
 template <class T> class CacheHandle : public PayloadPin {
   public:
     using PayloadPin::PayloadPin;
-    const T *get() const noexcept {
-        return static_cast<const T *>(PayloadPin::get());
-    }
-    const T *operator->() const noexcept {
-        return get();
-    }
-    const T &operator*() const noexcept {
-        return *get();
-    }
+    explicit CacheHandle(PayloadPin pin) noexcept : PayloadPin(std::move(pin)) {}
+    CacheHandle borrow() const noexcept { return CacheHandle(PayloadPin::borrow()); }
+    const T *get() const noexcept { return static_cast<const T *>(PayloadPin::get()); }
+    const T *operator->() const noexcept { return get(); }
+    const T &operator*() const noexcept { return *get(); }
 };
 
-// 每个 shard 启动时一次性分配槽位和哈希桶。桶链处理完整哈希冲突，最后按完整
-// 路径判等。LRU 与空闲链直接链接槽位，命中、换位和复用均不分配节点。
+// 每个 shard 启动时一次性分配槽位和哈希桶。读路径无锁遍历原子桶链，先对槽位加 Pin
+// 再核对哈希与键名；槽位双缓存行物理分离可变 Pin/CLOCK 状态与只读查找元数据。
 template <class T> class ShardedLruCache {
-    static constexpr unsigned shard_bits = 4;
-    static constexpr std::size_t shard_count = 1u << shard_bits;
+    static constexpr std::size_t max_shards = 32;
     struct Shard;
+
     struct alignas(64) Slot : PayloadPin::Slot {
-        Shard *shard;
-        std::string key;
-        std::size_t hash{}, bytes{};
-        Slot *chain{}, *newer{}, *older{};
+        Slot *free_next{};
+        std::atomic<std::uint8_t> used{};
+
+        alignas(64) std::atomic<std::size_t> hash{};
+        std::atomic<Slot *> chain{};
+        Shard *shard{};
+        std::size_t bytes{};
+        std::string key{};
     };
+    static_assert(sizeof(Slot) == 2 * 64, "Cache Slot must span exactly two cache lines");
 
     struct alignas(64) Shard {
-        std::mutex mutex;
-        std::size_t bytes{};
-        Slot *head{}, *tail{}, *free{};
-        std::vector<Slot> slots;
         // 同一个桶内的键共用失效代数。单键驱逐只会撤销本桶的在途填充，
         // 不会令整个分片其余路径刚完成的读盘作废。批量失效也覆盖尚未入表的键。
         struct Bucket {
-            Slot *first{};
-            std::uint64_t epoch{};
+            std::atomic<Slot *> first{};
+            std::atomic<std::uint64_t> epoch{};
         };
+        std::vector<Slot> slots;
         std::vector<Bucket> buckets;
+
+        alignas(64) std::mutex mutex;
+        std::size_t bytes{}, clock_hand{};
+        Slot *free{};
         // 通常由缓存独占；仅当缓存先于外借 Handle 销毁时，由最后一个槽位释放本分片。
         std::shared_ptr<Shard> orphan;
 
-        explicit Shard(std::size_t n) : slots(n), buckets(std::bit_ceil(n)) {
+        explicit Shard(std::size_t n) : slots(n), buckets(std::bit_ceil(n * 2)) {
             for (auto &s : slots) {
                 s.shard = this;
                 s.reclaim = release_retired;
-                s.chain = free;
+                s.free_next = free;
                 free = &s;
             }
         }
 
-        Bucket &bucket(std::size_t hash) {
-            return buckets[(hash >> shard_bits) & (buckets.size() - 1)];
+        Bucket &bucket(std::size_t hash) noexcept {
+            return buckets[(hash >> 6) & (buckets.size() - 1)];
         }
-        Slot *find(std::string_view key, std::size_t hash) {
-            for (auto *s = bucket(hash).first; s; s = s->chain)
-                if (s->hash == hash && s->key == key)
+
+        Slot *find_locked(std::string_view key, std::size_t hash) noexcept {
+            for (auto *s = bucket(hash).first.load(std::memory_order_relaxed); s;
+                 s = s->chain.load(std::memory_order_relaxed))
+                if (s->hash.load(std::memory_order_relaxed) == hash && s->key == key)
                     return s;
             return nullptr;
         }
 
-        void unlink_lru(Slot &s) {
-            if (s.newer)
-                s.newer->older = s.older;
-            else
-                head = s.older;
-            if (s.older)
-                s.older->newer = s.newer;
-            else
-                tail = s.newer;
-        }
-        void push_front(Slot &s) {
-            s.newer = nullptr;
-            s.older = head;
-            if (head)
-                head->newer = &s;
-            else
-                tail = &s;
-            head = &s;
-        }
-
-        // 必须持锁。GET 的查表和加 Pin 在同一把锁下完成，摘掉索引后再置 retired，
-        // fetch_or 的旧值精确裁决由失效方还是最后一个读者回收，同一条目只会归还一次。
-        bool retire(Slot &s) {
-            Slot **link = &bucket(s.hash).first;
-            while (*link != &s)
-                link = &(*link)->chain;
-            *link = s.chain;
-            unlink_lru(s);
-            return s.state.fetch_or(Slot::retired, std::memory_order_acq_rel) == 0;
+        static CacheHandle<T> try_pin(Slot &s, std::string_view key, std::size_t h,
+                                      std::string_view *pinned_key, bool *was_hot) noexcept {
+            if (s.hash.load(std::memory_order_relaxed) != h)
+                return {};
+            auto st = s.state.load(std::memory_order_relaxed);
+            while (!(st & Slot::retired)) {
+                if (s.state.compare_exchange_weak(st, st + 1, std::memory_order_acquire,
+                                                  std::memory_order_relaxed)) {
+                    CacheHandle<T> handle(s);
+                    if (s.hash.load(std::memory_order_relaxed) != h || s.key != key)
+                        return {};
+                    const bool hot = s.used.load(std::memory_order_relaxed) != 0;
+                    if (!hot)
+                        s.used.store(1, std::memory_order_relaxed);
+                    if (pinned_key)
+                        *pinned_key = s.key;
+                    if (was_hot)
+                        *was_hot = hot;
+                    return handle;
+                }
+            }
+            return {};
         }
 
-        // 批量失效/淘汰的线程已独占这些槽位；借用 chain 串起待清理项。先在锁外
-        // 释放正文和路径，再一次加锁还回空闲链。被 Pin 的旧版本在实际回收前仍占预算。
+        bool retire(Slot &s) noexcept {
+            auto &b = bucket(s.hash.load(std::memory_order_relaxed));
+            auto *link = &b.first;
+            while (link->load(std::memory_order_relaxed) != &s)
+                link = &link->load(std::memory_order_relaxed)->chain;
+            link->store(s.chain.load(std::memory_order_relaxed), std::memory_order_relaxed);
+            b.epoch.fetch_add(1, std::memory_order_release);
+            if (s.state.fetch_or(Slot::retired, std::memory_order_acq_rel) != 0)
+                return false;
+            bytes -= std::exchange(s.bytes, 0);
+            return true;
+        }
+
+        static void invoke_evict(const std::function<void(std::string_view)> *cb,
+                                 std::string_view key) noexcept {
+            if (cb && *cb) {
+                try {
+                    (*cb)(key);
+                } catch (...) {
+                }
+            }
+        }
+
         static void
         release_list(Slot *list,
                      const std::function<void(std::string_view)> *notify = nullptr) noexcept {
@@ -124,22 +142,20 @@ template <class T> class ShardedLruCache {
             Shard &shard = *list->shard;
             Slot *last = nullptr;
             std::size_t released = 0;
-            for (auto *s = list; s; s = s->chain) {
-                if (notify && *notify) {
-                    try {
-                        (*notify)(s->key);
-                    } catch (...) {
-                    }
-                }
+            for (auto *s = list; s; s = s->free_next) {
+                invoke_evict(notify, s->key);
                 s->value.reset();
-                std::string{}.swap(s->key);
-                released += s->bytes;
+                if (s->key.capacity() > 256)
+                    std::string{}.swap(s->key);
+                else
+                    s->key.clear();
+                released += std::exchange(s->bytes, 0);
                 last = s;
             }
             std::shared_ptr<Shard> keep;
             std::lock_guard lock(shard.mutex);
             shard.bytes -= released;
-            last->chain = shard.free;
+            last->free_next = shard.free;
             shard.free = list;
             if (shard.bytes == 0)
                 keep = std::move(shard.orphan);
@@ -147,7 +163,7 @@ template <class T> class ShardedLruCache {
 
         static void release_retired(PayloadPin::Slot &base) noexcept {
             auto &s = static_cast<Slot &>(base);
-            s.chain = nullptr;
+            s.free_next = nullptr;
             release_list(&s);
         }
     };
@@ -156,12 +172,14 @@ template <class T> class ShardedLruCache {
     using Handle = CacheHandle<T>;
     using EvictCallback = std::function<void(std::string_view)>;
 
-    ShardedLruCache(std::size_t entries, std::size_t bytes)
-        : limit_(std::max<std::size_t>(1, bytes / shard_count + (bytes % shard_count != 0))) {
-        const auto n =
-            std::max<std::size_t>(1, entries / shard_count + (entries % shard_count != 0));
-        for (auto &s : shards_)
-            s = std::make_shared<Shard>(n);
+    ShardedLruCache(std::size_t entries, std::size_t bytes) {
+        const auto shard_cnt = std::bit_floor(std::clamp<std::size_t>(entries / 4, 1, max_shards));
+        shard_mask_ = shard_cnt - 1;
+        limit_ = std::max<std::size_t>(1, (bytes + shard_cnt - 1) / shard_cnt);
+        const auto n = std::max<std::size_t>(1, (entries + shard_cnt - 1) / shard_cnt);
+        shards_.reserve(shard_cnt);
+        for (std::size_t i = 0; i < shard_cnt; ++i)
+            shards_.push_back(std::make_shared<Shard>(n));
     }
     ~ShardedLruCache() {
         clear();
@@ -175,130 +193,122 @@ template <class T> class ShardedLruCache {
     ShardedLruCache &operator=(const ShardedLruCache &) = delete;
 
     // 在启动屏障内安装。回调执行时没有持有 shard 锁，可重新查询缓存。
-    void set_evict_callback(EvictCallback cb) {
-        on_evict_ = std::move(cb);
+    void set_evict_callback(EvictCallback cb) { on_evict_ = std::move(cb); }
+
+    Handle get_hashed(std::string_view key, std::size_t h, std::uint64_t *miss_epoch = nullptr,
+                      std::string_view *pinned_key = nullptr, bool *was_hot = nullptr) {
+        auto &shard = *shards_[h & shard_mask_];
+        auto &b = shard.bucket(h);
+        const auto ep = b.epoch.load(std::memory_order_acquire);
+        for (auto *s = b.first.load(std::memory_order_acquire); s;
+             s = s->chain.load(std::memory_order_acquire)) {
+            if (auto pin = Shard::try_pin(*s, key, h, pinned_key, was_hot))
+                return pin;
+            if (b.epoch.load(std::memory_order_acquire) != ep)
+                break;
+        }
+        if (b.epoch.load(std::memory_order_acquire) != ep) {
+            std::lock_guard lock(shard.mutex);
+            if (auto *s = shard.find_locked(key, h))
+                return Shard::try_pin(*s, key, h, pinned_key, was_hot);
+            if (miss_epoch)
+                *miss_epoch = b.epoch.load(std::memory_order_relaxed);
+            return {};
+        }
+        if (miss_epoch)
+            *miss_epoch = ep;
+        return {};
     }
 
     Handle get(std::string_view key, std::uint64_t *miss_epoch = nullptr) {
-        const auto h = TransparentStringHash{}(key);
-        auto &shard = *shards_[h & (shard_count - 1)];
-        std::lock_guard lock(shard.mutex);
-        auto *s = shard.find(key, h);
-        if (!s) {
-            if (miss_epoch)
-                *miss_epoch = shard.bucket(h).epoch;
-            return {};
-        }
-        if (shard.head != s) {
-            shard.unlink_lru(*s);
-            shard.push_front(*s);
-        }
-        s->state.fetch_add(1, std::memory_order_relaxed);
-        return Handle(*s);
+        return get_hashed(key, TransparentStringHash{}(key), miss_epoch);
     }
 
-    std::uint64_t epoch(std::string_view key) const {
+    std::uint64_t epoch(std::string_view key) const noexcept {
         const auto h = TransparentStringHash{}(key);
-        auto &s = *shards_[h & (shard_count - 1)];
-        std::lock_guard lock(s.mutex);
-        return s.bucket(h).epoch;
+        return shards_[h & shard_mask_]->bucket(h).epoch.load(std::memory_order_acquire);
     }
 
-    // key 与不可变正文在锁外准备。容量不足先从 LRU 尾估算可回收量；全被占用时
-    // 直接放弃。第二遍只摘真正需要的 victim，不会为了插入失败而逐出无关条目。
+    // CLOCK 二次机会淘汰：键名在锁外准备，锁内全程 noexcept 复用空闲或无读者槽位。
     Handle put(std::string_view key, std::shared_ptr<const T> value, std::size_t bytes,
-               std::optional<std::uint64_t> expected) {
-        bytes = std::max<std::size_t>(1, bytes); // 非空槽位至少占一字节预算。
-        if (!value || key.empty() || bytes > limit_) {
-            if (!expected)
-                invalidate(key);
+               std::uint64_t expected) {
+        bytes = std::max<std::size_t>(1, bytes);
+        if (!value || key.empty() || bytes > limit_)
             return {};
-        }
         std::string name;
         try {
             name.assign(key);
         } catch (const std::bad_alloc &) {
-            if (!expected)
-                invalidate(key);
             return {};
         }
         const auto h = TransparentStringHash{}(key);
-        auto &shard = *shards_[h & (shard_count - 1)];
-        Slot *evicted = nullptr, *old = nullptr;
-        Slot **evicted_tail = &evicted;
+        auto &shard = *shards_[h & shard_mask_];
+        Slot *evicted = nullptr, *old = nullptr, **evicted_tail = &evicted;
         std::shared_ptr<const void> incoming = std::move(value);
-        Handle result;
         bool notify_reused = false;
+        Handle result;
         {
             std::lock_guard lock(shard.mutex);
-            if (expected && *expected != shard.bucket(h).epoch)
+            auto &b = shard.bucket(h);
+            if (expected != b.epoch.load(std::memory_order_relaxed))
                 return {};
-            if (!expected)
-                ++shard.bucket(h).epoch;
-            if (auto *s = shard.find(key, h); s && shard.retire(*s))
-                old = s;
-            // old 无读者时可以原槽换入。其旧正文由 incoming 带出锁外析构。
-            std::size_t remaining = shard.bytes - (old ? old->bytes : 0);
-            bool has_slot = old || shard.free;
-            auto *victim = shard.tail;
-            while ((!has_slot || remaining > limit_ - bytes) && victim) {
-                if (victim->state.load(std::memory_order_relaxed) == 0) {
-                    remaining -= victim->bytes;
-                    has_slot = true;
-                }
-                victim = victim->newer;
+            if (auto *s = shard.find_locked(key, h); s && shard.retire(*s))
+                (old = s)->free_next = nullptr;
+
+            std::size_t avail = limit_ - bytes;
+            bool can_fit = (old || shard.free) && shard.bytes <= avail;
+            for (auto &s : shard.slots) {
+                if (can_fit)
+                    break;
+                if (s.state.load(std::memory_order_relaxed) == 0)
+                    can_fit = (avail += s.bytes) >= shard.bytes;
             }
-            if (has_slot && remaining <= limit_ - bytes) {
-                auto *dest = old;
-                if (!dest && shard.free) {
-                    dest = shard.free;
-                    shard.free = dest->chain;
-                }
-                // 持锁时零读者槽位无法再取得 Pin。即使另一个 Pin 此时释放，
-                // 第二遍始终按当下的 LRU 顺序挑选，并在已够用时停下。
-                remaining = shard.bytes - (old ? old->bytes : 0);
-                for (auto *s = shard.tail; !dest || remaining > limit_ - bytes;) {
-                    auto *next = s->newer;
-                    if (s->state.load(std::memory_order_relaxed) == 0) {
-                        shard.retire(*s);
-                        remaining -= s->bytes;
-                        if (!dest) {
-                            dest = s;
-                            notify_reused = true;
-                        } else {
-                            // 这些无读者的槽位已摘下，锁外析构后才会重新进入空闲链。
-                            shard.bytes -= s->bytes;
-                            s->bytes = 0;
-                            // 沿 LRU 尾到头追加，让锁外的回调也保持淘汰顺序。
-                            *evicted_tail = s;
-                            evicted_tail = &s->chain;
-                        }
+
+            if (can_fit) {
+                const std::size_t n = shard.slots.size();
+                for (std::size_t step = 0;
+                     ((!old && !shard.free && !evicted) || shard.bytes > limit_ - bytes) &&
+                     step < n * 2;
+                     ++step) {
+                    auto &s = shard.slots[shard.clock_hand];
+                    shard.clock_hand = (shard.clock_hand + 1 == n) ? 0 : shard.clock_hand + 1;
+                    if (s.state.load(std::memory_order_relaxed) != 0)
+                        continue;
+                    if (step < n && s.used.load(std::memory_order_relaxed)) {
+                        s.used.store(0, std::memory_order_relaxed);
+                        continue;
                     }
-                    s = next;
+                    if (shard.retire(s)) {
+                        *evicted_tail = &s;
+                        evicted_tail = &s.free_next;
+                    }
                 }
                 *evicted_tail = nullptr;
-                if (old || notify_reused)
-                    shard.bytes -= dest->bytes;
-                old = nullptr;
-                dest->value.swap(incoming);
-                dest->key.swap(name);
-                dest->hash = h;
-                dest->bytes = bytes;
-                shard.bytes += bytes;
-                dest->chain = shard.bucket(h).first;
-                shard.bucket(h).first = dest;
-                shard.push_front(*dest);
-                dest->state.store(1, std::memory_order_relaxed);
-                result = Handle(*dest);
-            } else if (old)
-                old->chain = nullptr;
-        }
-        if (notify_reused && on_evict_) {
-            try {
-                on_evict_(name);
-            } catch (...) {
+
+                if (shard.bytes <= limit_ - bytes && (old || shard.free || evicted)) {
+                    Slot *dest = std::exchange(old, nullptr);
+                    if (!dest && shard.free)
+                        dest = std::exchange(shard.free, shard.free->free_next);
+                    else if (!dest) {
+                        dest = std::exchange(evicted, evicted->free_next);
+                        notify_reused = true;
+                    }
+                    dest->value.swap(incoming);
+                    dest->key.swap(name);
+                    dest->bytes = bytes;
+                    shard.bytes += bytes;
+                    dest->hash.store(h, std::memory_order_relaxed);
+                    dest->used.store(0, std::memory_order_relaxed);
+                    dest->chain.store(b.first.load(std::memory_order_relaxed),
+                                      std::memory_order_relaxed);
+                    dest->state.store(1, std::memory_order_release);
+                    b.first.store(dest, std::memory_order_release);
+                    result = Handle(*dest);
+                }
             }
         }
+        if (notify_reused)
+            Shard::invoke_evict(&on_evict_, name);
         Shard::release_list(evicted, &on_evict_);
         Shard::release_list(old);
         return result;
@@ -308,11 +318,11 @@ template <class T> class ShardedLruCache {
     // 使已经取得该监听、尚未提交的旧读盘也无法在 rm_watch 之后发布。
     bool invalidate_if_absent(std::string_view key) {
         const auto h = TransparentStringHash{}(key);
-        auto &s = *shards_[h & (shard_count - 1)];
+        auto &s = *shards_[h & shard_mask_];
         std::lock_guard lock(s.mutex);
-        if (s.find(key, h))
+        if (s.find_locked(key, h))
             return false;
-        ++s.bucket(h).epoch;
+        s.bucket(h).epoch.fetch_add(1, std::memory_order_release);
         return true;
     }
 
@@ -320,16 +330,19 @@ template <class T> class ShardedLruCache {
         if (key.empty())
             return 0;
         const auto h = TransparentStringHash{}(key);
-        auto &s = *shards_[h & (shard_count - 1)];
+        auto &s = *shards_[h & shard_mask_];
         Slot *dead = nullptr;
         std::uint64_t epoch;
         {
             std::lock_guard lock(s.mutex);
-            epoch = ++s.bucket(h).epoch;
-            if (auto *slot = s.find(key, h); slot && s.retire(*slot)) {
-                slot->chain = nullptr;
-                dead = slot;
+            auto &b = s.bucket(h);
+            if (auto *slot = s.find_locked(key, h)) {
+                if (s.retire(*slot))
+                    (dead = slot)->free_next = nullptr;
+            } else {
+                b.epoch.fetch_add(1, std::memory_order_release);
             }
+            epoch = b.epoch.load(std::memory_order_relaxed);
         }
         Shard::release_list(dead);
         return epoch;
@@ -341,11 +354,11 @@ template <class T> class ShardedLruCache {
             {
                 std::lock_guard lock(shard->mutex);
                 for (auto &bucket : shard->buckets)
-                    ++bucket.epoch;
+                    bucket.epoch.fetch_add(1, std::memory_order_release);
                 for (auto &s : shard->slots) {
                     if (!(s.state.load(std::memory_order_relaxed) & Slot::retired) &&
                         matches(std::string_view(s.key)) && shard->retire(s)) {
-                        s.chain = dead;
+                        s.free_next = dead;
                         dead = &s;
                     }
                 }
@@ -354,23 +367,22 @@ template <class T> class ShardedLruCache {
         }
     }
     void clear() noexcept {
-        invalidate_matching([](auto) {
-            return true;
-        });
+        invalidate_matching([](auto) { return true; });
     }
     std::size_t size() const noexcept {
         std::size_t total = 0;
-        for (auto &s : shards_) {
+        for (const auto &s : shards_) {
             std::lock_guard lock(s->mutex);
-            for (auto *slot = s->head; slot; slot = slot->older)
-                ++total;
+            for (const auto &slot : s->slots)
+                if (!(slot.state.load(std::memory_order_relaxed) & Slot::retired))
+                    ++total;
         }
         return total;
     }
 
   private:
-    std::size_t limit_;
-    std::array<std::shared_ptr<Shard>, shard_count> shards_;
+    std::size_t limit_{}, shard_mask_{};
+    std::vector<std::shared_ptr<Shard>> shards_;
     EvictCallback on_evict_;
 };
 
