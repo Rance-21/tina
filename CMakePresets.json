@@ -3,12 +3,22 @@
     "configurePresets": [
         {
             "name": "default",
-            "displayName": "Clang · C++23",
+            "displayName": "Clang · C++23 (Debug)",
             "generator": "Ninja",
             "binaryDir": "${sourceDir}/build",
             "cacheVariables": {
                 "CMAKE_CXX_COMPILER": "/usr/bin/clang++",
                 "CMAKE_BUILD_TYPE": "Debug"
+            }
+        },
+        {
+            "name": "release",
+            "displayName": "Clang · C++23 (RelWithDebInfo -O3 + ThinLTO + native)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build-release",
+            "cacheVariables": {
+                "CMAKE_CXX_COMPILER": "/usr/bin/clang++",
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo"
             }
         }
     ],
@@ -16,6 +26,10 @@
         {
             "name": "default",
             "configurePreset": "default"
+        },
+        {
+            "name": "release",
+            "configurePreset": "release"
         }
     ]
 }

@@ -25,6 +25,38 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    find_program(TINA_LLVM_AR NAMES llvm-ar)
+    find_program(TINA_LLVM_RANLIB NAMES llvm-ranlib)
+    if(NOT CMAKE_CXX_COMPILER_AR AND TINA_LLVM_AR)
+        set(CMAKE_CXX_COMPILER_AR "${TINA_LLVM_AR}" CACHE FILEPATH "LLVM archiver" FORCE)
+    endif()
+    if(NOT CMAKE_CXX_COMPILER_RANLIB AND TINA_LLVM_RANLIB)
+        set(CMAKE_CXX_COMPILER_RANLIB "${TINA_LLVM_RANLIB}" CACHE FILEPATH "LLVM ranlib" FORCE)
+    endif()
+endif()
+
+# 顶层统一设置编译与链接参数，确保 CMake 自动合成的 C++23 std 模块库（__cmake_cxx_std_23）
+# 与业务目标共享完全一致的指令集（-march=native）与 ThinLTO 配置。
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(
+        -Wall -Wextra -Wpedantic -ffunction-sections -fdata-sections
+        $<$<NOT:$<CONFIG:Debug>>:-O3>
+        $<$<NOT:$<CONFIG:Debug>>:-march=native>
+        $<$<AND:$<CXX_COMPILER_ID:Clang>,$<NOT:$<CONFIG:Debug>>>:-flto=thin>
+    )
+    add_link_options(
+        -Wl,--gc-sections
+        $<$<NOT:$<CONFIG:Debug>>:-O3>
+        $<$<NOT:$<CONFIG:Debug>>:-march=native>
+        $<$<AND:$<CXX_COMPILER_ID:Clang>,$<NOT:$<CONFIG:Debug>>>:-flto=thin>
+    )
+endif()
+
+set(TINA_RUNTIME_OUTPUT_DIR
+    "$<$<CONFIG:Debug>:${CMAKE_CURRENT_BINARY_DIR}>$<$<NOT:$<CONFIG:Debug>>:${PROJECT_SOURCE_DIR}>"
+)
+
 # Linux 线程与日志库。
 find_package(Threads REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
@@ -53,24 +85,11 @@ foreach(MODULE_FILE IN LISTS APP_MODULE_CANDIDATES)
     endif()
 endforeach()
 
-function(tina_configure_binary target)
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(${target} PRIVATE
-            -Wall -Wextra -Wpedantic -ffunction-sections -fdata-sections
-            $<$<AND:$<CXX_COMPILER_ID:Clang>,$<NOT:$<CONFIG:Debug>>>:-flto=thin>
-        )
-        target_link_options(${target} PRIVATE
-            -Wl,--gc-sections
-            $<$<AND:$<CXX_COMPILER_ID:Clang>,$<NOT:$<CONFIG:Debug>>>:-flto=thin>
-        )
-    endif()
-endfunction()
-
 add_executable(${PROJECT_NAME} ${APP_SOURCES})
-tina_configure_binary(${PROJECT_NAME})
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
     CXX_MODULE_STD ON
+    RUNTIME_OUTPUT_DIRECTORY "${TINA_RUNTIME_OUTPUT_DIR}"
 )
 
 if(APP_MODULES)
@@ -84,10 +103,6 @@ endif()
 target_link_libraries(${PROJECT_NAME} PRIVATE
     Threads::Threads
     spdlog::spdlog
-)
-
-set_target_properties(${PROJECT_NAME} PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY "$<1:${PROJECT_SOURCE_DIR}>"
 )
 
 
@@ -230,11 +245,10 @@ set_tests_properties(workerpool_integration PROPERTIES
 
 # 压测程序 tina_bench。
 add_executable(tina_bench benchmark/main.cpp)
-tina_configure_binary(tina_bench)
 
 set_target_properties(tina_bench PROPERTIES
     CXX_MODULE_STD ON
-    RUNTIME_OUTPUT_DIRECTORY "$<1:${PROJECT_SOURCE_DIR}>"
+    RUNTIME_OUTPUT_DIRECTORY "${TINA_RUNTIME_OUTPUT_DIR}"
 )
 
 target_sources(tina_bench
