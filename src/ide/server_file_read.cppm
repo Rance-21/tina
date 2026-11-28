@@ -55,7 +55,8 @@ void handle_workspace_read_file(Frame &frame) {
     const std::string_view rel_path(c_path, req->path.size());
     auto &cache = service::global_workspace_cache();
     std::uint64_t epoch;
-    if (auto cached = cache.get_file(rel_path, &epoch)) {
+    bool admit = true;
+    if (auto cached = cache.get_file(rel_path, &epoch, &admit)) {
         const auto slice = slice_file_content(*cached, offset, max_bytes);
         frame.kind = Kind::response;
         frame.status = Status::ok;
@@ -88,7 +89,7 @@ void handle_workspace_read_file(Frame &frame) {
 
         const auto file_size = static_cast<std::uint64_t>(st_before.st_size);
         const auto rev_before = service::file::file_revision(st_before);
-        bool cacheable = try_full_file && file_size <= cache.max_cacheable_file_bytes();
+        bool cacheable = try_full_file && admit && file_size <= cache.max_cacheable_file_bytes();
         if (cacheable && !complete) {
             try {
                 complete = std::make_shared<ReadFileResponse>();
@@ -170,6 +171,8 @@ void handle_workspace_read_file(Frame &frame) {
         if (cacheable) {
             const auto slice = slice_file_content(*complete, offset, max_bytes);
             encode_workspace_read_file(frame, std::move(complete), slice);
+        } else {
+            frame.clear_external_payload();
         }
         return;
     }

@@ -379,3 +379,17 @@
 [2026-11-28 17:14:57.316] [info] [tid 83602] tina listening on port 3499 | io=4{0,2,4,8} | workers=8{16,17,18,19,20,21,22,23} | lane_cap=128 | affinity=on
 [2026-11-28 17:15:32.890] [info] [tid 83602] shutdown: stop accepting connections
 [2026-11-28 17:15:32.927] [info] [tid 83602] shutdown: completed
+[2026-11-28 17:43:11.730] [warning] [tid 94207] topology: IO CPU 0 has online SMT sibling CPU 1 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-28 17:43:11.730] [warning] [tid 94207] topology: IO CPU 2 has online SMT sibling CPU 3 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-28 17:43:11.730] [warning] [tid 94207] topology: IO CPU 4 has online SMT sibling CPU 5 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-28 17:43:11.730] [warning] [tid 94207] topology: IO CPU 8 has online SMT sibling CPU 9 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-28 17:43:11.733] [info] [tid 94207] tina listening on port 3499 | io=4{0,2,4,8} | workers=8{16,17,18,19,20,21,22,23} | lane_cap=128 | affinity=on
+[2026-11-28 17:43:47.095] [info] [tid 94207] shutdown: stop accepting connections
+[2026-11-28 17:43:47.129] [info] [tid 94207] shutdown: completed
+[2026-11-28 17:44:28.633] [warning] [tid 94458] topology: IO CPU 0 has online SMT sibling CPU 1 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-28 17:44:28.633] [warning] [tid 94458] topology: IO CPU 2 has online SMT sibling CPU 3 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-28 17:44:28.633] [warning] [tid 94458] topology: IO CPU 4 has online SMT sibling CPU 5 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-28 17:44:28.633] [warning] [tid 94458] topology: IO CPU 8 has online SMT sibling CPU 9 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-28 17:44:28.636] [info] [tid 94458] tina listening on port 3499 | io=4{0,2,4,8} | workers=8{16,17,18,19,20,21,22,23} | lane_cap=128 | affinity=on
+[2026-11-28 17:45:03.878] [info] [tid 94458] shutdown: stop accepting connections
+[2026-11-28 17:45:03.905] [info] [tid 94458] shutdown: completed

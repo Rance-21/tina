@@ -54,3 +54,5 @@ perf.data
 perf.data.old
 io.data
 
+sched.data
+sched.data

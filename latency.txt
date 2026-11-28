@@ -1,309 +1,496 @@
- Performance counter stats for process id '50220':
+Warning:
+1 out of order events recorded.
 
-    90,274,422,967      cpu_core/BR_INST_RETIRED.ALL_BRANCHES/ #      5.9 %  tma_other_light_ops      (1.76%)
-                 0      cpu_core/INT_VEC_RETIRED.ADD_256/                                        (2.64%)
-    47,440,907,140      cpu_core/EXE_ACTIVITY.1_PORTS_UTIL/ #     15.8 %  tma_ports_utilization    (3.52%)
- 2,337,526,515,121      cpu_core/TOPDOWN.SLOTS/                                                 (3.52%)
-   429,675,396,526      cpu_core/topdown-retiring/                                              (3.52%)
-   747,742,985,088      cpu_core/topdown-mem-bound/                                             (3.52%)
-   183,940,017,584      cpu_core/topdown-bad-spec/                                              (3.52%)
-    55,000,623,867      cpu_core/topdown-heavy-ops/                                             (3.52%)
-   689,924,179,392      cpu_core/topdown-fe-bound/                                              (3.52%)
- 1,038,709,650,395      cpu_core/topdown-be-bound/                                              (3.52%)
-   148,465,835,229      cpu_core/EXE_ACTIVITY.BOUND_ON_LOADS/                                        (4.41%)
-     7,530,515,713      cpu_core/EXE_ACTIVITY.EXE_BOUND_0_PORTS/                                        (5.29%)
-   209,965,046,031      cpu_core/CYCLE_ACTIVITY.STALLS_TOTAL/                                        (6.18%)
-                 0      cpu_core/INT_VEC_RETIRED.VNNI_128/                                        (7.07%)
-   393,992,994,008      cpu_core/CPU_CLK_UNHALTED.THREAD/                                        (7.95%)
-     1,090,750,922      cpu_core/ARITH.DIV_ACTIVE/                                              (7.95%)
-                 0      cpu_core/UOPS_EXECUTED.X87/                                             (7.96%)
-                 0      cpu_core/INT_VEC_RETIRED.MUL_256/                                        (7.97%)
-    75,224,758,466      cpu_core/EXE_ACTIVITY.2_3_PORTS_UTIL/                                        (7.08%)
-                 0      cpu_core/FP_ARITH_INST_RETIRED.SCALAR/                                        (7.09%)
-   540,545,972,037      cpu_core/UOPS_EXECUTED.THREAD/                                          (7.08%)
-                 0      cpu_core/INT_VEC_RETIRED.ADD_128/                                        (7.08%)
-   180,336,732,343      cpu_core/MEM_UOP_RETIRED.ANY/                                           (7.09%)
-     8,502,618,184      cpu_core/RS.EMPTY_RESOURCE/                                             (7.09%)
-                 0      cpu_core/INT_VEC_RETIRED.VNNI_256/                                        (7.08%)
-    76,796,283,508      cpu_core/RESOURCE_STALLS.SCOREBOARD/                                        (7.09%)
-    47,639,805,742      cpu_core/INST_RETIRED.MACRO_FUSED/                                        (7.09%)
-                 0      cpu_core/FP_ARITH_INST_RETIRED.VECTOR/                                        (7.09%)
- 2,358,774,763,513      cpu_core/TOPDOWN.SLOTS/                                                 (2.65%)
-   607,458,079,658      cpu_core/UOPS_ISSUED.ANY/                                               (2.65%)
-   440,442,437,497      cpu_core/topdown-retiring/                                              (2.65%)
-    15,878,089,196      cpu_core/UOPS_RETIRED.MS,cmask=1/ #      2.2 %  tma_ms                   (2.65%)
-   185,592,254,951      cpu_core/topdown-bad-spec/                                              (2.65%)
-   393,126,649,154      cpu_core/CPU_CLK_UNHALTED.DISTRIBUTED/                                        (2.65%)
-   389,988,081,529      cpu_core/topdown-fetch-lat/                                             (2.65%)
-    18,123,374,335      cpu_core/IDQ.MS_CYCLES_ANY/                                             (2.65%)
-   457,985,144,006      cpu_core/UOPS_RETIRED.SLOTS/                                            (2.65%)
-     2,474,811,756      cpu_core/INT_MISC.UOP_DROPPING/                                         (2.65%)
-   700,621,169,674      cpu_core/topdown-fe-bound/                                              (2.65%)
- 1,030,398,348,088      cpu_core/topdown-be-bound/                                              (2.65%)
- 2,363,737,064,984      cpu_core/TOPDOWN.SLOTS/                                                 (0.89%)
-   607,797,237,052      cpu_core/UOPS_ISSUED.ANY/                                               (0.89%)
-   441,289,181,820      cpu_core/topdown-retiring/                                              (0.89%)
-     7,418,861,658      cpu_core/UOPS_RETIRED.MS,cmask=1,edge/ #      7.5 %  tma_ms_switches          (0.89%)
-   186,261,853,089      cpu_core/topdown-bad-spec/                                              (0.89%)
-   388,069,411,678      cpu_core/topdown-fetch-lat/                                             (0.89%)
-   395,151,078,464      cpu_core/CPU_CLK_UNHALTED.THREAD/                                        (0.89%)
-   458,219,673,336      cpu_core/UOPS_RETIRED.SLOTS/                                            (0.89%)
-   699,309,862,276      cpu_core/topdown-fe-bound/                                              (0.89%)
-     2,473,879,732      cpu_core/INT_MISC.UOP_DROPPING/                                         (0.89%)
- 1,039,823,660,574      cpu_core/topdown-be-bound/                                              (0.89%)
- 2,368,733,293,638      cpu_core/TOPDOWN.SLOTS/                                                 (0.89%)
-                 0      cpu_core/INT_VEC_RETIRED.ADD_256/ #      0.0 %  tma_int_operations       (0.89%)
-   457,848,207,732      cpu_core/topdown-retiring/                                              (0.89%)
-   186,649,699,041      cpu_core/topdown-bad-spec/                                              (0.89%)
-    55,734,900,960      cpu_core/topdown-heavy-ops/                                             (0.89%)
-                 0      cpu_core/INT_VEC_RETIRED.VNNI_128/                                        (0.89%)
-                 0      cpu_core/INT_VEC_RETIRED.MUL_256/                                        (0.89%)
-                 0      cpu_core/INT_VEC_RETIRED.ADD_128/                                        (0.89%)
-                 0      cpu_core/INT_VEC_RETIRED.VNNI_256/                                        (0.89%)
-   699,016,328,651      cpu_core/topdown-fe-bound/                                              (0.89%)
- 1,038,972,895,131      cpu_core/topdown-be-bound/                                              (0.89%)
- 2,371,168,731,764      cpu_core/TOPDOWN.SLOTS/                                                 (0.88%)
-   440,920,579,086      cpu_core/topdown-retiring/                                              (0.88%)
-   191,067,827,734      cpu_core/topdown-bad-spec/                                              (0.88%)
-     1,377,120,828      cpu_core/BR_MISP_RETIRED.ALL_BRANCHES/ #      1.2 %  tma_other_mispredicts    (0.88%)
-   181,769,124,608      cpu_core/topdown-br-mispredict/                                         (0.88%)
-        32,175,289      cpu_core/MACHINE_CLEARS.COUNT/                                          (0.88%)
-     2,482,076,096      cpu_core/INT_MISC.UOP_DROPPING/                                         (0.88%)
-   695,527,535,340      cpu_core/topdown-fe-bound/                                              (0.88%)
-     1,655,862,669      cpu_core/INT_MISC.CLEARS_COUNT/                                         (0.88%)
- 1,053,839,029,950      cpu_core/topdown-be-bound/                                              (0.88%)
- 2,376,021,517,249      cpu_core/TOPDOWN.SLOTS/                                                 (0.89%)
-   125,837,994,356      cpu_core/IDQ.MITE_CYCLES_ANY/    #     13.2 %  tma_mite                 (0.89%)
-   443,287,265,930      cpu_core/topdown-retiring/                                              (0.89%)
-   191,429,428,925      cpu_core/topdown-bad-spec/                                              (0.89%)
-   396,000,768,539      cpu_core/CPU_CLK_UNHALTED.DISTRIBUTED/                                        (0.89%)
-   396,725,060,156      cpu_core/topdown-fetch-lat/                                             (0.89%)
-     2,485,937,642      cpu_core/INT_MISC.UOP_DROPPING/                                         (0.89%)
-   707,787,837,066      cpu_core/topdown-fe-bound/                                              (0.89%)
-    20,999,533,694      cpu_core/IDQ.MITE_CYCLES_OK/                                            (0.89%)
- 1,040,373,429,235      cpu_core/topdown-be-bound/                                              (0.89%)
- 2,374,833,127,918      cpu_core/TOPDOWN.SLOTS/                                                 (0.88%)
-   450,018,347,642      cpu_core/topdown-retiring/                                              (0.88%)
-   189,271,447,129      cpu_core/topdown-bad-spec/                                              (0.88%)
-   403,759,838,282      cpu_core/topdown-fetch-lat/                                             (0.88%)
-   395,786,398,884      cpu_core/CPU_CLK_UNHALTED.DISTRIBUTED/                                        (0.88%)
-        27,527,593      cpu_core/LSD.CYCLES_ACTIVE/      #      0.0 %  tma_lsd                  (0.88%)
-        25,205,456      cpu_core/LSD.CYCLES_OK/                                                 (0.88%)
-   716,175,572,967      cpu_core/topdown-fe-bound/                                              (0.88%)
-     2,487,890,652      cpu_core/INT_MISC.UOP_DROPPING/                                         (0.88%)
- 1,040,390,235,224      cpu_core/topdown-be-bound/                                              (0.88%)
- 2,370,886,767,021      cpu_core/TOPDOWN.SLOTS/                                                 (0.88%)
-   445,047,377,983      cpu_core/topdown-retiring/                                              (0.88%)
-   184,158,106,328      cpu_core/topdown-bad-spec/                                              (0.88%)
-    53,682,676,335      cpu_core/topdown-heavy-ops/                                             (0.88%)
-                 0      cpu_core/FP_ARITH_INST_RETIRED.SCALAR/ #      0.0 %  tma_fp_arith             (0.88%)
-                 0      cpu_core/UOPS_EXECUTED.X87/                                             (0.88%)
-   539,203,261,238      cpu_core/UOPS_EXECUTED.THREAD/                                          (0.88%)
-   711,343,890,498      cpu_core/topdown-fe-bound/                                              (0.88%)
-                 0      cpu_core/FP_ARITH_INST_RETIRED.VECTOR/                                        (0.88%)
- 1,028,543,595,009      cpu_core/topdown-be-bound/                                              (0.88%)
- 2,370,066,922,231      cpu_core/TOPDOWN.SLOTS/                                                 (0.89%)
-   437,704,783,607      cpu_core/topdown-retiring/                                              (0.89%)
-   190,981,616,691      cpu_core/topdown-bad-spec/                                              (0.89%)
-   394,990,980,018      cpu_core/CPU_CLK_UNHALTED.DISTRIBUTED/                                        (0.89%)
-   393,640,329,476      cpu_core/topdown-fetch-lat/                                             (0.89%)
-    27,599,268,262      cpu_core/IDQ.DSB_CYCLES_ANY/     #      1.8 %  tma_dsb                  (0.89%)
-    13,477,883,058      cpu_core/IDQ.DSB_CYCLES_OK/                                             (0.89%)
-     2,484,019,914      cpu_core/INT_MISC.UOP_DROPPING/                                         (0.89%)
-   703,346,999,467      cpu_core/topdown-fe-bound/                                              (0.89%)
- 1,044,922,161,213      cpu_core/topdown-be-bound/                                              (0.89%)
- 2,368,366,034,197      cpu_core/TOPDOWN.SLOTS/                                                 (0.88%)
-   448,490,882,259      cpu_core/topdown-retiring/                                              (0.88%)
-    25,970,345,484      cpu_core/INT_MISC.CLEAR_RESTEER_CYCLES/ #      7.1 %  tma_branch_resteers      (0.88%)
-   186,025,294,754      cpu_core/topdown-bad-spec/                                              (0.88%)
-   393,078,932,582      cpu_core/topdown-fetch-lat/                                             (0.88%)
-   396,558,341,001      cpu_core/CPU_CLK_UNHALTED.THREAD/                                        (0.88%)
-     2,238,459,809      cpu_core/INT_MISC.UNKNOWN_BRANCH_CYCLES/                                        (0.88%)
-     2,485,151,367      cpu_core/INT_MISC.UOP_DROPPING/                                         (0.88%)
-   707,039,894,564      cpu_core/topdown-fe-bound/                                              (0.88%)
- 1,042,341,793,290      cpu_core/topdown-be-bound/                                              (0.88%)
- 2,375,433,765,852      cpu_core/TOPDOWN.SLOTS/                                                 (0.88%)
-   445,908,512,900      cpu_core/topdown-retiring/                                              (0.88%)
-   186,593,699,038      cpu_core/topdown-bad-spec/                                              (0.88%)
-        29,329,840      cpu_core/MACHINE_CLEARS.MEMORY_ORDERING/ #      0.0 %  tma_other_nukes          (0.88%)
-        32,225,145      cpu_core/MACHINE_CLEARS.COUNT/                                          (0.88%)
-   177,278,272,530      cpu_core/topdown-br-mispredict/                                         (0.88%)
-   716,929,325,706      cpu_core/topdown-fe-bound/                                              (0.88%)
-     2,486,352,952      cpu_core/INT_MISC.UOP_DROPPING/                                         (0.88%)
- 1,030,780,943,080      cpu_core/topdown-be-bound/                                              (0.88%)
- 2,383,675,804,558      cpu_core/TOPDOWN.SLOTS/                                                 (0.88%)
-     4,578,515,003      cpu_core/DECODE.LCP/             #      1.1 %  tma_lcp                  (0.88%)
-   447,787,682,484      cpu_core/topdown-retiring/                                              (0.88%)
-   189,951,953,462      cpu_core/topdown-bad-spec/                                              (0.88%)
-   398,911,108,999      cpu_core/topdown-fetch-lat/                                             (0.88%)
-   398,926,050,965      cpu_core/CPU_CLK_UNHALTED.THREAD/                                        (0.88%)
-     2,496,188,530      cpu_core/INT_MISC.UOP_DROPPING/                                         (0.88%)
-   713,433,617,894      cpu_core/topdown-fe-bound/                                              (0.88%)
- 1,040,627,761,409      cpu_core/topdown-be-bound/                                              (0.88%)
- 2,379,030,466,486      cpu_core/TOPDOWN.SLOTS/                                                 (0.88%)
-   450,793,289,520      cpu_core/topdown-retiring/                                              (0.88%)
-   186,894,537,927      cpu_core/topdown-bad-spec/                                              (0.88%)
-   401,442,110,730      cpu_core/topdown-fetch-lat/                                             (0.88%)
-   398,280,238,397      cpu_core/CPU_CLK_UNHALTED.THREAD/                                        (0.88%)
-   715,027,600,083      cpu_core/topdown-fe-bound/                                              (0.88%)
-     2,494,581,624      cpu_core/INT_MISC.UOP_DROPPING/                                         (0.88%)
-    17,163,927,438      cpu_core/ICACHE_TAG.STALLS/      #      4.3 %  tma_itlb_misses          (0.88%)
- 1,039,880,957,363      cpu_core/topdown-be-bound/                                              (0.88%)
- 2,383,126,133,447      cpu_core/TOPDOWN.SLOTS/                                                 (0.88%)
-    24,521,716,232      cpu_core/ICACHE_DATA.STALLS/     #      6.2 %  tma_icache_misses        (0.88%)
-   452,203,330,278      cpu_core/topdown-retiring/                                              (0.88%)
-   187,211,927,775      cpu_core/topdown-bad-spec/                                              (0.88%)
-   400,660,152,614      cpu_core/topdown-fetch-lat/                                             (0.88%)
-   398,680,109,655      cpu_core/CPU_CLK_UNHALTED.THREAD/                                        (0.88%)
-   723,837,343,877      cpu_core/topdown-fe-bound/                                              (0.88%)
-     2,494,902,412      cpu_core/INT_MISC.UOP_DROPPING/                                         (0.88%)
- 1,034,049,576,569      cpu_core/topdown-be-bound/                                              (0.88%)
- 2,385,273,271,357      cpu_core/TOPDOWN.SLOTS/                                                 (0.89%)
-   450,176,664,712      cpu_core/topdown-retiring/                                              (0.89%)
-   189,781,238,017      cpu_core/topdown-bad-spec/                                              (0.89%)
-   401,289,735,078      cpu_core/topdown-fetch-lat/                                             (0.89%)
-   398,707,328,757      cpu_core/CPU_CLK_UNHALTED.THREAD/                                        (0.89%)
-     2,491,218,132      cpu_core/INT_MISC.UOP_DROPPING/                                         (0.89%)
-   713,559,690,851      cpu_core/topdown-fe-bound/                                              (0.89%)
-    12,782,078,883      cpu_core/DSB2MITE_SWITCHES.PENALTY_CYCLES/ #      3.2 %  tma_dsb_switches         (0.89%)
- 1,043,519,117,200      cpu_core/topdown-be-bound/                                              (0.89%)
- 2,383,108,010,656      cpu_core/slots/                                                         (0.89%)
-   456,659,896,034      cpu_core/topdown-retiring/                                              (0.89%)
-                 0      cpu_core/CPU_CLK_UNHALTED.C02/   #     19.3 %  tma_serializing_operation  (0.89%)
-   730,524,026,102      cpu_core/topdown-mem-bound/                                             (0.89%)
-   185,097,503,471      cpu_core/topdown-bad-spec/                                              (0.89%)
-   398,727,404,485      cpu_core/CPU_CLK_UNHALTED.THREAD/                                        (0.89%)
-   723,752,097,660      cpu_core/topdown-fe-bound/                                              (0.89%)
-    77,028,421,356      cpu_core/RESOURCE_STALLS.SCOREBOARD/                                        (0.89%)
- 1,027,506,923,717      cpu_core/topdown-be-bound/                                              (0.89%)
- 2,385,080,070,149      cpu_core/TOPDOWN.SLOTS/                                                 (0.88%)
-    91,738,210,548      cpu_core/BR_INST_RETIRED.ALL_BRANCHES/ #      1.6 %  tma_non_fused_branches   (0.88%)
-   442,891,046,938      cpu_core/topdown-retiring/                                              (0.88%)
-   187,642,238,398      cpu_core/topdown-bad-spec/                                              (0.88%)
-    53,710,823,447      cpu_core/topdown-heavy-ops/                                             (0.88%)
-   705,661,538,144      cpu_core/topdown-fe-bound/                                              (0.88%)
-    47,792,482,304      cpu_core/INST_RETIRED.MACRO_FUSED/ #      1.8 %  tma_fused_instructions   (0.88%)
- 1,048,861,626,016      cpu_core/topdown-be-bound/                                              (0.88%)
- 2,380,412,913,415      cpu_core/slots/                                                         (0.89%)
-   453,779,209,180      cpu_core/topdown-retiring/                                              (0.89%)
-   736,307,138,722      cpu_core/topdown-mem-bound/                                             (0.89%)
-   187,284,189,218      cpu_core/topdown-bad-spec/                                              (0.89%)
-    24,033,392,657      cpu_core/MEMORY_ACTIVITY.STALLS_L3_MISS/ #      6.0 %  tma_l3_miss_bound      
-                                                         #     19.4 %  tma_l3_bound             (0.89%)
-   101,208,143,038      cpu_core/MEMORY_ACTIVITY.STALLS_L2_MISS/                                        (0.89%)
-   398,583,705,005      cpu_core/CPU_CLK_UNHALTED.THREAD/                                        (0.89%)
-   720,859,366,503      cpu_core/topdown-fe-bound/                                              (0.89%)
- 1,025,990,709,403      cpu_core/topdown-be-bound/                                              (0.89%)
- 2,379,754,807,211      cpu_core/slots/                                                         (0.88%)
-   110,501,080,754      cpu_core/MEMORY_ACTIVITY.STALLS_L1D_MISS/ #      2.4 %  tma_l2_bound             (0.88%)
-   444,048,034,689      cpu_core/topdown-retiring/                                              (0.88%)
-   749,633,872,252      cpu_core/topdown-mem-bound/                                             (0.88%)
-   187,237,244,500      cpu_core/topdown-bad-spec/                                              (0.88%)
-   100,930,278,462      cpu_core/MEMORY_ACTIVITY.STALLS_L2_MISS/                                        (0.88%)
-   397,973,093,772      cpu_core/CPU_CLK_UNHALTED.THREAD/                                        (0.88%)
-   711,650,309,420      cpu_core/topdown-fe-bound/                                              (0.88%)
- 1,041,335,305,968      cpu_core/topdown-be-bound/                                              (0.88%)
- 2,381,814,068,031      cpu_core/slots/                                                         (0.90%)
-   110,754,840,764      cpu_core/MEMORY_ACTIVITY.STALLS_L1D_MISS/ #     10.1 %  tma_l1_bound             (0.90%)
-   151,046,147,485      cpu_core/EXE_ACTIVITY.BOUND_ON_LOADS/                                        (0.90%)
-   448,614,506,257      cpu_core/topdown-retiring/                                              (0.90%)
-   742,449,377,330      cpu_core/topdown-mem-bound/                                             (0.90%)
-   187,108,139,249      cpu_core/topdown-bad-spec/                                              (0.90%)
-   398,816,879,445      cpu_core/CPU_CLK_UNHALTED.THREAD/                                        (0.90%)
-   720,397,255,205      cpu_core/topdown-fe-bound/                                              (0.90%)
- 1,039,232,533,984      cpu_core/topdown-be-bound/                                              (0.90%)
- 2,392,934,486,760      cpu_core/slots/                                                         (0.89%)
-    11,045,333,785      cpu_core/EXE_ACTIVITY.BOUND_ON_STORES/ #      2.8 %  tma_store_bound          (0.89%)
-   452,865,966,651      cpu_core/topdown-retiring/                                              (0.89%)
-   756,784,868,368      cpu_core/topdown-mem-bound/                                             (0.89%)
-   185,862,681,678      cpu_core/topdown-bad-spec/                                              (0.89%)
-   400,408,467,698      cpu_core/CPU_CLK_UNHALTED.THREAD/                                        (0.89%)
-   715,311,950,576      cpu_core/topdown-fe-bound/                                              (0.89%)
- 1,045,280,834,731      cpu_core/topdown-be-bound/                                              (0.89%)
- 2,399,964,664,746      cpu_core/TOPDOWN.SLOTS/                                                 (0.88%)
-   455,054,451,768      cpu_core/topdown-retiring/                                              (0.88%)
-   193,079,376,341      cpu_core/topdown-bad-spec/                                              (0.88%)
-    56,469,756,681      cpu_core/topdown-heavy-ops/                                             (0.88%)
-    36,787,876,821      cpu_core/UOPS_RETIRED.MS/        #      0.8 %  tma_few_uops_instructions
-                                                         #      1.5 %  tma_microcode_sequencer  (0.88%)
-   722,185,022,993      cpu_core/topdown-fe-bound/                                              (0.88%)
- 1,041,180,225,526      cpu_core/topdown-be-bound/                                              (0.88%)
- 2,402,377,457,928      cpu_core/TOPDOWN.SLOTS/                                                 (0.88%)
-   458,275,413,174      cpu_core/topdown-retiring/                                              (0.88%)
-   196,310,867,247      cpu_core/topdown-bad-spec/                                              (0.88%)
-    56,526,528,338      cpu_core/topdown-heavy-ops/                                             (0.88%)
-   182,191,977,762      cpu_core/MEM_UOP_RETIRED.ANY/    #      6.6 %  tma_memory_operations    (0.88%)
-   718,088,037,533      cpu_core/topdown-fe-bound/                                              (0.88%)
- 1,053,116,679,810      cpu_core/topdown-be-bound/                                              (0.88%)
- 2,366,896,579,938      cpu_core/slots/                                                         (0.88%)
-   448,799,245,319      cpu_core/topdown-retiring/                                              (0.88%)
-   752,291,764,664      cpu_core/topdown-mem-bound/                                             (0.88%)
-   190,700,572,001      cpu_core/topdown-bad-spec/                                              (0.88%)
-   395,850,905,282      cpu_core/CPU_CLK_UNHALTED.THREAD/                                        (0.88%)
-     1,093,706,007      cpu_core/ARITH.DIV_ACTIVE/       #      0.3 %  tma_divider              (0.88%)
-   703,509,194,120      cpu_core/topdown-fe-bound/                                              (0.88%)
- 1,040,022,429,591      cpu_core/topdown-be-bound/                                              (0.88%)
-    16,869,978,706      cpu_atom/TOPDOWN_BAD_SPECULATION.MACHINE_CLEARS/                                        (4.00%)
-   354,162,167,152      cpu_atom/TOPDOWN_RETIRING.ALL/                                          (4.00%)
-   503,896,294,478      cpu_atom/CPU_CLK_UNHALTED.CORE/                                         (4.00%)
-   766,982,784,067      cpu_atom/TOPDOWN_FE_BOUND.ALL/                                          (4.00%)
-     4,151,615,178      cpu_atom/TOPDOWN_BAD_SPECULATION.NUKE/ #      0.2 %  tma_nuke                 (4.00%)
- 1,192,090,582,462      cpu_atom/TOPDOWN_BE_BOUND.ALL/                                          (4.00%)
-    16,980,915,718      cpu_atom/TOPDOWN_BAD_SPECULATION.MACHINE_CLEARS/                                        (4.00%)
-    12,721,991,376      cpu_atom/TOPDOWN_BAD_SPECULATION.FASTNUKE/ #      0.5 %  tma_fast_nuke            (4.00%)
-   353,767,796,041      cpu_atom/TOPDOWN_RETIRING.ALL/                                          (4.00%)
-   503,492,269,833      cpu_atom/CPU_CLK_UNHALTED.CORE/                                         (4.00%)
-   765,696,084,848      cpu_atom/TOPDOWN_FE_BOUND.ALL/                                          (4.00%)
- 1,191,804,298,076      cpu_atom/TOPDOWN_BE_BOUND.ALL/                                          (4.00%)
-    15,660,798,244      cpu_atom/TOPDOWN_BE_BOUND.ALLOC_RESTRICTIONS/ #      0.6 %  tma_allocation_restriction  (4.02%)
-   249,606,773,925      cpu_atom/TOPDOWN_BE_BOUND.SERIALIZATION/ #      9.9 %  tma_serialization        (4.02%)
-   502,751,685,260      cpu_atom/CPU_CLK_UNHALTED.CORE/                                         (4.02%)
- 1,191,945,854,481      cpu_atom/TOPDOWN_BE_BOUND.ALL/                                          (4.02%)
-    15,655,948,076      cpu_atom/TOPDOWN_BE_BOUND.ALLOC_RESTRICTIONS/                                        (4.02%)
-   503,109,290,310      cpu_atom/CPU_CLK_UNHALTED.CORE/                                         (4.02%)
-   256,685,686,403      cpu_atom/TOPDOWN_BE_BOUND.REORDER_BUFFER/ #     10.2 %  tma_reorder_buffer       (4.02%)
- 1,190,996,115,175      cpu_atom/TOPDOWN_BE_BOUND.ALL/                                          (4.02%)
-    15,633,825,741      cpu_atom/TOPDOWN_BE_BOUND.ALLOC_RESTRICTIONS/                                        (4.02%)
-   503,160,959,815      cpu_atom/CPU_CLK_UNHALTED.CORE/                                         (4.02%)
-        21,814,768      cpu_atom/TOPDOWN_BE_BOUND.REGISTER/ #      0.0 %  tma_register             (4.02%)
- 1,190,412,971,766      cpu_atom/TOPDOWN_BE_BOUND.ALL/                                          (4.02%)
-   503,252,446,443      cpu_atom/CPU_CLK_UNHALTED.CORE/                                         (4.01%)
-    15,814,768,909      cpu_atom/TOPDOWN_FE_BOUND.PREDECODE/ #      0.6 %  tma_predecode            (4.01%)
-   764,060,127,265      cpu_atom/TOPDOWN_FE_BOUND.ALL/                                          (4.01%)
-   401,698,073,359      cpu_atom/TOPDOWN_FE_BOUND.FRONTEND_BANDWIDTH/                                        (4.01%)
-   503,164,801,502      cpu_atom/CPU_CLK_UNHALTED.CORE/                                         (4.01%)
-   765,907,384,549      cpu_atom/TOPDOWN_FE_BOUND.ALL/                                          (4.01%)
-   402,725,481,037      cpu_atom/TOPDOWN_FE_BOUND.FRONTEND_BANDWIDTH/                                        (4.01%)
-   194,298,185,316      cpu_atom/TOPDOWN_FE_BOUND.OTHER/ #      7.7 %  tma_other_fb             (4.01%)
-    15,620,702,386      cpu_atom/TOPDOWN_BE_BOUND.ALLOC_RESTRICTIONS/                                        (4.01%)
-   283,112,976,569      cpu_atom/TOPDOWN_BE_BOUND.NON_MEM_SCHEDULER/ #     11.3 %  tma_non_mem_scheduler    (4.01%)
-   503,122,142,769      cpu_atom/CPU_CLK_UNHALTED.CORE/                                         (4.01%)
- 1,191,901,391,444      cpu_atom/TOPDOWN_BE_BOUND.ALL/                                          (4.01%)
-   385,446,620,828      cpu_atom/TOPDOWN_BE_BOUND.MEM_SCHEDULER/ #     15.3 %  tma_mem_scheduler        (4.03%)
-    15,635,877,210      cpu_atom/TOPDOWN_BE_BOUND.ALLOC_RESTRICTIONS/                                        (4.03%)
-   503,200,006,187      cpu_atom/CPU_CLK_UNHALTED.CORE/                                         (4.03%)
- 1,189,730,474,435      cpu_atom/TOPDOWN_BE_BOUND.ALL/                                          (4.03%)
-   503,281,932,184      cpu_atom/CPU_CLK_UNHALTED.CORE/                                         (4.02%)
-   362,869,363,188      cpu_atom/TOPDOWN_FE_BOUND.FRONTEND_LATENCY/                                        (4.02%)
-   765,179,521,100      cpu_atom/TOPDOWN_FE_BOUND.ALL/                                          (4.02%)
-    76,419,833,587      cpu_atom/TOPDOWN_FE_BOUND.ITLB/  #      3.0 %  tma_itlb_misses          (4.02%)
-   202,624,955,326      cpu_atom/TOPDOWN_FE_BOUND.ICACHE/ #      8.1 %  tma_icache_misses        (4.00%)
-   503,210,015,078      cpu_atom/CPU_CLK_UNHALTED.CORE/                                         (4.00%)
-   362,640,690,363      cpu_atom/TOPDOWN_FE_BOUND.FRONTEND_LATENCY/                                        (4.00%)
-   764,872,216,132      cpu_atom/TOPDOWN_FE_BOUND.ALL/                                          (4.00%)
-   120,832,754,053      cpu_atom/TOPDOWN_FE_BOUND.DECODE/ #      4.8 %  tma_decode               (3.99%)
-   503,251,544,438      cpu_atom/CPU_CLK_UNHALTED.CORE/                                         (3.99%)
-   765,820,833,756      cpu_atom/TOPDOWN_FE_BOUND.ALL/                                          (3.99%)
-   402,516,156,115      cpu_atom/TOPDOWN_FE_BOUND.FRONTEND_BANDWIDTH/                                        (3.99%)
-   503,080,935,504      cpu_atom/CPU_CLK_UNHALTED.CORE/                                         (4.01%)
-   765,365,431,993      cpu_atom/TOPDOWN_FE_BOUND.ALL/                                          (4.01%)
-    71,535,576,001      cpu_atom/TOPDOWN_FE_BOUND.CISC/  #      2.8 %  tma_cisc                 (4.01%)
-   402,166,593,483      cpu_atom/TOPDOWN_FE_BOUND.FRONTEND_BANDWIDTH/                                        (4.01%)
-   503,198,848,597      cpu_atom/CPU_CLK_UNHALTED.CORE/                                         (4.01%)
-   363,799,725,078      cpu_atom/TOPDOWN_FE_BOUND.FRONTEND_LATENCY/                                        (4.01%)
-   766,780,260,392      cpu_atom/TOPDOWN_FE_BOUND.ALL/                                          (4.01%)
-    12,917,148,773      cpu_atom/TOPDOWN_FE_BOUND.BRANCH_RESTEER/ #      0.5 %  tma_branch_resteer       (4.01%)
-    70,988,875,270      cpu_atom/TOPDOWN_FE_BOUND.BRANCH_DETECT/ #      2.8 %  tma_branch_detect        (4.01%)
-   504,679,394,434      cpu_atom/CPU_CLK_UNHALTED.CORE/                                         (4.01%)
-   364,366,354,216      cpu_atom/TOPDOWN_FE_BOUND.FRONTEND_LATENCY/                                        (4.01%)
-   768,428,732,460      cpu_atom/TOPDOWN_FE_BOUND.ALL/                                          (4.01%)
+ ------------------------------------------------------------------------------------------------------------------------------------------
+  Task                    |    Runtime     |  Count   |    Avg delay    |    Max delay    |      Max delay start  |     Max delay end     |
+ ------------------------------------------------------------------------------------------------------------------------------------------
+  ThreadPoolForeg:42016   |      57.339 us |        2 |      728.729 us |        1.452 ms |        27486.956147 s |        27486.957599 s |
+  ThreadPoolForeg:42053   |      31.709 us |        3 |      450.168 us |        1.144 ms |        27486.956474 s |        27486.957619 s |
+  ThreadPoolForeg:42052   |       1.690 ms |        8 |      166.773 us |      343.992 us |        27488.724906 s |        27488.725250 s |
+  ThreadPoolForeg:42012   |     729.940 us |        8 |      134.979 us |      634.483 us |        27486.956426 s |        27486.957060 s |
+  ksoftirqd/14:63         |     776.767 us |        4 |      128.771 us |      497.985 us |        27487.147926 s |        27487.148424 s |
+  ThreadPoolForeg:43555   |       2.112 ms |       10 |      126.924 us |      585.924 us |        27487.053124 s |        27487.053710 s |
+  ksoftirqd/31:160        |     351.310 us |       11 |      116.001 us |      696.886 us |        27491.725867 s |        27491.726564 s |
+  kworker/7:1-mm_:33587   |     411.477 us |       38 |      106.822 us |        2.003 ms |        27492.754785 s |        27492.756788 s |
+  ThreadPoolForeg:42011   |       1.916 ms |       12 |      103.864 us |      994.383 us |        27486.956139 s |        27486.957133 s |
+  ThreadPoolForeg:42051   |     306.081 us |        7 |       94.861 us |      407.334 us |        27486.956784 s |        27486.957191 s |
+  kworker/11:2-mm:39717   |     163.348 us |       25 |       92.240 us |      927.179 us |        27491.783803 s |        27491.784731 s |
+  ksoftirqd/29:148        |     616.464 us |       12 |       91.514 us |      958.773 us |        27492.738831 s |        27492.739790 s |
+  JS Helper:7126          |     130.213 us |        2 |       91.489 us |      113.538 us |        27487.395528 s |        27487.395641 s |
+  ThreadPoolForeg:43558   |     746.994 us |       11 |       88.861 us |      717.946 us |        27487.316959 s |        27487.317677 s |
+  ThreadPoolForeg:42054   |     492.408 us |       11 |       88.157 us |      613.770 us |        27486.956765 s |        27486.957379 s |
+  ksoftirqd/30:154        |       1.320 ms |       16 |       83.777 us |        1.265 ms |        27487.118918 s |        27487.120183 s |
+  wpa_supplicant:3292     |      38.958 us |        1 |       83.156 us |       83.156 us |        27491.469828 s |        27491.469911 s |
+  ThreadPoolSingl:42744   |      43.512 us |        2 |       80.665 us |      111.937 us |        27488.724897 s |        27488.725009 s |
+  JS Helper:7125          |     100.984 us |        2 |       78.950 us |      105.803 us |        27487.395523 s |        27487.395629 s |
+  ksoftirqd/12:57         |     105.471 us |        3 |       76.783 us |      224.365 us |        27492.712106 s |        27492.712330 s |
+  abrt-dump-journ:3180    |     217.656 us |        2 |       71.797 us |       74.012 us |        27485.429187 s |        27485.429261 s |
+  ThreadPoolForeg:43556   |     358.025 us |       10 |       69.137 us |      508.539 us |        27487.316981 s |        27487.317489 s |
+  ThreadPoolForeg:43553   |       2.246 ms |       12 |       67.042 us |      362.287 us |        27488.724913 s |        27488.725275 s |
+  kworker/3:0-mm_:173     |     149.962 us |       22 |       65.085 us |        1.278 ms |        27491.854801 s |        27491.856079 s |
+  ThreadPoolForeg:43564   |       1.024 ms |       14 |       64.192 us |      370.802 us |        27487.317112 s |        27487.317482 s |
+  JS Helper:7124          |       3.045 ms |       11 |       64.129 us |      109.406 us |        27487.395522 s |        27487.395631 s |
+  HangWatcher:43620       |      30.688 us |        1 |       63.546 us |       63.546 us |        27490.217910 s |        27490.217973 s |
+  git:85285               |       3.203 ms |        2 |       60.451 us |      110.689 us |        27491.568281 s |        27491.568391 s |
+  abrt-dump-journ:3181    |     212.548 us |        2 |       60.415 us |       63.465 us |        27485.429198 s |        27485.429261 s |
+  ThreadPoolForeg:41996   |      44.723 ms |       60 |       60.340 us |      464.841 us |        27486.965883 s |        27486.966348 s |
+  ThreadPoolServi:41966   |     119.733 us |        2 |       57.185 us |      105.874 us |        27492.206541 s |        27492.206647 s |
+  GpuWatchdog:41429       |      67.398 us |        1 |       57.171 us |       57.171 us |        27486.322102 s |        27486.322159 s |
+  ThreadPoolForeg:41342   |     418.643 us |        3 |       56.320 us |       70.802 us |        27487.724915 s |        27487.724986 s |
+  Xwayland:7478           |     439.880 us |        1 |       55.711 us |       55.711 us |        27486.860929 s |        27486.860985 s |
+  dbus-broker:2912        |     138.148 us |        2 |       55.601 us |       71.125 us |        27488.731304 s |        27488.731376 s |
+  kworker/1:1-mm_:230     |     308.210 us |       57 |       54.044 us |        1.434 ms |        27491.775802 s |        27491.777236 s |
+  khugepaged:225          |     745.738 us |        2 |       53.603 us |       90.258 us |        27489.061664 s |        27489.061754 s |
+  kworker/15:1-mm:367     |      81.992 us |       14 |       53.223 us |      503.667 us |        27489.536837 s |        27489.537341 s |
+  ksoftirqd/25:124        |       1.683 ms |       80 |       53.220 us |        1.834 ms |        27487.976037 s |        27487.977871 s |
+  ThreadPoolForeg:43563   |       1.773 ms |       14 |       51.862 us |      274.323 us |        27487.053148 s |        27487.053422 s |
+  third_party_glo:73360   |      57.100 us |        3 |       51.713 us |       67.044 us |        27490.846605 s |        27490.846672 s |
+  git:85259               |       3.421 ms |        2 |       49.646 us |       53.616 us |        27485.560081 s |        27485.560135 s |
+  ThreadPoolForeg:42015   |     408.969 us |       10 |       48.602 us |      394.304 us |        27486.956476 s |        27486.956870 s |
+  JS Helper:7123          |       6.029 ms |       24 |       47.951 us |      109.481 us |        27487.395520 s |        27487.395629 s |
+  git:85284               |       2.960 ms |        1 |       47.806 us |       47.806 us |        27488.563950 s |        27488.563998 s |
+  GDM userdb work:3591    |     286.277 us |        3 |       45.576 us |       57.350 us |        27485.577034 s |        27485.577091 s |
+  chrome:41964            |       3.815 s  |     2599 |       45.499 us |      667.929 us |        27487.330895 s |        27487.331562 s |
+  gdbus:7043              |     234.686 us |        3 |       45.108 us |       55.781 us |        27486.864820 s |        27486.864876 s |
+  ThreadPoolForeg:43486   |       4.252 ms |       19 |       44.745 us |      242.059 us |        27487.053083 s |        27487.053326 s |
+  kworker/u130:7-:73415   |     121.815 ms |     2732 |       44.660 us |      960.804 us |        27490.937177 s |        27490.938138 s |
+  ThreadPoolForeg:43483   |       9.333 ms |       28 |       44.480 us |      682.211 us |        27487.053034 s |        27487.053716 s |
+  ksoftirqd/24:118        |       2.026 ms |      178 |       44.126 us |      960.819 us |        27493.273816 s |        27493.274777 s |
+  ThreadPoolForeg:43565   |     729.791 us |        7 |       44.082 us |      191.219 us |        27487.053151 s |        27487.053342 s |
+  gmain:10831             |     149.909 us |        3 |       44.053 us |       81.095 us |        27492.382795 s |        27492.382876 s |
+  ThreadPoolForeg:43482   |      41.707 ms |       54 |       43.887 us |        1.184 ms |        27487.043092 s |        27487.044277 s |
+  rcu_exp_gp_kthr:19      |      42.488 us |        2 |       43.846 us |       49.678 us |        27485.579122 s |        27485.579172 s |
+  kworker/5:2-mm_:37757   |     149.852 us |       22 |       43.439 us |      637.044 us |        27487.975864 s |        27487.976501 s |
+  kworker/13:2-mm:39718   |     226.522 us |       36 |       43.275 us |        1.001 ms |        27492.765782 s |        27492.766783 s |
+  gdbus:44753             |     657.171 us |        8 |       42.601 us |       60.973 us |        27484.725057 s |        27484.725118 s |
+  ThreadPoolSingl:43476   |      63.993 ms |     1883 |       42.019 us |      183.360 us |        27487.336134 s |        27487.336318 s |
+  kthreadd:85289          |      35.839 ms |      633 |       41.342 us |      702.326 us |        27492.235206 s |        27492.235909 s |
+  ThreadPoolForeg:43491   |      32.412 ms |       27 |       41.288 us |      298.681 us |        27487.043250 s |        27487.043549 s |
+  ThreadPoolForeg:43484   |       8.260 ms |       27 |       40.705 us |      297.367 us |        27487.081144 s |        27487.081442 s |
+  napi/phy0-0:2777        |      10.565 ms |      209 |       40.131 us |      285.363 us |        27492.813934 s |        27492.814219 s |
+  ThreadPoolForeg:42018   |     631.574 us |       15 |       39.094 us |      278.233 us |        27488.724880 s |        27488.725159 s |
+  kworker/30:1-i9:364     |      15.955 ms |     2888 |       38.967 us |        2.721 ms |        27487.034880 s |        27487.037601 s |
+  napi/phy0-0:2776        |       3.057 ms |      183 |       38.941 us |      130.837 us |        27490.693481 s |        27490.693612 s |
+  gmain:11177             |     100.307 us |        2 |       38.694 us |       67.717 us |        27489.383777 s |        27489.383845 s |
+  kworker/18:1-mm:259     |     325.849 us |       37 |       37.954 us |      712.611 us |        27489.060944 s |        27489.061657 s |
+  stratis-wt-10:3561      |      66.300 us |        2 |       37.807 us |       70.770 us |        27485.690925 s |        27485.690996 s |
+  CompositorTileW:42745   |       1.733 ms |        1 |       37.499 us |       37.499 us |        27486.875690 s |        27486.875728 s |
+  kworker/17:1-mm:246     |     210.611 us |       37 |       36.745 us |      398.661 us |        27492.387791 s |        27492.388190 s |
+  Chrome_ChildIOT:41436   |      86.101 ms |     2420 |       36.537 us |      240.305 us |        27491.747308 s |        27491.747548 s |
+  ThreadPoolForeg:43562   |       1.584 ms |       11 |       36.537 us |      172.249 us |        27487.043010 s |        27487.043182 s |
+  ThreadPoolForeg:42014   |       1.139 ms |        8 |       35.959 us |       57.622 us |        27486.957063 s |        27486.957121 s |
+  kworker/u130:10:47691   |      29.121 ms |      670 |       35.791 us |        1.386 ms |        27491.820057 s |        27491.821443 s |
+  kworker/u130:2-:71026   |     309.103 ms |     6231 |       35.670 us |        1.030 ms |        27486.940880 s |        27486.941910 s |
+  gmain:7119              |     255.901 us |        3 |       35.080 us |       68.399 us |        27483.382940 s |        27483.383009 s |
+  kcompactd0:223          |      31.668 ms |      348 |       34.563 us |      169.951 us |        27485.594001 s |        27485.594171 s |
+  Chrome_ChildIOT:42775   |       7.096 ms |       11 |       34.482 us |      147.155 us |        27487.029185 s |        27487.029332 s |
+  ThreadPoolForeg:43500   |       3.768 ms |       12 |       34.313 us |      217.320 us |        27487.081158 s |        27487.081375 s |
+  ThreadPoolForeg:42017   |     921.442 us |        8 |       33.968 us |      126.598 us |        27486.956146 s |        27486.956273 s |
+  Compositor:41980        |     663.160 ms |     7027 |       33.846 us |      647.821 us |        27488.070950 s |        27488.071598 s |
+  WebKitWebProces:85215   |       1.124 ms |       16 |       33.652 us |       75.053 us |        27487.460925 s |        27487.461000 s |
+  kthreadd:85288          |      28.378 ms |      963 |       33.379 us |      308.893 us |        27493.298976 s |        27493.299285 s |
+  antigravity:43460       |       1.058 s  |      615 |       33.374 us |      350.981 us |        27488.028990 s |        27488.029341 s |
+  kswapd0:243             |     123.152 ms |      409 |       32.841 us |      160.428 us |        27487.124323 s |        27487.124483 s |
+  ThreadPoolForeg:42009   |       1.108 ms |       12 |       32.794 us |      115.889 us |        27488.724909 s |        27488.725025 s |
+  ThreadPoolForeg:43465   |      63.516 ms |       81 |       32.713 us |        1.105 ms |        27487.043176 s |        27487.044281 s |
+  ThreadPoolForeg:42006   |       2.314 ms |       27 |       32.633 us |      254.563 us |        27486.996732 s |        27486.996986 s |
+  KMS thread:7132         |     241.109 ms |     2524 |       32.613 us |      426.914 us |        27488.095871 s |        27488.096298 s |
+  ThreadPoolForeg:43480   |     112.404 ms |       88 |       32.576 us |      599.504 us |        27487.343063 s |        27487.343663 s |
+  chrome:41371            |      13.077 ms |       16 |       32.346 us |       97.198 us |        27489.206387 s |        27489.206484 s |
+  rcu_preempt:17          |      23.687 ms |     2916 |       32.188 us |      771.699 us |        27487.980864 s |        27487.981636 s |
+  kworker/u130:4+:83599   |     206.127 ms |     3644 |       32.036 us |        1.394 ms |        27485.118150 s |        27485.119544 s |
+  gdbus:7469              |     354.086 us |        4 |       31.910 us |       78.633 us |        27485.586183 s |        27485.586261 s |
+  pool-spawner:7118       |     130.409 us |        2 |       30.736 us |       56.927 us |        27485.559192 s |        27485.559249 s |
+  kworker/22:1-mm:271     |     375.782 us |       53 |       30.617 us |      542.600 us |        27489.060961 s |        27489.061503 s |
+  ThreadPoolForeg:43490   |       4.044 ms |       27 |       30.072 us |      213.931 us |        27487.053052 s |        27487.053266 s |
+  antigravity:42752       |     251.531 us |        2 |       29.965 us |       50.312 us |        27486.033902 s |        27486.033953 s |
+  kworker/u130:14:53450   |      33.479 ms |     1046 |       29.921 us |      684.041 us |        27492.875903 s |        27492.876587 s |
+  Realtime AudioW:43487   |      40.173 ms |      943 |       29.407 us |      205.709 us |        27492.615959 s |        27492.616165 s |
+  gdbus:44765             |     702.280 us |        8 |       29.334 us |       54.672 us |        27490.726345 s |        27490.726400 s |
+  HangWatcher:41339       |      72.752 us |        1 |       28.515 us |       28.515 us |        27491.289837 s |        27491.289866 s |
+  pool-1:7782             |     188.504 us |        4 |       28.061 us |       57.053 us |        27488.383906 s |        27488.383963 s |
+  kworker/u130:8-:85038   |      26.145 ms |      898 |       28.046 us |      505.295 us |        27488.054026 s |        27488.054531 s |
+  Compositor:43466        |     655.672 ms |     1835 |       27.752 us |      755.975 us |        27487.937478 s |        27487.938234 s |
+  language_server:42883   |       2.769 ms |       57 |       27.601 us |      102.112 us |        27488.567003 s |        27488.567105 s |
+  sleep:85255             |       1.932 ms |        3 |       27.589 us |       54.857 us |        27483.343762 s |        27483.343817 s |
+  verge-mihomo:14556      |       1.030 ms |       13 |       27.476 us |       89.738 us |        27486.013921 s |        27486.014011 s |
+  gmain:11641             |     186.589 us |        2 |       27.404 us |       46.174 us |        27489.727848 s |        27489.727894 s |
+  btrfs-cleaner:2411      |      15.441 us |        2 |       27.290 us |       50.872 us |        27491.107931 s |        27491.107982 s |
+  ThreadPoolForeg:43557   |       2.464 ms |        8 |       27.022 us |       92.154 us |        27488.724898 s |        27488.724990 s |
+  kworker/u130:9+:73520   |     246.104 ms |     7699 |       26.872 us |      807.921 us |        27487.961011 s |        27487.961819 s |
+  gdbus:11288             |     237.012 us |        3 |       26.590 us |       62.089 us |        27486.862081 s |        27486.862143 s |
+  kworker/16:1-rc:278     |     326.507 us |       41 |       26.544 us |      264.371 us |        27492.046954 s |        27492.047218 s |
+  kworker/26:0-rc:84323   |       3.755 ms |      602 |       26.261 us |        1.325 ms |        27484.022930 s |        27484.024255 s |
+  verge-mihomo:14560      |       1.362 ms |       48 |       26.072 us |      100.006 us |        27486.013817 s |        27486.013917 s |
+  tailscaled:3519         |     644.642 us |       29 |       25.864 us |       82.108 us |        27489.081864 s |        27489.081946 s |
+  perf:85257              |     365.036 us |       10 |       25.572 us |      121.164 us |        27488.573892 s |        27488.574013 s |
+  zbus::Connectio:85266   |     692.583 us |        7 |       25.538 us |       67.598 us |        27485.581928 s |        27485.581996 s |
+  Chrome_ChildIOT:42868   |      47.895 ms |      868 |       25.406 us |      486.482 us |        27488.045678 s |        27488.046165 s |
+  blocking-5:11988        |     311.991 us |       20 |       25.364 us |       71.566 us |        27485.864889 s |        27485.864960 s |
+  gmain:3211              |      58.557 us |        2 |       25.208 us |       43.065 us |        27490.727822 s |        27490.727865 s |
+  kworker/27:3-rc:2755    |       4.062 ms |      672 |       25.119 us |        1.999 ms |        27491.835801 s |        27491.837800 s |
+  systemd:1               |     401.453 us |        2 |       24.887 us |       41.613 us |        27485.577168 s |        27485.577210 s |
+  ThreadPoolForeg:43481   |      45.832 ms |       38 |       24.800 us |      144.937 us |        27487.085369 s |        27487.085514 s |
+  kworker/u135:2+:84104   |      49.227 ms |     2205 |       24.793 us |      118.356 us |        27488.141801 s |        27488.141919 s |
+  gmain:11287             |      59.086 us |        2 |       24.440 us |       39.229 us |        27489.382855 s |        27489.382894 s |
+  Chrome_ChildIOT:43464   |       8.181 ms |      210 |       24.365 us |      982.920 us |        27486.932370 s |        27486.933353 s |
+  kworker/u134:10:85206   |      43.403 ms |      207 |       24.200 us |        2.208 ms |        27487.972987 s |        27487.975195 s |
+  async-io:7364           |     182.738 us |       22 |       24.192 us |      329.025 us |        27485.560543 s |        27485.560872 s |
+  tracing-estuary:3545    |     190.295 us |        6 |       23.993 us |       49.406 us |        27489.943260 s |        27489.943309 s |
+  HangWatcher:41626       |      31.796 us |        1 |       23.762 us |       23.762 us |        27484.592402 s |        27484.592425 s |
+  gnome-shell:7116        |       1.866 s  |     5917 |       23.649 us |      473.145 us |        27487.047887 s |        27487.048360 s |
+  ThreadPoolForeg:42004   |       6.359 ms |       19 |       23.622 us |      129.835 us |        27488.724923 s |        27488.725052 s |
+  ptyxis-agent:44761      |     575.599 us |        4 |       23.561 us |       41.505 us |        27490.726195 s |        27490.726236 s |
+  in:imjournal:3587       |       2.110 ms |       12 |       23.283 us |       60.302 us |        27486.330893 s |        27486.330953 s |
+  gly-hdl-loader:85261    |       7.277 ms |        2 |       23.273 us |       43.546 us |        27485.575603 s |        27485.575647 s |
+  dbus-broker:6868        |     941.757 us |       27 |       23.245 us |      101.152 us |        27486.863883 s |        27486.863984 s |
+  ThreadPoolForeg:42043   |       2.280 ms |       12 |       23.211 us |      108.921 us |        27488.724871 s |        27488.724980 s |
+  kworker/25:1-rc:280     |       5.565 ms |      915 |       22.894 us |        2.778 ms |        27487.613869 s |        27487.616646 s |
+  verge-mihomo:14564      |       1.056 ms |       31 |       22.881 us |      114.952 us |        27488.372870 s |        27488.372985 s |
+  kworker/24:1-ev:272     |       8.986 ms |     1348 |       22.557 us |        2.258 ms |        27486.962883 s |        27486.965141 s |
+  gvfs-afc-volume:7755    |     131.922 us |       10 |       22.436 us |      149.865 us |        27492.978783 s |        27492.978933 s |
+  antigravity:42750       |     394.754 ms |      567 |       22.110 us |      619.553 us |        27488.077256 s |        27488.077875 s |
+  gmain:3081              |     165.520 us |        2 |       21.998 us |       34.483 us |        27486.728883 s |        27486.728918 s |
+  ThreadPoolForeg:42001   |     152.816 ms |       22 |       21.962 us |       59.949 us |        27486.965343 s |        27486.965403 s |
+  systemd-userwor:85055   |     484.980 us |        2 |       21.924 us |       37.107 us |        27485.577301 s |        27485.577338 s |
+  ptyxis:44749            |     484.614 ms |     2339 |       21.903 us |      527.704 us |        27487.316883 s |        27487.317410 s |
+  clash-verge-run:14283   |       1.662 ms |       35 |       21.835 us |       74.920 us |        27488.419855 s |        27488.419930 s |
+  ThreadPoolSingl:42753   |     355.017 us |        4 |       21.450 us |       59.094 us |        27487.076363 s |        27487.076422 s |
+  ThreadPoolForeg:43560   |       1.553 ms |       14 |       21.409 us |       82.821 us |        27487.042459 s |        27487.042542 s |
+  ThreadPoolForeg:42050   |       1.049 ms |       10 |       21.407 us |      140.727 us |        27488.724899 s |        27488.725040 s |
+  Chrome_IOThread:42711   |      33.315 ms |      670 |       21.307 us |      104.380 us |        27490.133851 s |        27490.133955 s |
+  ThreadPoolForeg:42002   |      38.290 ms |       27 |       21.239 us |      129.885 us |        27486.956291 s |        27486.956421 s |
+  perf:85254              |       3.466 s  |      687 |       21.085 us |      744.019 us |        27488.139228 s |        27488.139972 s |
+  antigravity:42691       |     163.350 ms |     1477 |       21.034 us |      451.916 us |        27487.842591 s |        27487.843043 s |
+  antigravity:43469       |     261.169 us |        3 |       20.985 us |       39.567 us |        27492.957395 s |        27492.957435 s |
+  ThreadPoolForeg:42709   |     262.629 us |        6 |       20.935 us |       57.071 us |        27488.724862 s |        27488.724919 s |
+  blocking-3:11981        |       1.341 ms |       23 |       20.901 us |       77.916 us |        27485.577201 s |        27485.577279 s |
+  blocking-10:12027       |     291.718 us |       20 |       20.460 us |       72.775 us |        27486.073406 s |        27486.073479 s |
+  ThreadPoolForeg:43463   |     124.119 ms |      169 |       20.452 us |        1.073 ms |        27487.316948 s |        27487.318020 s |
+  ThreadPoolForeg:43499   |       3.629 ms |       22 |       20.443 us |      124.845 us |        27487.075544 s |        27487.075669 s |
+  flexi_logger-fi:3547    |     407.104 us |       20 |       20.370 us |      101.503 us |        27483.586996 s |        27483.587097 s |
+  blocking-1:42906        |     244.688 us |       20 |       20.313 us |       56.264 us |        27485.671173 s |        27485.671229 s |
+  blocking-9:12026        |     268.978 us |       20 |       20.224 us |       44.944 us |        27487.265002 s |        27487.265047 s |
+  systemd-homed:2957      |     321.730 us |        3 |       20.058 us |       46.605 us |        27485.577046 s |        27485.577093 s |
+  chrome:41387            |     172.569 us |        2 |       19.919 us |       30.562 us |        27485.928966 s |        27485.928997 s |
+  systemd-oomd:2725       |      10.024 ms |        8 |       19.835 us |       67.736 us |        27484.429023 s |        27484.429090 s |
+  Thread-1 (_thre:3376    |     662.202 us |       11 |       19.817 us |       76.269 us |        27490.344050 s |        27490.344126 s |
+  kworker/28:2-rc:34287   |       9.553 ms |     1660 |       19.738 us |        2.260 ms |        27491.769801 s |        27491.772061 s |
+  ThreadPoolForeg:41971   |      50.102 ms |       25 |       19.608 us |       90.931 us |        27488.724965 s |        27488.725056 s |
+  nvidia-powerd:3029      |     169.618 us |        5 |       19.487 us |       60.329 us |        27492.747089 s |        27492.747149 s |
+  gmain:11560             |      76.951 us |        2 |       19.383 us |       27.327 us |        27489.382849 s |        27489.382876 s |
+  chrome:43591            |     995.392 us |        7 |       19.373 us |       79.548 us |        27488.724898 s |        27488.724978 s |
+  ibus-extension-:10543   |     500.895 us |       14 |       19.196 us |       84.301 us |        27486.861941 s |        27486.862025 s |
+  ThreadPoolForeg:43489   |       2.790 ms |       17 |       19.168 us |      156.276 us |        27487.042997 s |        27487.043153 s |
+  ThreadPoolForeg:43485   |      33.972 ms |       29 |       19.149 us |      239.532 us |        27487.351862 s |        27487.352101 s |
+  HangWatcher:41995       |      33.159 us |        1 |       18.970 us |       18.970 us |        27491.285524 s |        27491.285543 s |
+  tailscaled:3326         |       1.592 ms |       46 |       18.875 us |       88.889 us |        27483.622162 s |        27483.622251 s |
+  systemd:6771            |       2.968 ms |        5 |       18.798 us |       70.464 us |        27486.862246 s |        27486.862316 s |
+  Chrome_ChildIOT:41382   |     504.236 us |        3 |       18.690 us |       42.314 us |        27485.964538 s |        27485.964580 s |
+  gmain:32891             |     102.628 us |        3 |       18.597 us |       32.602 us |        27487.727867 s |        27487.727900 s |
+  ksoftirqd/13:202        |      30.057 us |       68 |       18.519 us |        1.059 ms |        27491.882832 s |        27491.883891 s |
+  gmain:3127              |     414.362 us |       11 |       18.416 us |       67.964 us |        27490.429531 s |        27490.429599 s |
+  uresourced:7036         |     369.397 us |        3 |       18.311 us |       43.509 us |        27486.861117 s |        27486.861160 s |
+  ThreadPoolForeg:42005   |       5.264 ms |       28 |       18.242 us |      159.123 us |        27488.724862 s |        27488.725022 s |
+  gmain:10830             |     103.895 us |        2 |       18.082 us |       25.596 us |        27489.398851 s |        27489.398877 s |
+  language_server:42888   |       3.611 ms |       39 |       17.987 us |       86.280 us |        27485.413832 s |        27485.413918 s |
+  cgroupify:41321         |       2.789 ms |       10 |       17.986 us |       67.784 us |        27487.428977 s |        27487.429045 s |
+  kworker/u130:6-:72395   |       9.579 ms |      138 |       17.985 us |      640.615 us |        27491.861814 s |        27491.862455 s |
+  VizCompositorTh:42869   |     201.532 ms |     1140 |       17.913 us |        1.699 ms |        27487.316834 s |        27487.318533 s |
+  gmain:5714              |      42.872 us |        1 |       17.789 us |       17.789 us |        27484.733915 s |        27484.733933 s |
+  ThreadPoolForeg:43561   |       2.038 ms |       10 |       17.741 us |       90.742 us |        27487.044726 s |        27487.044817 s |
+  kworker/29:1-rc:37036   |       8.735 ms |     1472 |       17.477 us |        2.421 ms |        27486.999881 s |        27487.002302 s |
+  VizCompositorTh:41437   |     182.386 ms |     4815 |       17.408 us |      748.958 us |        27487.316825 s |        27487.317574 s |
+  psimon:85246            |      68.084 us |        5 |       17.393 us |       58.931 us |        27483.939933 s |        27483.939992 s |
+  ThreadPoolServi:43462   |      49.681 ms |     1881 |       17.284 us |      967.035 us |        27492.744266 s |        27492.745233 s |
+  kthreadd:85270          |      21.103 ms |       76 |       17.029 us |      420.897 us |        27491.728801 s |        27491.729222 s |
+  antigrav:gdrv0:42838    |      16.306 ms |       64 |       16.967 us |      141.745 us |        27487.976155 s |        27487.976297 s |
+  kworker/23:1-mm:279     |     349.128 us |       60 |       16.943 us |      313.856 us |        27486.824881 s |        27486.825195 s |
+  blocking-1:7367         |     232.568 us |       20 |       16.923 us |       44.416 us |        27492.412178 s |        27492.412222 s |
+  Mutter Input Th:7157    |      64.945 ms |     2301 |       16.868 us |      645.979 us |        27485.635720 s |        27485.636366 s |
+  blocking-7:12001        |     231.894 us |       20 |       16.807 us |       65.966 us |        27483.947722 s |        27483.947788 s |
+  gdbus:7121              |       2.982 ms |       20 |       16.708 us |       59.708 us |        27486.879713 s |        27486.879773 s |
+  sssd_kcm:40522          |     767.690 us |        5 |       16.580 us |       39.242 us |        27488.384069 s |        27488.384108 s |
+  PressureMonitor:14379   |     776.411 us |        2 |       16.164 us |       24.747 us |        27492.279682 s |        27492.279707 s |
+  dnf5daemon-serv:11658   |     146.757 us |       10 |       16.076 us |       41.606 us |        27487.705857 s |        27487.705899 s |
+  kworker/21:2-mm:39722   |     302.989 us |       46 |       16.023 us |      294.389 us |        27487.130879 s |        27487.131174 s |
+  WebKitWebProces:14380   |     616.507 us |        4 |       15.980 us |       25.366 us |        27488.451860 s |        27488.451885 s |
+  stratis-wt-33:3584      |       1.600 ms |      100 |       15.934 us |       82.776 us |        27483.389681 s |        27483.389764 s |
+  blocking-1:11706        |     291.499 us |       21 |       15.861 us |       53.360 us |        27490.996977 s |        27490.997030 s |
+  systemd-journal:2535    |       1.651 ms |        4 |       15.815 us |       40.021 us |        27484.940433 s |        27484.940473 s |
+  ThreadPoolForeg:43492   |       3.961 ms |       24 |       15.693 us |      126.083 us |        27487.044248 s |        27487.044374 s |
+  goa-identity-se:7472    |     110.759 us |        2 |       15.653 us |       22.501 us |        27483.383942 s |        27483.383964 s |
+  kworker/31:2-rc:38190   |       7.887 ms |     1160 |       15.508 us |        1.826 ms |        27489.980832 s |        27489.982658 s |
+  ksoftirqd/26:130        |     413.203 us |       26 |       15.380 us |      187.109 us |        27487.163888 s |        27487.164075 s |
+  gmain:8998              |     106.346 us |        3 |       15.329 us |       23.886 us |        27484.382926 s |        27484.382949 s |
+  kthreadd:2              |       1.386 ms |       19 |       15.285 us |      131.648 us |        27488.118893 s |        27488.119025 s |
+  blocking-1:9023         |     266.272 us |       20 |       15.179 us |       76.653 us |        27490.512157 s |        27490.512234 s |
+  ThreadPoolForeg:43559   |       1.253 ms |       11 |       15.133 us |      132.852 us |        27487.042931 s |        27487.043064 s |
+  verge-mihomo:14559      |       2.405 ms |       66 |       15.102 us |       75.429 us |        27485.811752 s |        27485.811828 s |
+  blocking-2:85268        |       2.759 ms |       17 |       14.920 us |       42.884 us |        27487.085458 s |        27487.085501 s |
+  nvidia-powerd:2936      |       1.681 ms |      100 |       14.842 us |       69.806 us |        27492.388173 s |        27492.388243 s |
+  ThreadPoolForeg:42042   |       2.071 ms |        8 |       14.834 us |       84.104 us |        27486.956627 s |        27486.956711 s |
+  ThreadPoolForeg:42008   |       1.788 ms |       22 |       14.746 us |       91.995 us |        27486.966902 s |        27486.966994 s |
+  GUsbEventThread:85173   |      92.400 us |        5 |       14.736 us |       41.971 us |        27486.787885 s |        27486.787927 s |
+  kthreadd:85274          |     117.084 ms |      630 |       14.683 us |        2.186 ms |        27492.759746 s |        27492.761932 s |
+  blocking-6:11994        |     242.539 us |       20 |       14.549 us |       64.286 us |        27491.835426 s |        27491.835491 s |
+  pool-289:85258          |       1.034 ms |       11 |       14.518 us |       65.162 us |        27485.559944 s |        27485.560010 s |
+  async-io:85265          |     270.482 us |       16 |       14.496 us |       62.838 us |        27485.582962 s |        27485.583025 s |
+  blocking-4:11984        |     247.082 us |       20 |       14.453 us |       45.961 us |        27487.500206 s |        27487.500252 s |
+  ThreadPoolForeg:42041   |     746.840 us |       12 |       14.370 us |       49.113 us |        27488.724897 s |        27488.724947 s |
+  blocking-2:7531         |     270.432 us |       20 |       14.204 us |       48.528 us |        27484.789512 s |        27484.789560 s |
+  Chrome_ChildIOT:41970   |     483.954 us |       16 |       14.199 us |       62.972 us |        27492.284653 s |        27492.284716 s |
+  ThreadPoolForeg:43468   |      57.440 ms |       53 |       14.122 us |      131.203 us |        27488.724914 s |        27488.725045 s |
+  kworker/u134:4-:73344   |      99.813 ms |     1081 |       14.115 us |        1.610 ms |        27487.976255 s |        27487.977865 s |
+  gdbus:10527             |       2.744 ms |       14 |       14.066 us |       49.910 us |        27486.879917 s |        27486.879967 s |
+  ThreadPoolForeg:42013   |       1.984 ms |       14 |       13.958 us |      131.585 us |        27488.724910 s |        27488.725041 s |
+  language_server:42878   |       5.244 ms |       66 |       13.757 us |       71.161 us |        27485.026311 s |        27485.026382 s |
+  gsd-sharing:7263        |      94.917 us |        1 |       13.711 us |       13.711 us |        27488.731368 s |        27488.731382 s |
+  language_server:43451   |     171.871 us |       10 |       13.667 us |       43.287 us |        27483.679796 s |        27483.679839 s |
+  ksoftirqd/15:208        |      17.272 us |       52 |       13.641 us |      518.080 us |        27491.853809 s |        27491.854327 s |
+  nvidia-powerd:3031      |       2.231 ms |       10 |       13.199 us |       34.244 us |        27490.857843 s |        27490.857877 s |
+  kworker/u130:5-:84944   |       9.846 ms |      458 |       13.197 us |        1.011 ms |        27488.053981 s |        27488.054993 s |
+  gdbus:11307             |     984.101 us |       14 |       13.178 us |       86.984 us |        27486.861967 s |        27486.862054 s |
+  ThreadPoolForeg:42010   |       2.243 ms |       15 |       13.105 us |       62.057 us |        27488.724929 s |        27488.724991 s |
+  kworker/6:1-rcu:48145   |       1.481 ms |      200 |       13.081 us |        1.605 ms |        27491.724802 s |        27491.726407 s |
+  pool-290:85260          |       1.152 ms |       11 |       13.061 us |       42.206 us |        27485.582725 s |        27485.582767 s |
+  kworker/12:0-ev:38115   |     773.330 us |       91 |       12.766 us |      264.507 us |        27487.075880 s |        27487.076144 s |
+  language_server:43450   |     142.356 us |       10 |       12.629 us |       34.282 us |        27491.665658 s |        27491.665693 s |
+  kthreadd:85283          |      31.698 ms |      637 |       12.447 us |        1.704 ms |        27491.799097 s |        27491.800801 s |
+  kworker/0:1-rcu:12      |      38.748 ms |    10194 |       12.250 us |        2.142 ms |        27492.741789 s |        27492.743931 s |
+  Chrome_IOThread:41346   |       1.229 ms |       23 |       12.160 us |       41.313 us |        27487.131051 s |        27487.131092 s |
+  kworker/u129:12:72868   |      82.048 ms |      709 |       12.120 us |        1.066 ms |        27488.020946 s |        27488.022012 s |
+  kworker/u128:1-:85108   |      53.321 ms |      707 |       12.120 us |      419.039 us |        27487.087986 s |        27487.088405 s |
+  kworker/u130:3-:72394   |      11.383 ms |      424 |       12.063 us |      600.815 us |        27491.728008 s |        27491.728609 s |
+  ThreadPoolForeg:42774   |     178.348 us |        4 |       12.051 us |       30.147 us |        27488.724887 s |        27488.724918 s |
+  migration/1:165         |     504.178 us |       37 |       12.029 us |      282.489 us |        27487.990956 s |        27487.991239 s |
+  kworker/u134:2-:84332   |      99.204 ms |      845 |       11.981 us |        1.613 ms |        27492.754177 s |        27492.755790 s |
+  timedcall:43452         |      99.705 us |        3 |       11.958 us |       20.513 us |        27490.976994 s |        27490.977015 s |
+  blocking-1:39076        |     228.344 us |       20 |       11.838 us |       47.016 us |        27484.020129 s |        27484.020176 s |
+  gly-global-exec:7365    |     381.650 us |       10 |       11.758 us |       43.422 us |        27485.585511 s |        27485.585554 s |
+  ThreadPoolForeg:41967   |      51.829 ms |       43 |       11.730 us |       85.092 us |        27488.724871 s |        27488.724956 s |
+  bwrap:85263             |       2.077 ms |        5 |       11.727 us |       41.186 us |        27485.579199 s |        27485.579241 s |
+  kworker/u129:19:73618   |      60.248 ms |      688 |       11.706 us |      936.017 us |        27488.107988 s |        27488.108924 s |
+  clash-verge-ser:3535    |       1.709 ms |       12 |       11.661 us |       57.344 us |        27489.943384 s |        27489.943441 s |
+  blocking-1:85267        |       1.434 ms |       18 |       11.557 us |       57.147 us |        27489.084342 s |        27489.084400 s |
+  blocking-8:12006        |     245.661 us |       20 |       11.502 us |       45.006 us |        27487.888924 s |        27487.888969 s |
+  kworker/u130:1-:52999   |       5.861 ms |      272 |       11.469 us |      356.363 us |        27488.130569 s |        27488.130926 s |
+  flexi_logger-fi:14302   |     264.164 us |       20 |       11.462 us |       39.412 us |        27489.990823 s |        27489.990863 s |
+  kworker/2:0-rcu:41303   |     261.688 us |       51 |       11.372 us |      181.776 us |        27484.515918 s |        27484.516099 s |
+  kworker/10:2-rc:38872   |       1.273 ms |      113 |       11.212 us |       67.838 us |        27491.363805 s |        27491.363873 s |
+  bwrap:85262             |      10.232 ms |        1 |       11.014 us |       11.014 us |        27485.567564 s |        27485.567575 s |
+  kthreadd:85286          |      91.934 ms |      308 |       10.941 us |      844.781 us |        27491.814487 s |        27491.815332 s |
+  WebRTC_W_and_N:43660    |     213.891 us |        4 |       10.940 us |       25.336 us |        27489.624302 s |        27489.624327 s |
+  thermald:3282           |       2.665 ms |       11 |       10.815 us |       45.684 us |        27487.331969 s |        27487.332015 s |
+  ThreadPoolForeg:41997   |      50.390 ms |       21 |       10.802 us |      117.382 us |        27488.724859 s |        27488.724977 s |
+  HangWatcher:41449       |      20.962 us |        1 |       10.787 us |       10.787 us |        27491.421495 s |        27491.421506 s |
+  ThreadPoolServi:41341   |      74.598 us |        2 |       10.725 us |       16.965 us |        27485.630903 s |        27485.630920 s |
+  tuned:3320              |     822.855 us |       10 |       10.688 us |       23.165 us |        27485.431346 s |        27485.431369 s |
+  kworker/u131:0-:39720   |     796.049 us |       24 |       10.616 us |       84.132 us |        27487.875197 s |        27487.875281 s |
+  language_server:42889   |       1.681 ms |       32 |       10.603 us |       46.868 us |        27485.562994 s |        27485.563041 s |
+  ThreadPoolForeg:42007   |       3.105 ms |       21 |       10.573 us |       60.640 us |        27486.970288 s |        27486.970348 s |
+  clash-verge:14298       |       3.325 ms |      200 |       10.268 us |       73.902 us |        27484.667803 s |        27484.667877 s |
+  blocking-1:11723        |     232.470 us |       20 |       10.180 us |       44.395 us |        27486.977437 s |        27486.977482 s |
+  kworker/u134:8-:84440   |     162.076 ms |     1115 |        9.791 us |      463.930 us |        27491.816974 s |        27491.817438 s |
+  gssproxy:3316           |      93.949 us |        1 |        9.714 us |        9.714 us |        27486.846890 s |        27486.846900 s |
+  kthreadd:85275          |      70.687 ms |      434 |        9.712 us |      699.690 us |        27488.026112 s |        27488.026812 s |
+  tailscaled:3324         |     748.725 us |       56 |        9.685 us |       39.197 us |        27483.621098 s |        27483.621137 s |
+  ksoftirqd/27:136        |      47.297 us |       10 |        9.654 us |       38.293 us |        27493.229785 s |        27493.229823 s |
+  kworker/19:1-rc:39721   |     431.943 us |       45 |        9.583 us |       82.319 us |        27487.023879 s |        27487.023962 s |
+  gdbus:10719             |     926.851 us |       15 |        9.577 us |       86.581 us |        27486.861411 s |        27486.861497 s |
+  ibus-engine-sim:11304   |     425.479 us |       11 |        9.486 us |       40.589 us |        27486.861245 s |        27486.861286 s |
+  ThreadPoolForeg:42003   |       7.110 ms |       34 |        9.382 us |       74.664 us |        27486.962885 s |        27486.962959 s |
+  kthreadd:85273          |     105.440 ms |      946 |        9.366 us |        1.196 ms |        27488.033174 s |        27488.034370 s |
+  kworker/u129:11:53208   |      37.758 ms |      447 |        9.354 us |      431.089 us |        27488.035617 s |        27488.036048 s |
+  kthreadd:85281          |      33.944 ms |      494 |        9.329 us |        2.161 ms |        27492.759740 s |        27492.761901 s |
+  kworker/8:0-eve:39716   |     188.060 us |       33 |        9.279 us |       53.366 us |        27488.016010 s |        27488.016063 s |
+  ksoftirqd/16:69         |       6.901 us |        2 |        9.094 us |       11.660 us |        27486.302899 s |        27486.302911 s |
+  pool-0:7485             |     409.089 us |        4 |        9.077 us |       21.119 us |        27483.384009 s |        27483.384030 s |
+  kworker/u129:0-:73359   |      86.778 ms |     1106 |        9.069 us |      680.923 us |        27487.993597 s |        27487.994278 s |
+  rtkit-daemon:39788      |      39.417 us |        2 |        9.043 us |        9.783 us |        27492.054810 s |        27492.054820 s |
+  gmain:10509             |      69.182 us |        3 |        9.006 us |       11.018 us |        27492.383727 s |        27492.383738 s |
+  kthreadd:85271          |      86.977 ms |      630 |        9.004 us |      739.639 us |        27491.852060 s |        27491.852800 s |
+  kworker/9:2-mm_:34676   |     117.590 us |       21 |        9.003 us |       64.468 us |        27487.523893 s |        27487.523958 s |
+  kworker/u129:8-:74994   |      87.817 ms |      979 |        8.912 us |      490.289 us |        27488.143754 s |        27488.144245 s |
+  xdg-desktop-por:11250   |     287.513 us |        2 |        8.846 us |       12.628 us |        27486.874591 s |        27486.874604 s |
+  language_server:42863   |       8.439 ms |       88 |        8.780 us |       81.314 us |        27485.562991 s |        27485.563072 s |
+  kworker/u130:0-:75089   |       3.804 ms |      169 |        8.624 us |      302.640 us |        27488.087235 s |        27488.087538 s |
+  psimon:3633             |     106.872 us |       16 |        8.593 us |       17.418 us |        27487.235876 s |        27487.235893 s |
+  kworker/u129:9-:84543   |      67.824 ms |      682 |        8.485 us |      638.192 us |        27488.093898 s |        27488.094536 s |
+  kworker/u129:3-:85037   |      92.825 ms |     1000 |        8.478 us |        1.367 ms |        27488.052208 s |        27488.053575 s |
+  Thread-1 (watch:8084    |      21.385 us |        1 |        8.434 us |        8.434 us |        27484.412237 s |        27484.412245 s |
+  chrome:41313            |      16.181 ms |       93 |        8.394 us |       48.242 us |        27487.203049 s |        27487.203097 s |
+  kworker/u134:12:73616   |     148.088 ms |      933 |        8.393 us |      742.353 us |        27488.055235 s |        27488.055977 s |
+  pool-0:85198            |      82.684 us |        1 |        8.392 us |        8.392 us |        27486.698216 s |        27486.698225 s |
+  kthreadd:85269          |     153.418 ms |     2400 |        8.356 us |        2.180 ms |        27492.759744 s |        27492.761924 s |
+  kworker/14:0-rc:41302   |     923.144 us |       94 |        8.346 us |      132.141 us |        27488.548851 s |        27488.548983 s |
+  chrome:41624            |     223.038 us |        3 |        8.344 us |        9.418 us |        27485.005888 s |        27485.005897 s |
+  flexi_logger-fi:14300   |     225.034 us |       20 |        8.310 us |       14.620 us |        27484.042539 s |        27484.042553 s |
+  kthreadd:85280          |      87.766 ms |      968 |        8.294 us |      924.000 us |        27488.090862 s |        27488.091786 s |
+  kworker/u129:2-:85036   |      92.334 ms |     1142 |        8.182 us |      951.786 us |        27488.055917 s |        27488.056869 s |
+  HangWatcher:41395       |      21.107 us |        1 |        8.165 us |        8.165 us |        27491.368630 s |        27491.368638 s |
+  clash-verge:14296       |      49.687 us |        2 |        7.957 us |       12.954 us |        27487.980863 s |        27487.980876 s |
+  kworker/u129:14:73517   |      44.051 ms |      501 |        7.946 us |      545.290 us |        27492.732249 s |        27492.732794 s |
+  kworker/29:1H-i:2497    |       1.608 ms |      120 |        7.887 us |       19.708 us |        27485.820650 s |        27485.820670 s |
+  kworker/u134:1-:84282   |     172.146 ms |      713 |        7.830 us |      363.538 us |        27488.073861 s |        27488.074225 s |
+  ksoftirqd/21:100        |     180.407 us |        6 |        7.687 us |       25.882 us |        27491.623082 s |        27491.623108 s |
+  kworker/20:2-rc:37167   |     278.222 us |       51 |        7.635 us |       51.851 us |        27485.161910 s |        27485.161962 s |
+  kworker/u134:0-:84959   |     176.337 ms |      789 |        7.634 us |      412.277 us |        27488.011731 s |        27488.012144 s |
+  kworker/4:3-eve:40944   |     236.618 us |       43 |        7.632 us |       54.724 us |        27485.539900 s |        27485.539955 s |
+  dmcrypt_write/2:2373    |      36.839 ms |     6460 |        7.628 us |        2.826 ms |        27488.115734 s |        27488.118560 s |
+  kworker/u129:16:73615   |      86.991 ms |     1356 |        7.556 us |        1.811 ms |        27488.025475 s |        27488.027286 s |
+  kworker/u134:9-:85199   |     142.300 ms |     1576 |        7.496 us |      570.700 us |        27491.802409 s |        27491.802979 s |
+  chrome:41373            |     411.363 us |        2 |        7.442 us |        8.927 us |        27490.837270 s |        27490.837279 s |
+  kworker/u129:1-:74616   |       8.630 ms |      162 |        7.332 us |      188.497 us |        27487.999674 s |        27487.999863 s |
+  kworker/u134:6-:84334   |     101.009 ms |      641 |        7.284 us |      290.180 us |        27487.981721 s |        27487.982011 s |
+  ThreadPoolForeg:43478   |      84.367 ms |       46 |        7.255 us |       77.028 us |        27488.724913 s |        27488.724990 s |
+  HangWatcher:41376       |      24.611 us |        1 |        7.240 us |        7.240 us |        27491.363960 s |        27491.363967 s |
+  WebRTC_Signalin:43659   |     167.374 us |        4 |        7.239 us |        9.320 us |        27483.631801 s |        27483.631811 s |
+  GpuWatchdog:42864       |      76.741 us |        1 |        7.232 us |        7.232 us |        27484.604331 s |        27484.604338 s |
+  kthreadd:85277          |     108.614 ms |      628 |        7.166 us |      461.311 us |        27491.856368 s |        27491.856829 s |
+  ThreadPoolSingl:42710   |      38.072 us |        1 |        7.058 us |        7.058 us |        27483.724929 s |        27483.724936 s |
+  ThreadPoolForeg:41379   |      21.762 us |        1 |        7.046 us |        7.046 us |        27483.724981 s |        27483.724988 s |
+  nvidia-powerd:3030      |     147.816 us |       10 |        6.974 us |       11.097 us |        27486.743048 s |        27486.743060 s |
+  ThreadPoolForeg:43479   |      82.738 ms |       49 |        6.967 us |       38.039 us |        27487.080727 s |        27487.080765 s |
+  kthreadd:85279          |      34.431 ms |      676 |        6.965 us |      456.037 us |        27491.815535 s |        27491.815991 s |
+  kthreadd:85272          |     105.572 ms |      634 |        6.933 us |      510.814 us |        27491.722153 s |        27491.722664 s |
+  kworker/u129:5-:74624   |      66.563 ms |     1234 |        6.932 us |        1.769 ms |        27491.833475 s |        27491.835244 s |
+  kthreadd:85282          |      43.555 ms |      848 |        6.914 us |      386.865 us |        27492.754557 s |        27492.754944 s |
+  kworker/24:1H-i:2462    |     588.125 us |       45 |        6.900 us |       17.926 us |        27488.095660 s |        27488.095678 s |
+  packagekitd:85193       |      88.826 us |        3 |        6.840 us |        7.478 us |        27491.725800 s |        27491.725807 s |
+  HangWatcher:41431       |      20.314 us |        1 |        6.813 us |        6.813 us |        27491.383318 s |        27491.383324 s |
+  tuned-ppd:3392          |     629.739 us |       11 |        6.810 us |        9.472 us |        27486.343165 s |        27486.343175 s |
+  HangWatcher:73543       |      23.833 us |        1 |        6.804 us |        6.804 us |        27492.715468 s |        27492.715475 s |
+  libuv-worker:42758      |      32.251 us |        1 |        6.727 us |        6.727 us |        27486.934667 s |        27486.934674 s |
+  kworker/23:1H-k:2458    |      83.095 us |        6 |        6.722 us |        9.659 us |        27487.316497 s |        27487.316507 s |
+  abrt-dump-journ:3197    |     233.848 us |        2 |        6.696 us |        7.704 us |        27490.429018 s |        27490.429026 s |
+  HangWatcher:41982       |      23.522 us |        1 |        6.653 us |        6.653 us |        27490.268347 s |        27490.268353 s |
+  gdbus:7309              |     124.606 us |        1 |        6.611 us |        6.611 us |        27488.731261 s |        27488.731268 s |
+  rtkit-daemon:39787      |      46.927 us |        2 |        6.569 us |        7.752 us |        27487.049883 s |        27487.049891 s |
+  ksoftirqd/6:39          |      55.787 us |        5 |        6.525 us |       24.332 us |        27483.341946 s |        27483.341970 s |
+  kthreadd:85276          |      92.501 ms |      770 |        6.512 us |      298.163 us |        27491.717368 s |        27491.717666 s |
+  HangWatcher:43606       |      23.705 us |        1 |        6.508 us |        6.508 us |        27489.324512 s |        27489.324518 s |
+  migration/24:117        |      89.896 us |       10 |        6.497 us |       16.230 us |        27486.009430 s |        27486.009446 s |
+  kworker/26:1H-k:2884    |     616.155 us |       54 |        6.440 us |       18.618 us |        27486.816597 s |        27486.816616 s |
+  kworker/u134:5-:74995   |      69.186 ms |      791 |        6.422 us |        1.066 ms |        27488.093458 s |        27488.094524 s |
+  btrfs-transacti:2412    |      86.264 ms |      185 |        6.400 us |       99.415 us |        27491.107822 s |        27491.107921 s |
+  kworker/27:1H-k:2473    |     154.377 us |       14 |        6.344 us |       15.864 us |        27491.764235 s |        27491.764251 s |
+  gvfsd-metadata:7458     |     225.704 us |        3 |        6.343 us |        7.749 us |        27486.380620 s |        27486.380628 s |
+  kworker/u134:11:73524   |     116.568 ms |     5134 |        6.270 us |        2.974 ms |        27488.105939 s |        27488.108913 s |
+  kworker/30:1H-i:2514    |       6.159 ms |      475 |        6.236 us |       35.851 us |        27487.973669 s |        27487.973705 s |
+  mt76-tx phy0:2865       |       1.269 ms |      145 |        6.174 us |       17.778 us |        27487.590022 s |        27487.590040 s |
+  kworker/u134:3-:84960   |     135.205 ms |     4234 |        6.000 us |        2.226 ms |        27491.727395 s |        27491.729622 s |
+  migration/17:75         |     434.505 us |       40 |        5.982 us |       35.239 us |        27487.351310 s |        27487.351345 s |
+  kworker/22:1H-i:2501    |      71.857 us |       11 |        5.956 us |       17.549 us |        27491.784900 s |        27491.784918 s |
+  kworker/u129:10:84544   |     156.254 ms |     1041 |        5.863 us |      429.313 us |        27488.110338 s |        27488.110767 s |
+  kworker/31:1H-i:2464    |       2.942 ms |      220 |        5.833 us |       12.663 us |        27487.383166 s |        27487.383178 s |
+  kworker/25:1H-i:2493    |     592.565 us |       46 |        5.813 us |        8.155 us |        27488.103979 s |        27488.103987 s |
+  migration/28:141        |     114.515 us |       11 |        5.776 us |       17.006 us |        27486.043465 s |        27486.043482 s |
+  migration/2:26          |     526.553 us |       57 |        5.700 us |       92.353 us |        27491.719914 s |        27491.720007 s |
+  kworker/19:1H-i:2495    |      74.442 us |       12 |        5.605 us |       13.813 us |        27491.856203 s |        27491.856217 s |
+  ThreadPoolForeg:43554   |       2.196 ms |       14 |        5.590 us |       20.805 us |        27487.042453 s |        27487.042474 s |
+  kworker/28:1H-i:2474    |       2.960 ms |      226 |        5.569 us |       13.636 us |        27488.940766 s |        27488.940780 s |
+  gnome-shell:7366        |       1.517 ms |        9 |        5.555 us |        8.038 us |        27485.575686 s |        27485.575694 s |
+  irqbalance:2927         |     445.582 us |        1 |        5.521 us |        5.521 us |        27490.733817 s |        27490.733822 s |
+  ksoftirqd/28:142        |     353.764 us |       21 |        5.453 us |       22.468 us |        27491.845814 s |        27491.845836 s |
+  migration/29:147        |     118.578 us |       10 |        5.352 us |       10.541 us |        27491.841165 s |        27491.841175 s |
+  kworker/9:1H-i9:2693    |     348.201 us |       24 |        5.319 us |        8.329 us |        27487.062311 s |        27487.062319 s |
+  NetworkManager:3204     |     236.090 us |        1 |        5.275 us |        5.275 us |        27488.730848 s |        27488.730853 s |
+  migration/20:93         |     316.762 us |       31 |        5.263 us |       10.321 us |        27487.998587 s |        27487.998598 s |
+  kworker/u128:0-:84913   |     194.331 us |       37 |        5.240 us |       64.193 us |        27487.077064 s |        27487.077129 s |
+  kworker/17:1H-i:2452    |      99.934 us |       12 |        5.216 us |        7.590 us |        27488.044721 s |        27488.044728 s |
+  kworker/u129:4-:74617   |      80.094 ms |      666 |        5.138 us |      178.711 us |        27488.144282 s |        27488.144461 s |
+  kworker/18:1H-k:674     |      48.413 us |        7 |        5.098 us |        6.743 us |        27488.006827 s |        27488.006834 s |
+  migration/18:81         |     425.721 us |       40 |        5.095 us |        8.931 us |        27486.964560 s |        27486.964569 s |
+  antigravity:42748       |     105.913 us |        8 |        5.074 us |       11.765 us |        27486.934697 s |        27486.934709 s |
+  kworker/21:1H-i:2454    |     168.957 us |       21 |        5.049 us |        9.710 us |        27487.966371 s |        27487.966380 s |
+  migration/16:68         |     686.149 us |       66 |        4.940 us |       23.819 us |        27487.968592 s |        27487.968616 s |
+  libuv-worker:42759      |      14.806 us |        1 |        4.921 us |        4.921 us |        27487.079455 s |        27487.079460 s |
+  migration/31:159        |         129 ns |        2 |        4.910 us |        6.184 us |        27490.070091 s |        27490.070097 s |
+  kthreadd:85278          |      53.369 ms |      450 |        4.899 us |      189.520 us |        27491.853211 s |        27491.853400 s |
+  verge-mihomo:14548      |       2.752 ms |      673 |        4.893 us |      145.390 us |        27487.680951 s |        27487.681096 s |
+  rcu_exp_par_gp_:18      |      21.738 us |        2 |        4.829 us |        7.042 us |        27485.579175 s |        27485.579182 s |
+  ksoftirqd/23:112        |       9.163 us |        5 |        4.792 us |        7.649 us |        27490.714829 s |        27490.714836 s |
+  migration/5:177         |     117.880 us |       14 |        4.791 us |       10.027 us |        27489.860875 s |        27489.860885 s |
+  kworker/u133:1-:83725   |       8.830 ms |      316 |        4.757 us |       76.265 us |        27488.070995 s |        27488.071071 s |
+  libuv-worker:42757      |      30.318 us |        1 |        4.748 us |        4.748 us |        27487.079288 s |        27487.079292 s |
+  migration/22:105        |     239.333 us |       24 |        4.747 us |        8.859 us |        27488.084008 s |        27488.084017 s |
+  kworker/16:1H-i:2459    |     104.597 us |       13 |        4.720 us |        6.561 us |        27487.986743 s |        27487.986749 s |
+  ibus-daemon:7226        |       2.277 ms |       29 |        4.684 us |       35.655 us |        27486.860977 s |        27486.861013 s |
+  ThreadPoolForeg:41998   |      47.710 ms |       16 |        4.654 us |        8.624 us |        27487.008985 s |        27487.008994 s |
+  kworker/3:1H-i9:2550    |     911.194 us |       92 |        4.605 us |       25.923 us |        27488.091840 s |        27488.091866 s |
+  migration/19:87         |     325.772 us |       32 |        4.586 us |        7.743 us |        27492.801057 s |        27492.801065 s |
+  migration/30:153        |      48.776 us |        6 |        4.506 us |        8.216 us |        27491.838673 s |        27491.838681 s |
+  migration/6:38          |     589.746 us |       70 |        4.501 us |       12.953 us |        27488.008810 s |        27488.008823 s |
+  kworker/1:1H-kb:2676    |     932.723 us |       77 |        4.493 us |        7.242 us |        27488.083158 s |        27488.083165 s |
+  ksoftirqd/11:196        |      24.136 us |       63 |        4.459 us |       51.669 us |        27483.939943 s |        27483.939994 s |
+  migration/0:20          |     666.330 us |       89 |        4.415 us |       30.237 us |        27491.715191 s |        27491.715221 s |
+  kworker/20:1H-k:2516    |      19.106 us |        4 |        4.391 us |        5.465 us |        27491.811495 s |        27491.811500 s |
+  migration/23:111        |     220.654 us |       25 |        4.389 us |        7.676 us |        27492.741220 s |        27492.741228 s |
+  migration/8:44          |     242.043 us |       30 |        4.377 us |        9.177 us |        27487.966380 s |        27487.966389 s |
+  language_server:42872   |      73.134 us |        7 |        4.363 us |        9.300 us |        27487.027818 s |        27487.027827 s |
+  migration/4:32          |     355.311 us |       42 |        4.362 us |       10.472 us |        27487.081403 s |        27487.081414 s |
+  kworker/13:1H-i:797     |     271.794 us |       28 |        4.352 us |        8.069 us |        27487.358139 s |        27487.358147 s |
+  migration/25:123        |      27.167 us |        5 |        4.338 us |        5.451 us |        27490.018096 s |        27490.018101 s |
+  kworker/0:1H-i9:798     |     154.197 us |       17 |        4.295 us |        7.789 us |        27487.999759 s |        27487.999766 s |
+  migration/26:129        |      44.903 us |        6 |        4.264 us |        5.460 us |        27487.982577 s |        27487.982583 s |
+  migration/21:99         |     194.499 us |       23 |        4.259 us |        7.161 us |        27487.044357 s |        27487.044364 s |
+  migration/3:171         |      98.874 us |       12 |        4.242 us |        6.567 us |        27489.849057 s |        27489.849064 s |
+  ksoftirqd/18:82         |      53.656 us |        2 |        4.200 us |        4.786 us |        27491.891004 s |        27491.891008 s |
+  kworker/4:1H-i9:2467    |      50.979 us |        9 |        4.193 us |       10.279 us |        27488.030856 s |        27488.030866 s |
+  language_server:42871   |       1.311 ms |      372 |        4.192 us |       91.707 us |        27485.413799 s |        27485.413890 s |
+  tokio-rt-worker:14368   |     103.162 us |        4 |        4.176 us |        5.933 us |        27489.943626 s |        27489.943632 s |
+  migration/7:183         |     205.097 us |       23 |        4.172 us |        7.951 us |        27487.948763 s |        27487.948771 s |
+  kworker/14:1H-k:2523    |     145.496 us |       22 |        4.168 us |        7.905 us |        27488.023721 s |        27488.023728 s |
+  migration/15:207        |     202.536 us |       24 |        4.163 us |        8.590 us |        27492.716108 s |        27492.716117 s |
+  migration/9:189         |     109.886 us |       14 |        4.144 us |        6.635 us |        27488.147516 s |        27488.147523 s |
+  glycin-image-rs:85264   |       1.590 ms |        3 |        4.130 us |        5.485 us |        27485.581492 s |        27485.581497 s |
+  kworker/2:1H-i9:2468    |     107.627 us |       14 |        4.129 us |        8.202 us |        27491.744709 s |        27491.744717 s |
+  migration/13:201        |     158.928 us |       20 |        4.019 us |        8.988 us |        27487.968697 s |        27487.968706 s |
+  kworker/11:1H-k:692     |      99.420 us |       16 |        3.982 us |        7.306 us |        27491.786812 s |        27491.786820 s |
+  kworker/8:1H-i9:710     |     143.354 us |       13 |        3.957 us |        5.580 us |        27487.969921 s |        27487.969927 s |
+  kworker/6:1H-i9:2477    |     291.387 us |       44 |        3.908 us |        9.839 us |        27491.780510 s |        27491.780520 s |
+  kworker/u134:7-:84961   |      52.731 ms |     1013 |        3.871 us |      110.776 us |        27492.739320 s |        27492.739431 s |
+  ksoftirqd/5:178         |     544.316 us |       30 |        3.845 us |        8.089 us |        27487.078126 s |        27487.078134 s |
+  rs:main Q:Reg:3594      |     211.554 us |        9 |        3.815 us |        8.643 us |        27490.429358 s |        27490.429367 s |
+  migration/11:195        |     169.632 us |       21 |        3.804 us |        5.967 us |        27489.909074 s |        27489.909080 s |
+  kworker/5:1H-i9:2697    |     189.521 us |       33 |        3.769 us |       14.759 us |        27488.140455 s |        27488.140470 s |
+  mutter-x11-fram:9003    |      59.353 us |        1 |        3.757 us |        3.757 us |        27486.861371 s |        27486.861375 s |
+  kworker/12:1H-k:2443    |     184.011 us |       35 |        3.704 us |        8.224 us |        27484.965973 s |        27484.965982 s |
+  ksoftirqd/20:94         |      12.150 us |        1 |        3.684 us |        3.684 us |        27483.427952 s |        27483.427955 s |
+  ksoftirqd/9:190         |       7.738 us |       22 |        3.678 us |        5.189 us |        27487.854891 s |        27487.854897 s |
+  migration/12:56         |     507.095 us |       77 |        3.674 us |        8.868 us |        27486.966462 s |        27486.966471 s |
+  migration/27:135        |      35.203 us |        5 |        3.660 us |        4.778 us |        27486.035157 s |        27486.035162 s |
+  kworker/15:1H-i:2570    |     216.622 us |       31 |        3.621 us |       10.377 us |        27491.781989 s |        27491.782000 s |
+  migration/10:50         |     657.504 us |      100 |        3.619 us |        8.103 us |        27487.050431 s |        27487.050439 s |
+  ksoftirqd/3:172         |     123.125 us |       23 |        3.566 us |        6.640 us |        27486.939885 s |        27486.939892 s |
+  kworker/10:1H-i:799     |     135.236 us |       20 |        3.548 us |        5.990 us |        27487.974924 s |        27487.974930 s |
+  migration/14:62         |     562.856 us |       86 |        3.491 us |        8.228 us |        27487.974220 s |        27487.974228 s |
+  kworker/7:1H-kb:2967    |     156.601 us |       27 |        3.477 us |        5.977 us |        27488.108134 s |        27488.108140 s |
+  tina:84199              |       9.109 s  |    97309 |        3.296 us |        2.818 ms |        27486.957848 s |        27486.960666 s |
+  tina:84203              |       9.111 s  |    96510 |        3.290 us |        2.719 ms |        27488.110697 s |        27488.113416 s |
+  tina:84202              |       9.113 s  |    96123 |        3.274 us |        2.823 ms |        27491.717235 s |        27491.720058 s |
+  tina:84204              |       9.108 s  |    97368 |        3.212 us |        2.405 ms |        27491.717669 s |        27491.720074 s |
+  tina:84197              |       9.139 s  |    95701 |        3.194 us |        1.863 ms |        27491.874529 s |        27491.876392 s |
+  tina:84198              |       9.125 s  |    97240 |        3.166 us |        2.820 ms |        27488.158460 s |        27488.161280 s |
+  tina:84200              |       9.124 s  |    96994 |        3.161 us |        2.791 ms |        27491.738317 s |        27491.741108 s |
+  tina:84201              |       9.129 s  |    97254 |        3.150 us |        2.833 ms |        27488.106915 s |        27488.109748 s |
+  ksoftirqd/22:106        |       1.876 us |        1 |        3.115 us |        3.115 us |        27488.667859 s |        27488.667863 s |
+  gdbus:3213              |      46.581 us |        1 |        3.076 us |        3.076 us |        27488.731075 s |        27488.731078 s |
+  ksoftirqd/1:166         |     343.311 us |      200 |        2.910 us |        7.950 us |        27485.704904 s |        27485.704911 s |
+  ksoftirqd/7:184         |     169.960 us |      651 |        2.780 us |      153.360 us |        27490.227828 s |        27490.227982 s |
+  ksoftirqd/2:27          |       5.369 us |        2 |        2.724 us |        3.472 us |        27485.132177 s |        27485.132181 s |
+  ksoftirqd/8:45          |         170 ns |        3 |        2.220 us |        2.829 us |        27487.124901 s |        27487.124904 s |
+  kthreadd:85287          |      16.040 us |        2 |        1.955 us |        2.888 us |        27491.817628 s |        27491.817631 s |
+  tina_bench:85124        |       4.048 s  |   400414 |        1.936 us |        2.985 ms |        27488.033079 s |        27488.036064 s |
+  tina:84192              |       6.643 s  |   322819 |        1.933 us |        3.078 ms |        27492.740834 s |        27492.743912 s |
+  tina:84193              |       6.920 s  |   124474 |        1.838 us |        2.989 ms |        27488.139936 s |        27488.142925 s |
+  tina:84194              |       6.918 s  |   125064 |        1.824 us |        3.220 ms |        27488.111363 s |        27488.114583 s |
+  tina_bench:85127        |       6.233 s  |   289638 |        1.729 us |        2.687 ms |        27488.055903 s |        27488.058590 s |
+  tina:84195              |       6.844 s  |   140438 |        1.729 us |        1.638 ms |        27491.762794 s |        27491.764433 s |
+  tina_bench:85128        |       6.223 s  |   294395 |        1.721 us |        3.306 ms |        27487.121017 s |        27487.124323 s |
+  tina_bench:85126        |       6.223 s  |   301844 |        1.692 us |        3.042 ms |        27487.084843 s |        27487.087885 s |
+ ------------------------------------------------------------------------------------------------------------------------------------------
+  TOTAL:                  |     143.498 s  |  2930167 |
+ ------------------------------------------------------
+

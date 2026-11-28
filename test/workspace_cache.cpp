@@ -124,6 +124,34 @@ int test_lru_and_invalidation() {
     CHECK(lru_cache.file_cache_size() <= 32);
     CHECK(file_evict_count >= 8);
 
+    // 6. 验证分片已满时的二次准入过滤：首次冷未命中返回 admit=false，紧接第二次未命中返回 admit=true。
+    service::WorkspaceCache admit_cache(service::WorkspaceCacheConfig{
+        .max_dir_entries = 4,
+        .max_dir_bytes = 64 * 1024,
+        .max_file_entries = 4, // 仅 1 个分片，容量 4 条
+        .max_file_bytes = 64 * 1024,
+        .max_per_file_bytes = 1024,
+    });
+    for (int i = 0; i < 3; ++i) {
+        bool admit = false;
+        std::uint64_t ep = 0;
+        const std::string k = "warm_" + std::to_string(i);
+        CHECK(admit_cache.get_file(k, &ep, &admit) == nullptr && admit);
+        admit_cache.put_file(k, std::make_shared<ReadFileResponse>(ReadFileResponse{1, 1, "x"}), ep);
+    }
+    {
+        bool admit = false;
+        std::uint64_t ep = 0;
+        CHECK(admit_cache.get_file("warm_3", &ep, &admit) == nullptr && admit);
+        admit_cache.put_file("warm_3",
+                             std::make_shared<ReadFileResponse>(ReadFileResponse{1, 1, "x"}), ep);
+    }
+    {
+        bool admit1 = true, admit2 = false;
+        CHECK(admit_cache.get_file("cold_scan_key", nullptr, &admit1) == nullptr && !admit1);
+        CHECK(admit_cache.get_file("cold_scan_key", nullptr, &admit2) == nullptr && admit2);
+    }
+
     return 0;
 }
 

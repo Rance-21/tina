@@ -56,22 +56,43 @@ template <class T> class ShardedLruCache {
             std::atomic<Slot *> first{};
             std::atomic<std::uint64_t> epoch{};
         };
+        static constexpr std::size_t ghost_size = 64;
         std::vector<Slot> slots;
         std::vector<Bucket> buckets;
 
+        alignas(64) std::array<std::atomic<std::uint32_t>, ghost_size> ghost{};
         alignas(64) std::mutex mutex;
-        std::size_t bytes{}, clock_hand{};
-        Slot *free{};
+        std::atomic<std::size_t> bytes{};
+        std::size_t clock_hand{};
+        std::atomic<Slot *> free{};
         // 通常由缓存独占；仅当缓存先于外借 Handle 销毁时，由最后一个槽位释放本分片。
         std::shared_ptr<Shard> orphan;
 
         explicit Shard(std::size_t n) : slots(n), buckets(std::bit_ceil(n * 2)) {
+            Slot *head = nullptr;
             for (auto &s : slots) {
                 s.shard = this;
                 s.reclaim = release_retired;
-                s.free_next = free;
-                free = &s;
+                s.free_next = head;
+                head = &s;
             }
+            free.store(head, std::memory_order_relaxed);
+        }
+
+        // 分片未满时直接放行首次回填；已满进入淘汰态时仅放行近期二次命中的路径，过滤单次冷扫抖动。
+        bool should_admit(std::size_t h, std::size_t limit) noexcept {
+            if (free.load(std::memory_order_relaxed) != nullptr &&
+                bytes.load(std::memory_order_relaxed) < limit - limit / 8) {
+                return true;
+            }
+            const auto tag = static_cast<std::uint32_t>(h >> 32) | 1u;
+            auto &g = ghost[(h >> 12) & (ghost_size - 1)];
+            if (g.load(std::memory_order_relaxed) == tag) {
+                g.store(0, std::memory_order_relaxed);
+                return true;
+            }
+            g.store(tag, std::memory_order_relaxed);
+            return false;
         }
 
         Bucket &bucket(std::size_t hash) noexcept {
@@ -118,7 +139,8 @@ template <class T> class ShardedLruCache {
             if ((s.state.fetch_or(Slot::retired, std::memory_order_acq_rel) & Slot::count_mask) !=
                 0)
                 return false;
-            bytes -= std::exchange(s.bytes, 0);
+            bytes.store(bytes.load(std::memory_order_relaxed) - std::exchange(s.bytes, 0),
+                        std::memory_order_relaxed);
             return true;
         }
 
@@ -152,10 +174,11 @@ template <class T> class ShardedLruCache {
             }
             std::shared_ptr<Shard> keep;
             std::lock_guard lock(shard.mutex);
-            shard.bytes -= released;
-            last->free_next = shard.free;
-            shard.free = list;
-            if (shard.bytes == 0)
+            const auto rem = shard.bytes.load(std::memory_order_relaxed) - released;
+            shard.bytes.store(rem, std::memory_order_relaxed);
+            last->free_next = shard.free.load(std::memory_order_relaxed);
+            shard.free.store(list, std::memory_order_relaxed);
+            if (rem == 0)
                 keep = std::move(shard.orphan);
         }
 
@@ -183,7 +206,7 @@ template <class T> class ShardedLruCache {
         clear();
         for (auto &s : shards_) {
             std::lock_guard lock(s->mutex);
-            if (s->bytes)
+            if (s->bytes.load(std::memory_order_relaxed))
                 s->orphan = s;
         }
     }
@@ -194,7 +217,8 @@ template <class T> class ShardedLruCache {
     void set_evict_callback(EvictCallback cb) { on_evict_ = std::move(cb); }
 
     Handle get_hashed(std::string_view key, std::size_t h, std::uint64_t *miss_epoch = nullptr,
-                      std::string_view *pinned_key = nullptr, bool *was_hot = nullptr) {
+                      std::string_view *pinned_key = nullptr, bool *was_hot = nullptr,
+                      bool *admit = nullptr) {
         auto &shard = *shards_[h & shard_mask_];
         auto &b = shard.bucket(h);
         const auto ep = b.epoch.load(std::memory_order_acquire);
@@ -211,15 +235,20 @@ template <class T> class ShardedLruCache {
                 return Shard::try_pin(*s, key, h, pinned_key, was_hot);
             if (miss_epoch)
                 *miss_epoch = b.epoch.load(std::memory_order_relaxed);
+            if (admit)
+                *admit = shard.should_admit(h, limit_);
             return {};
         }
         if (miss_epoch)
             *miss_epoch = ep;
+        if (admit)
+            *admit = shard.should_admit(h, limit_);
         return {};
     }
 
-    Handle get(std::string_view key, std::uint64_t *miss_epoch = nullptr) {
-        return get_hashed(key, TransparentStringHash{}(key), miss_epoch);
+    Handle get(std::string_view key, std::uint64_t *miss_epoch = nullptr,
+               bool *admit = nullptr) {
+        return get_hashed(key, TransparentStringHash{}(key), miss_epoch, nullptr, nullptr, admit);
     }
 
     std::uint64_t epoch(std::string_view key) const noexcept {
@@ -254,18 +283,21 @@ template <class T> class ShardedLruCache {
                 (old = s)->free_next = nullptr;
 
             std::size_t avail = limit_ - bytes;
-            bool can_fit = (old || shard.free) && shard.bytes <= avail;
+            Slot *free_head = shard.free.load(std::memory_order_relaxed);
+            bool can_fit = (old || free_head) &&
+                           shard.bytes.load(std::memory_order_relaxed) <= avail;
             for (auto &s : shard.slots) {
                 if (can_fit)
                     break;
                 if (!(s.state.load(std::memory_order_relaxed) & ~Slot::used))
-                    can_fit = (avail += s.bytes) >= shard.bytes;
+                    can_fit = (avail += s.bytes) >= shard.bytes.load(std::memory_order_relaxed);
             }
 
             if (can_fit) {
                 const std::size_t n = shard.slots.size();
                 for (std::size_t step = 0;
-                     ((!old && !shard.free && !evicted) || shard.bytes > limit_ - bytes) &&
+                     ((!old && !free_head && !evicted) ||
+                      shard.bytes.load(std::memory_order_relaxed) > limit_ - bytes) &&
                      step < n * 2;
                      ++step) {
                     auto &s = shard.slots[shard.clock_hand];
@@ -285,18 +317,20 @@ template <class T> class ShardedLruCache {
                 }
                 *evicted_tail = nullptr;
 
-                if (shard.bytes <= limit_ - bytes && (old || shard.free || evicted)) {
+                const auto cur_bytes = shard.bytes.load(std::memory_order_relaxed);
+                if (cur_bytes <= limit_ - bytes && (old || free_head || evicted)) {
                     Slot *dest = std::exchange(old, nullptr);
-                    if (!dest && shard.free)
-                        dest = std::exchange(shard.free, shard.free->free_next);
-                    else if (!dest) {
+                    if (!dest && free_head) {
+                        dest = free_head;
+                        shard.free.store(free_head->free_next, std::memory_order_relaxed);
+                    } else if (!dest) {
                         dest = std::exchange(evicted, evicted->free_next);
                         notify_reused = true;
                     }
                     dest->value.swap(incoming);
                     dest->key.swap(name);
                     dest->bytes = bytes;
-                    shard.bytes += bytes;
+                    shard.bytes.store(cur_bytes + bytes, std::memory_order_relaxed);
                     dest->hash.store(h, std::memory_order_relaxed);
                     dest->chain.store(b.first.load(std::memory_order_relaxed),
                                       std::memory_order_relaxed);
@@ -367,6 +401,9 @@ template <class T> class ShardedLruCache {
     }
     void clear() noexcept {
         invalidate_matching([](auto) { return true; });
+        for (auto &shard : shards_)
+            for (auto &g : shard->ghost)
+                g.store(0, std::memory_order_relaxed);
     }
     std::size_t size() const noexcept {
         std::size_t total = 0;

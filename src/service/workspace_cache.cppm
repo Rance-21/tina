@@ -60,8 +60,9 @@ class WorkspaceCache {
 
     // ---- 文件内容缓存（workspace_read_file，缓存完整 ReadFileResponse） ----
     [[nodiscard]] FileHandle get_file(std::string_view rel_path,
-                                      std::uint64_t *miss_epoch = nullptr) {
-        return files_.get(rel_path, miss_epoch);
+                                      std::uint64_t *miss_epoch = nullptr,
+                                      bool *admit = nullptr) {
+        return files_.get(rel_path, miss_epoch, admit);
     }
 
     [[nodiscard]] std::uint64_t file_epoch(std::string_view rel_path) const {
