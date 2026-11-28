@@ -35,50 +35,34 @@ void TerminalManager::handle_terminal_state(Frame &frame, int conn_fd) {
 }
 
 // ========================================================================
-// 2. 处理 0x0301 (terminal_input) 请求：发送完整命令（Worker 解码 + IO 线程 EPOLLOUT 写入）
+// 2. 处理 0x0301 (terminal_input) 请求：在所属 I/O 线程内联解码并挂入 EPOLLOUT 发送缓冲
 // ========================================================================
-// 流程：
-//   1. Worker 解码出 terminal_id 和命令文本，在末尾追加 '\r'；
-//   2. 投递到所属 I/O 线程，写入 session->write_buffer，并调用 loop_.modify_event() 注册 EPOLLOUT；
-//   3. 当 master_fd 触发 EPOLLOUT 时写入内核 PTY 缓冲区，写完后立即撤销 EPOLLOUT（只保留 EPOLLIN）；
-//   4. 命令执行期间的输出由 EPOLLIN 触发并通过 terminal_output (0x0381) 推送，
-//      命令执行完毕由 PROMPT_COMMAND 触发并通过 terminal_state (0x0303) 事件推送。
-void TerminalManager::handle_terminal_input(Frame &frame, int conn_fd) {
-    // 零拷贝校验并解析出 terminal_id 与指向 frame.payload 内部的命令视图
-    auto req = decode_terminal_payload_view(frame.payload);
+void TerminalManager::handle_terminal_input(std::string_view payload, Frame &response,
+                                            int conn_fd) {
+    auto req = decode_terminal_payload_view(payload);
     if (!req || req->terminal_id == 0) {
-        frame.status = Status::invalid_argument;
-        frame.payload = encode_terminal_input(0, "invalid terminal_input payload");
+        response.status = Status::invalid_argument;
+        response.payload = encode_terminal_input(0, "invalid terminal_input payload");
         return;
     }
     const std::uint32_t terminal_id = req->terminal_id;
     auto session = find_session(terminal_id, conn_fd);
-    if (!session) {
-        frame.status = Status::not_found;
-        frame.payload = encode_terminal_input(terminal_id, "terminal not found");
+    if (!session || session->closed || session->master_fd < 0) {
+        response.status = Status::not_found;
+        response.payload = encode_terminal_input(terminal_id, "terminal not found");
         return;
     }
 
-    // 直接复用当前 RPC 请求帧的 payload 缓冲区：在末尾追加 '\r' 后整块 move 给 I/O 线程，零额外拷贝。
-    frame.payload.push_back('\r');
-    std::weak_ptr<Session> weak_session = session;
+    session->running_command = true;
+    session->write_buffer.append(req->data.data(), req->data.size());
+    session->write_buffer.append("\r", 1);
+    try {
+        loop_.modify_event(session->master_fd, net::EpollInterest::read | net::EpollInterest::write);
+    } catch (...) {
+    }
 
-    loop_.post_task([&loop = loop_, weak_session, raw = std::move(frame.payload)]() {
-        auto s = weak_session.lock();
-        if (!s || s->closed || s->master_fd < 0)
-            return;
-        s->running_command = true;
-        // 跳过前 8 字节头部（[u32 len][u32 terminal_id]），直接将命令 + '\r' 写入发送缓冲
-        s->write_buffer.append(raw.data() + 8, raw.size() - 8);
-        try {
-            // 注册 EPOLLOUT：通知 epoll 当 master_fd 可写时唤醒 I/O 线程写入命令
-            loop.modify_event(s->master_fd, net::EpollInterest::read | net::EpollInterest::write);
-        } catch (...) {
-        }
-    });
-
-    frame.status = Status::ok;
-    frame.payload = encode_terminal_input(terminal_id, "OK");
+    response.status = Status::ok;
+    response.payload = encode_terminal_input(terminal_id, "OK");
 }
 
 // ========================================================================
@@ -126,12 +110,9 @@ void TerminalManager::handle_terminal_on_tab(Frame &frame, int conn_fd) {
     frame.payload = encode_terminal_on_tab(terminal_id, *completed);
 }
 
-// 统一分发终端相关的 RPC 请求（0x0301、0x0302、0x0303 连续操作序号）。
+// 统一分发需在 Worker 线程执行的终端 RPC 请求（0x0302 Tab 补全、0x0303 启停会话）。
 void TerminalManager::handle_request(Frame &frame, int conn_fd) {
     switch (frame.method) {
-    case Method::terminal_input:
-        handle_terminal_input(frame, conn_fd);
-        return;
     case Method::terminal_on_tab:
         handle_terminal_on_tab(frame, conn_fd);
         return;

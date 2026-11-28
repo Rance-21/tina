@@ -41,6 +41,10 @@ file(GLOB_RECURSE APP_MODULE_CANDIDATES CONFIGURE_DEPENDS
 set(APP_MODULES)
 foreach(MODULE_FILE IN LISTS APP_MODULE_CANDIDATES)
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${MODULE_FILE}")
+    if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug"
+       AND MODULE_FILE MATCHES "/src/(ide/client_|file/|net/address\\.cppm$)")
+        continue()
+    endif()
     file(STRINGS "${MODULE_FILE}" MODULE_DECLARATION
         REGEX "^[ \t]*export[ \t]+module[ \t]+"
     )
@@ -49,15 +53,21 @@ foreach(MODULE_FILE IN LISTS APP_MODULE_CANDIDATES)
     endif()
 endforeach()
 
-add_executable(${PROJECT_NAME} ${APP_SOURCES})
+function(tina_configure_binary target)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${target} PRIVATE
+            -Wall -Wextra -Wpedantic -ffunction-sections -fdata-sections
+            $<$<AND:$<CXX_COMPILER_ID:Clang>,$<NOT:$<CONFIG:Debug>>>:-flto=thin>
+        )
+        target_link_options(${target} PRIVATE
+            -Wl,--gc-sections
+            $<$<AND:$<CXX_COMPILER_ID:Clang>,$<NOT:$<CONFIG:Debug>>>:-flto=thin>
+        )
+    endif()
+endfunction()
 
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(${PROJECT_NAME} PRIVATE
-        -Wall
-        -Wextra
-        -Wpedantic
-    )
-endif()
+add_executable(${PROJECT_NAME} ${APP_SOURCES})
+tina_configure_binary(${PROJECT_NAME})
 
 set_target_properties(${PROJECT_NAME} PROPERTIES
     CXX_MODULE_STD ON
@@ -220,14 +230,7 @@ set_tests_properties(workerpool_integration PROPERTIES
 
 # 压测程序 tina_bench。
 add_executable(tina_bench benchmark/main.cpp)
-
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(tina_bench PRIVATE
-        -Wall
-        -Wextra
-        -Wpedantic
-    )
-endif()
+tina_configure_binary(tina_bench)
 
 set_target_properties(tina_bench PROPERTIES
     CXX_MODULE_STD ON

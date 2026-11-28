@@ -88,6 +88,8 @@ export class PayloadPin {
   public:
     struct Slot {
         static constexpr std::uint64_t retired = std::uint64_t{1} << 63;
+        static constexpr std::uint64_t used = std::uint64_t{1} << 62;
+        static constexpr std::uint64_t count_mask = ~(retired | used);
         std::atomic<std::uint64_t> state{retired};
         std::shared_ptr<const void> value;
         void (*reclaim)(Slot &) noexcept;
@@ -106,7 +108,8 @@ export class PayloadPin {
     ~PayloadPin() {
         if (raw_ && !(raw_ & 1)) {
             auto *s = reinterpret_cast<Slot *>(raw_);
-            if (s->state.fetch_sub(1, std::memory_order_acq_rel) == Slot::retired + 1)
+            if ((s->state.fetch_sub(1, std::memory_order_acq_rel) & ~Slot::used) ==
+                Slot::retired + 1)
                 s->reclaim(*s);
         }
     }

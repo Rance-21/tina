@@ -41,12 +41,11 @@ class Connection {
         return !accepting_requests_ && pending_ == 0 && output_.empty();
     }
 
-    // ONESHOT 交付一次事件后失效。只有待发队列非空时才订阅 EPOLLOUT，
-    // 否则几乎总是可写的 TCP socket 会让 epoll 不断唤醒本线程。
+    // 常驻水平触发读监听；仅当待发队列出现积压时按需挂载 EPOLLOUT，免去每轮 EPOLLONESHOT 重装系统调用。
     [[nodiscard]] net::EpollInterest interests() const noexcept {
-        auto mask = net::EpollInterest::one_shot;
-        if (accepting_requests_)
-            mask = mask | net::EpollInterest::read | net::EpollInterest::peer_closed;
+        auto mask = accepting_requests_
+                        ? (net::EpollInterest::read | net::EpollInterest::peer_closed)
+                        : net::EpollInterest{};
         if (wants_write())
             mask = mask | net::EpollInterest::write;
         return mask;
@@ -119,6 +118,7 @@ class Connection {
     // 已提交、但尚未收到业务执行结果的 RPC 数量。
     std::size_t pending_{0};
     bool accepting_requests_{true};
+    net::EpollInterest registered_{};
     net::Buffer input_;
     net::FrameSendQueue output_;
 };
@@ -141,10 +141,12 @@ class IoConnections {
         Connection &conn = it->second;
 
         try {
-            loop_.add_event(fd, conn.interests(),
+            const auto initial = conn.interests();
+            loop_.add_event(fd, initial,
                             [&conn, on_event = std::move(on_event)](net::EpollEvent event) {
                                 on_event(conn, event);
                             });
+            conn.registered_ = initial;
         } catch (...) {
             active_.erase(it);
             throw;
@@ -176,21 +178,23 @@ class IoConnections {
         }
     }
 
-    // 已经停读且没有待写数据时，只有在途 Worker 回包能推进连接，无需重装 ONESHOT。
+    // 仅在连接完全排空时关闭，或在关注掩码实际变化（如增删 EPOLLOUT / 停读）时调用 epoll_ctl。
     void rearm_or_close(Connection &conn) {
-        if (conn.finished())
+        if (conn.finished()) {
             close(conn.fd());
-        else if (conn.accepting_requests() || conn.wants_write())
-            loop_.modify_event(conn.fd(), conn.interests());
+            return;
+        }
+        const auto next = conn.interests();
+        if (next != conn.registered_) {
+            loop_.modify_event(conn.fd(), next);
+            conn.registered_ = next;
+        }
     }
 
-    bool flush_async(Connection &conn, bool had_output) noexcept {
+    bool flush_async(Connection &conn) noexcept {
         try {
             conn.flush_output();
-            // 当前 ONESHOT 仍然有效。只有新增/消除写积压或排空最后一次
-            // 回包才需要动作；socket 就绪回调则每次都要重新武装。
-            if (conn.finished() || conn.wants_write() != had_output)
-                rearm_or_close(conn);
+            rearm_or_close(conn);
             return true;
         } catch (...) {
             close(conn.fd());
@@ -200,13 +204,12 @@ class IoConnections {
 
     // PTY 与目录变更事件都在 socket 回调之外送达，要立即尝试写；广播保留原帧共享正文。
     bool send_async_frame(Connection &conn, Frame &frame, bool broadcast = false) {
-        const bool had_output = conn.wants_write();
         try {
             if (broadcast)
                 frame.share_payload();
             if (broadcast ? conn.output_.enqueue(std::as_const(frame), Connection::max_output)
                           : conn.output_.enqueue(frame, Connection::max_output))
-                return flush_async(conn, had_output);
+                return flush_async(conn);
         } catch (...) {
         }
         close(conn.fd());

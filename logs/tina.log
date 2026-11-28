@@ -337,3 +337,31 @@
 [2026-11-26 10:06:04.279] [info] [tid 888426] tina listening on port 3490 | io=4{0,2,4,8} | workers=8 (normal=2, blocking=6){16,17,18,19,20,21,22,23} | lane_cap=128 | inline_bytes=32768 | affinity=on
 [2026-11-26 10:06:26.026] [info] [tid 888426] shutdown: stop accepting connections
 [2026-11-26 10:06:26.027] [info] [tid 888426] shutdown: completed
+[2026-11-27 22:01:55.680] [warning] [tid 93811] topology: IO CPU 0 has online SMT sibling CPU 1 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-27 22:01:55.680] [warning] [tid 93811] topology: IO CPU 2 has online SMT sibling CPU 3 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-27 22:01:55.680] [warning] [tid 93811] topology: IO CPU 4 has online SMT sibling CPU 5 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-27 22:01:55.680] [warning] [tid 93811] topology: IO CPU 8 has online SMT sibling CPU 9 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-27 22:01:55.683] [info] [tid 93811] tina listening on port 3490 | io=4{0,2,4,8} | workers=8 (normal=2, blocking=6){16,17,18,19,20,21,22,23} | lane_cap=128 | affinity=on
+[2026-11-27 23:10:58.994] [info] [tid 93811] shutdown: stop accepting connections
+[2026-11-27 23:10:59.024] [info] [tid 93811] shutdown: completed
+[2026-11-28 15:38:38.776] [warning] [tid 44957] topology: IO CPU 0 has online SMT sibling CPU 1 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-28 15:38:38.776] [warning] [tid 44957] topology: IO CPU 2 has online SMT sibling CPU 3 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-28 15:38:38.776] [warning] [tid 44957] topology: IO CPU 4 has online SMT sibling CPU 5 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-28 15:38:38.776] [warning] [tid 44957] topology: IO CPU 8 has online SMT sibling CPU 9 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-28 15:38:38.781] [info] [tid 44957] tina listening on port 3490 | io=4{0,2,4,8} | workers=8 (normal=2, blocking=6){16,17,18,19,20,21,22,23} | lane_cap=128 | affinity=on
+[2026-11-28 16:06:06.187] [info] [tid 44957] shutdown: stop accepting connections
+[2026-11-28 16:06:06.189] [info] [tid 44957] shutdown: completed
+[2026-11-28 16:33:50.252] [warning] [tid 62166] topology: IO CPU 0 has online SMT sibling CPU 1 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-28 16:33:50.252] [warning] [tid 62166] topology: IO CPU 2 has online SMT sibling CPU 3 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-28 16:33:50.252] [warning] [tid 62166] topology: IO CPU 4 has online SMT sibling CPU 5 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-28 16:33:50.252] [warning] [tid 62166] topology: IO CPU 8 has online SMT sibling CPU 9 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-28 16:33:50.256] [info] [tid 62166] tina listening on port 3499 | io=4{0,2,4,8} | workers=8{16,17,18,19,20,21,22,23} | lane_cap=128 | affinity=on
+[2026-11-28 16:34:24.909] [info] [tid 62166] shutdown: stop accepting connections
+[2026-11-28 16:34:24.943] [info] [tid 62166] shutdown: completed
+[2026-11-28 16:35:35.177] [warning] [tid 62256] topology: IO CPU 0 has online SMT sibling CPU 1 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-28 16:35:35.177] [warning] [tid 62256] topology: IO CPU 2 has online SMT sibling CPU 3 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-28 16:35:35.177] [warning] [tid 62256] topology: IO CPU 4 has online SMT sibling CPU 5 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-28 16:35:35.177] [warning] [tid 62256] topology: IO CPU 8 has online SMT sibling CPU 9 (run scripts/smt_ctl.sh offline for strict core isolation)
+[2026-11-28 16:35:35.181] [info] [tid 62256] tina listening on port 3499 | io=4{0,2,4,8} | workers=8{16,17,18,19,20,21,22,23} | lane_cap=128 | affinity=on
+[2026-11-28 16:36:10.265] [info] [tid 62256] shutdown: stop accepting connections
+[2026-11-28 16:36:10.284] [info] [tid 62256] shutdown: completed

@@ -9,22 +9,15 @@ import rpc.protocol;
 export namespace net {
 
 // 基于 ::writev() 的单线程环形帧发送队列（服务端 Connection、客户端 RpcClient 与压测端共用）。
-// 常态使用内嵌 64 槽位环形数组承载流水线（零分配），超容量时按 2 的幂扩容；切片 owner 保活至整帧发完。
+// 常态使用内嵌 64 槽位环形数组承载流水线（零分配），短负载直接拼入帧头段合并 iovec。
 class FrameSendQueue {
   public:
-    FrameSendQueue() noexcept {
-        slots_ = inline_slots_.data();
-    }
+    FrameSendQueue() noexcept { slots_ = inline_slots_.data(); }
     FrameSendQueue(const FrameSendQueue &) = delete;
     FrameSendQueue &operator=(const FrameSendQueue &) = delete;
 
-    [[nodiscard]] inline bool empty() const noexcept {
-        return head_ == tail_;
-    }
-
-    [[nodiscard]] inline std::size_t readable_bytes() const noexcept {
-        return queued_bytes_;
-    }
+    [[nodiscard]] inline bool empty() const noexcept { return head_ == tail_; }
+    [[nodiscard]] inline std::size_t readable_bytes() const noexcept { return queued_bytes_; }
 
     // 当轮 writev 未排空（EAGAIN）时，将滞留帧上的临时借用 Pin 升级为独立持有。
     void promote_borrowed() noexcept {
@@ -44,15 +37,23 @@ class FrameSendQueue {
 
         Item &slot = slots_[tail_ & mask_];
         encode_frame_header(frame, slot.header.data());
+        if (frame.payload.size() <= Item::kMaxInlinePayload) {
+            if (!frame.payload.empty())
+                std::memcpy(slot.header.data() + frame_header_size, frame.payload.data(),
+                            frame.payload.size());
+            slot.header_len = static_cast<std::uint8_t>(frame_header_size + frame.payload.size());
+            slot.payload.clear();
+        } else {
+            slot.header_len = frame_header_size;
+            if constexpr (std::is_const_v<std::remove_reference_t<F>>)
+                slot.payload = frame.payload;
+            else
+                slot.payload = std::move(frame.payload);
+        }
         if constexpr (std::is_const_v<std::remove_reference_t<F>>) {
-            slot.payload = frame.payload;
             slot.payload_owner = frame.payload_owner;
             slot.external_payload = frame.external_payload;
         } else {
-            if (frame.payload.empty())
-                slot.payload.clear();
-            else
-                slot.payload = std::move(frame.payload);
             slot.payload_owner = std::move(frame.payload_owner);
             slot.external_payload = std::exchange(frame.external_payload, {});
         }
@@ -85,7 +86,7 @@ class FrameSendQueue {
 
             for (std::size_t cur = head_; cur != tail_; ++cur) {
                 const Item &item = slots_[cur & mask_];
-                if (!append_segment({item.header.data(), item.header.size()}) ||
+                if (!append_segment({item.header.data(), item.header_len}) ||
                     !append_segment(item.payload) || !append_segment(item.external_payload))
                     break;
             }
@@ -99,7 +100,7 @@ class FrameSendQueue {
 
             while (rem > 0) {
                 Item &front = slots_[head_ & mask_];
-                const auto left = frame_header_size + front.payload.size() +
+                const auto left = front.header_len + front.payload.size() +
                                   front.external_payload.size() - front_offset_;
                 if (rem < left) {
                     front_offset_ += rem;
@@ -124,11 +125,16 @@ class FrameSendQueue {
   private:
     static constexpr std::size_t kInlineCapacity = 64;
 
-    struct Item {
-        std::array<char, frame_header_size> header;
-        std::string payload;
-        PayloadOwner payload_owner;
+    struct alignas(64) Item {
+        static constexpr std::size_t kInlineBufSize = 47;
+        static constexpr std::size_t kMaxInlinePayload = kInlineBufSize - frame_header_size;
+
+        std::array<char, kInlineBufSize> header;
+        std::uint8_t header_len{frame_header_size};
         std::string_view external_payload;
+
+        alignas(64) PayloadOwner payload_owner;
+        std::string payload;
 
         void reset() noexcept {
             if (payload.capacity() > 128 * 1024)
@@ -139,6 +145,7 @@ class FrameSendQueue {
             external_payload = {};
         }
     };
+    static_assert(sizeof(Item) == 2 * 64, "FrameSendQueue::Item must span exactly two cache lines");
 
     void grow() {
         const std::size_t count = tail_ - head_;

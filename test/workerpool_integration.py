@@ -91,40 +91,39 @@ def start_server(tina_bin, env, port, extra_args):
 
 
 def test_cli_validation(tina_bin, env):
-    """【作用】验证服务端命令行参数 --normal-workers 会拒绝越界或非数字的非法值。
-    【原理】依次用 0、8、abc 启动服务端，断言每次都以非零退出码快速失败。
-    """
-    for bad in ("0", "8", "abc"):
+    """验证服务端命令行参数校验会拒绝非法队列容量及已移除参数。"""
+    for bad_args in (
+        ["--queue-capacity", "0"],
+        ["--queue-capacity", "3"],
+        ["--queue-capacity", "abc"],
+        ["--normal-workers", "2"],
+    ):
         res = subprocess.run(
-            [tina_bin, "server", "0", "--normal-workers", bad],
+            [tina_bin, "server", "0", *bad_args],
             env=env,
             capture_output=True,
             text=True,
             timeout=5,
         )
-        assert res.returncode != 0, (bad, res.stdout, res.stderr)
-    print("PASS: CLI --normal-workers validation", flush=True)
+        assert res.returncode != 0, (bad_args, res.stdout, res.stderr)
+    print("PASS: CLI argument validation", flush=True)
 
 
 def test_v2_paths(tina_bin, env, projects_root):
-    """【作用】端到端回归 WorkerPool V2 的全部核心路径与语义一致性。
-    【原理】准备 80KiB 大文件与小文件，启动服务端后依次发起 Inline PING、大文件冷读(Blocking)、
-    大文件热读(Normal)、<=32KiB 切片热读(Inline)、目录热缓存+inotify 推送、顺序读写与
-    同包 pipeline 写后读，最后发 SIGTERM 校验服务端优雅退出且输出 shutdown: completed。
-    """
+    """端到端回归同构 WorkerPool + 零拷贝内联的全部核心路径与语义一致性。"""
     proj = Path(projects_root) / "v2demo"
     proj.mkdir(parents=True, exist_ok=True)
-    # 1. 准备 > 32 KiB 热文件（80 KiB），验证首次 Blocking 读盘与后续 Normal Worker offload。
+    # 1. 准备 80 KiB 大文件，验证首次 Worker 读盘与后续零拷贝内联命中。
     large_data = (b"0123456789ABCDEF" * 5120)  # 81920 bytes
     large_file = proj / "big80k.bin"
     large_file.write_bytes(large_data)
 
-    # 2. 准备 <= 32 KiB 小文件与读写一致性文件。
+    # 2. 准备小文件与读写一致性文件。
     small_file = proj / "small.txt"
     small_file.write_bytes(b"v1-small")
 
     port = find_free_port()
-    proc = start_server(tina_bin, env, port, ["--normal-workers", "3"])
+    proc = start_server(tina_bin, env, port, [])
     try:
         with socket.create_connection((HOST, port), timeout=TIMEOUT) as sock:
             # Inline ping

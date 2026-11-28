@@ -17,7 +17,6 @@ void print_usage() {
         << "\n"
         << "server options:\n"
         << "  --port <port>              Listen port (default: 3490)\n"
-        << "  --normal-workers <k>       Number of Normal Workers, 1 <= k <= 7 (default: 2)\n"
         << "  --queue-capacity <n>       Per-lane SPSC queue capacity, power of 2 (default: 128)\n"
         << "  --io-cpus <list>           Comma/range CPU list for EventLoops (default: 0,2,4,8)\n"
         << "  --worker-cpus <list>       Comma/range CPU list for Workers (default: 16-23)\n"
@@ -36,11 +35,7 @@ struct ServerCliArgs {
     runtime::ServerConfig config{};
 };
 
-// 【作用】解析 `./tina server ...` 的端口和全部运行时配置参数。
-// 【原理】顺序扫描 argv[2..argc-1]：兼容原有的位置端口参数（如 `./tina server 3490 --normal-workers
-// 3`）
-//         与命名参数（--port / --normal-workers / --io-cpus 等），末尾统一调用 config.validate()
-//         校验范围。
+// 解析 `./tina server ...` 的端口和全部运行时配置参数，末尾统一调用 config.validate() 校验范围。
 ServerCliArgs parse_server_args(int argc, char *argv[]) {
     ServerCliArgs parsed;
     bool port_set = false;
@@ -60,9 +55,6 @@ ServerCliArgs parse_server_args(int argc, char *argv[]) {
         } else if (arg == "--port") {
             parsed.port = std::string(require_value(arg));
             port_set = true;
-        } else if (arg == "--normal-workers") {
-            const auto val = std::stoull(std::string(require_value(arg)));
-            parsed.config.non_blk_worker_cnt = static_cast<std::size_t>(val);
         } else if (arg == "--queue-capacity") {
             const auto val = std::stoull(std::string(require_value(arg)));
             parsed.config.queue_cap = static_cast<std::size_t>(val);

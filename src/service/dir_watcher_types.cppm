@@ -85,11 +85,9 @@ class DirWatcher {
             return;
         }
 
-        // 两个索引指向同一条监听。哈希表扩容不会移动节点，已订阅连接先比较世代号避免脏写节点。
+        // 两个索引指向同一条监听。哈希表扩容不会移动节点，已订阅连接直接在线性表内原位核对世代号。
         if (auto it = by_path_.find(rel_path); it != by_path_.end()) {
-            auto &subs = it->second->second.subscribers;
-            if (auto sit = subs.find(conn.fd()); sit == subs.end() || sit->second != conn.id())
-                subs[conn.fd()] = conn.id();
+            upsert_subscriber(it->second->second.subscribers, conn.fd(), conn.id());
             return;
         }
 
@@ -116,12 +114,19 @@ class DirWatcher {
         if (wd < 0)
             return;
 
-        auto it = watches_.try_emplace(wd).first;
+        auto [it, inserted] = watches_.try_emplace(wd);
         auto &entry = it->second;
-        if (entry.rel_path.empty())
-            entry.rel_path.assign(rel_path);
-        entry.subscribers[conn.fd()] = conn.id();
-        by_path_.emplace(entry.rel_path, &*it);
+        if (inserted) {
+            try {
+                entry.rel_path.assign(rel_path);
+                by_path_.emplace(entry.rel_path, &*it);
+            } catch (...) {
+                watches_.erase(it);
+                (void)::inotify_rm_watch(inotify_fd_, wd);
+                throw;
+            }
+        }
+        upsert_subscriber(entry.subscribers, conn.fd(), conn.id());
     }
 
     // 取消某条连接对 rel_path 目录的监听（由 workspace_close_dir 触发）。
@@ -136,20 +141,36 @@ class DirWatcher {
             return;
         }
         auto &[wd, entry] = *it->second;
-        entry.subscribers.erase(conn_fd);
+        std::erase_if(entry.subscribers,
+                      [conn_fd](const Subscriber &s) { return s.fd == conn_fd; });
         prune_disconnected_subscribers(entry);
         if (entry.subscribers.empty())
             remove_watch(wd, true);
     }
 
   private:
+    struct Subscriber {
+        int fd{-1};
+        std::uint64_t id{0};
+    };
+
     struct WatchEntry {
         std::string rel_path;
         // 只记录订阅时的 fd 和世代号，目录监听不会延长 TCP 连接的寿命。
-        std::unordered_map<int, std::uint64_t> subscribers;
+        std::vector<Subscriber> subscribers;
         bool refreshing{false};
         bool dirty{false};
     };
+
+    static void upsert_subscriber(std::vector<Subscriber> &subs, int fd, std::uint64_t id) {
+        for (auto &s : subs) {
+            if (s.fd == fd) {
+                s.id = id;
+                return;
+            }
+        }
+        subs.push_back({fd, id});
+    }
 
     // 目录异步重扫任务上下文（单 I/O 线程内池化复用，两层跨线程闭包收敛为 8B 单指针命中 24B SBO）。
     struct RefreshTaskContext {
@@ -228,8 +249,8 @@ class DirWatcher {
     }
 
     void prune_disconnected_subscribers(WatchEntry &entry) const {
-        std::erase_if(entry.subscribers, [this](const auto &subscriber) {
-            auto *conn = connections_.find(subscriber.first, subscriber.second);
+        std::erase_if(entry.subscribers, [this](const Subscriber &s) {
+            auto *conn = connections_.find(s.fd, s.id);
             return !conn || !conn->accepting_requests();
         });
     }

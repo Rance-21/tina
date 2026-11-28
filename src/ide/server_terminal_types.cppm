@@ -12,9 +12,9 @@ export import ide.server_protocol;
 export namespace server {
 
 // ============================================================================
-// 服务端终端管理器（绑定在所属连接 I/O 线程的 EventLoop 上）
+// 服务端终端管理器（直接内嵌于所属 I/O 线程的 IoSlotContext 上）
 // ============================================================================
-class TerminalManager : public std::enable_shared_from_this<TerminalManager> {
+class TerminalManager {
   public:
     // 由 rpc.handler 注入的事件发送回调（在所属 I/O 线程向对应客户端连接推送 Event 帧）。
     using EventSender = std::function<void(int conn_fd, Frame &&event)>;
@@ -36,7 +36,7 @@ class TerminalManager : public std::enable_shared_from_this<TerminalManager> {
 
     void handle_terminal_state(Frame &frame, int conn_fd);
 
-    void handle_terminal_input(Frame &frame, int conn_fd);
+    void handle_terminal_input(std::string_view payload, Frame &response, int conn_fd);
 
     void handle_terminal_on_tab(Frame &frame, int conn_fd);
 

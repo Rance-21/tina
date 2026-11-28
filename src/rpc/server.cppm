@@ -248,8 +248,6 @@ void run_server(std::string_view port, runtime::ServerConfig config = {}) {
         "tina listening on port " + std::string(port) +
         " | io=" + std::to_string(config.io_threads_cnt()) + format_cpu_list(config.io_cpus) +
         " | workers=" + std::to_string(config.worker_threads()) +
-        " (normal=" + std::to_string(config.non_blk_worker_cnt) +
-        ", blocking=" + std::to_string(config.blocking_workers()) + ")" +
         format_cpu_list(config.worker_cpus) + " | lane_cap=" + std::to_string(config.queue_cap) +
         " | affinity=" + (config.enable_cpu_affinity ? "on" : "off"));
 
@@ -268,7 +266,7 @@ void run_server(std::string_view port, runtime::ServerConfig config = {}) {
         if (slot.io_id == 0)
             service::global_file_watcher().stop();
 
-        slot.terminal_mgr->stop();
+        slot.terminal_mgr.stop();
 
         try {
             drained[slot.io_id] = slot.connections.begin_drain();

@@ -82,30 +82,29 @@ void TerminalManager::start_shell(Frame &frame, int conn_fd) {
     }
 
     // 将 master_fd 跨线程投递到所属连接的 EventLoop 上监听可读事件（EPOLLIN）。
-    auto registered = std::make_shared<std::promise<bool>>();
-    auto future = registered->get_future();
+    std::promise<bool> registered;
+    auto future = registered.get_future();
     std::weak_ptr<Session> weak_session = session;
-    std::weak_ptr<TerminalManager> weak = shared_from_this();
 
-    loop_.post_task([&loop = loop_, weak, weak_session, registered]() {
+    loop_.post_task([this, weak_session, registered = std::move(registered)]() mutable {
         auto s = weak_session.lock();
         if (!s || s->closed || s->master_fd < 0) {
-            registered->set_value(false);
+            registered.set_value(false);
             return;
         }
         try {
-            // epoll 回调仅持有 weak_session，不强引用 Session
-            loop.add_event(s->master_fd, net::EpollInterest::read,
-                           [weak, weak_session](net::EpollEvent ev) {
-                               auto sess = weak_session.lock();
-                               if (!sess)
-                                   return;
-                               if (auto mgr = weak.lock())
-                                   mgr->on_pty_event(sess, ev);
-                           });
-            registered->set_value(true);
+            const auto interest = s->write_buffer.empty()
+                                      ? net::EpollInterest::read
+                                      : (net::EpollInterest::read | net::EpollInterest::write);
+            // epoll 回调仅持有 weak_session，不强引用 Session；TerminalManager 在 stop() 时统一摘除监听。
+            loop_.add_event(s->master_fd, interest,
+                            [this, weak_session](net::EpollEvent ev) {
+                                if (auto sess = weak_session.lock())
+                                    on_pty_event(sess, ev);
+                            });
+            registered.set_value(true);
         } catch (...) {
-            registered->set_value(false);
+            registered.set_value(false);
         }
     });
 
@@ -142,16 +141,16 @@ void TerminalManager::close_shell(Frame &frame, int conn_fd, std::uint32_t termi
         return;
     }
 
-    auto unhooked = std::make_shared<std::promise<void>>();
-    auto future = unhooked->get_future();
+    std::promise<void> unhooked;
+    auto future = unhooked.get_future();
 
-    loop_.post_task([&loop = loop_, session, unhooked]() {
+    loop_.post_task([&loop = loop_, session, unhooked = std::move(unhooked)]() mutable {
         session->closed = true;
         try {
             loop.del_event(session->master_fd);
         } catch (...) {
         }
-        unhooked->set_value();
+        unhooked.set_value();
     });
     future.wait();
 

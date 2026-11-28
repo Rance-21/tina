@@ -154,25 +154,4 @@ void handle_workspace_list_dir(Frame &frame) {
         encode_workspace_list_dir(frame, std::move(encoded));
 }
 
-void handle_workspace_close_dir(Frame &frame) {
-    bool canonical_u16 = false;
-    auto req_path = decode_workspace_close_dir_view(frame.payload, &canonical_u16);
-    if (!req_path) {
-        frame.status = Status::invalid_argument;
-        frame.payload = "invalid workspace_close_dir payload";
-        return;
-    }
-
-    if (!service::file::is_valid_workspace_rel_path(*req_path) ||
-        service::file::workspace_root_fd() < 0) {
-        frame.status = Status::invalid_argument;
-        frame.payload = "invalid workspace directory path";
-        return;
-    }
-
-    frame.status = Status::ok;
-    if (!canonical_u16)
-        encode_workspace_close_dir_into(std::string(*req_path), frame.payload);
-}
-
 } // namespace server

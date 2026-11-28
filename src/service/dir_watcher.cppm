@@ -115,7 +115,7 @@ void DirWatcher::on_event(net::EpollEvent event) {
     }
 
     if (!changed_wds.empty()) {
-        // 本轮 inotify 可能同时命中多个目录变更，使用批量守卫合并唤醒沉睡 Blocking Worker。
+        // 本轮 inotify 可能同时命中多个目录变更，使用批量守卫合并唤醒沉睡 Worker。
         runtime::WorkerPool::SubmitBatchGuard wake_batch(workers_, io_id_);
         for (int wd : changed_wds)
             schedule_refresh(wd);
@@ -160,7 +160,7 @@ void DirWatcher::schedule_refresh(int wd) {
                   std::is_nothrow_move_constructible_v<decltype(worker_lambda)>,
                   "DirWatcher worker task must fit in std::move_only_function 24B SBO");
 
-    if (!workers_.try_submit(io_id_, runtime::TaskClass::blocking, std::move(worker_lambda))) {
+    if (!workers_.try_submit(io_id_, std::move(worker_lambda))) {
         release_refresh_ctx(ctx);
         entry.refreshing = false;
     }
@@ -183,9 +183,9 @@ void DirWatcher::complete_refresh(RefreshTaskContext *ctx) {
     prune_disconnected_subscribers(entry);
     if (event_frame) {
         const bool broadcast = entry.subscribers.size() > 1;
-        std::erase_if(entry.subscribers, [&](const auto &subscriber) {
+        std::erase_if(entry.subscribers, [&](const Subscriber &subscriber) {
             // 同一 I/O 线程内没有其他回调插入，刚校验过的节点在轮到它时一定存活。
-            auto *conn = connections_.find(subscriber.first, subscriber.second);
+            auto *conn = connections_.find(subscriber.fd, subscriber.id);
             return !connections_.send_async_frame(*conn, *event_frame, broadcast);
         });
     }

@@ -184,7 +184,6 @@ void bench_4io_8worker_matrix(std::size_t per_io_items) {
     });
 
     runtime::ServerConfig v2_cfg;
-    v2_cfg.non_blk_worker_cnt = 3;
     v2_cfg.enable_cpu_affinity = false;
     std::atomic<std::uint64_t> v2_done{0};
     const double sec_v2 = elapsed_seconds([&] {
@@ -195,13 +194,10 @@ void bench_4io_8worker_matrix(std::size_t per_io_items) {
                 for (std::size_t base = 0; base < per_io_items; base += 16) {
                     runtime::WorkerPool::SubmitBatchGuard batch(pool, io);
                     for (std::size_t off = 0; off < 16 && base + off < per_io_items; ++off) {
-                        const std::size_t i = base + off;
-                        const auto cls = (i % 4 == 0) ? runtime::TaskClass::blocking
-                                                      : runtime::TaskClass::normal;
                         runtime::PoolTask task = [&] {
                             v2_done.fetch_add(1, std::memory_order_relaxed);
                         };
-                        while (!pool.try_submit(io, cls, std::move(task)))
+                        while (!pool.try_submit(io, std::move(task)))
                             std::this_thread::yield();
                     }
                 }

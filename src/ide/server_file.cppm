@@ -28,10 +28,6 @@ void handle_workspace_request(Frame &frame) {
         handle_workspace_write_file(frame);
         return;
 
-    case Method::workspace_close_dir:
-        handle_workspace_close_dir(frame);
-        return;
-
     default:
         frame.status = Status::unsupported;
         frame.payload = "unsupported method";

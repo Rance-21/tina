@@ -38,13 +38,14 @@ export struct alignas(64) IoSlotContext {
     runtime::WorkerPool &workers;
     KvState &kv;
     const std::size_t io_id;
-    const std::shared_ptr<server::TerminalManager> terminal_mgr;
 
     // 独占缓存行承载跨簇无锁回包栈顶，与只读区及 I/O 线程私有状态物理隔离。
     alignas(64) std::atomic<RpcTaskContext *> completed_head_{nullptr};
 
     // 从新缓存行开始，避免 I/O 线程修改连接表、热表和任务池时使 Worker 缓存行失效。
-    alignas(64) IoConnections connections;
+    // terminal_mgr 先于 connections 构造、后于其析构，确保断连清理回调始终有效。
+    alignas(64) server::TerminalManager terminal_mgr;
+    IoConnections connections;
     Frame inline_response{};
     service::WorkspaceHotCache hot_cache{};
     service::DirWatcher watcher;
@@ -52,15 +53,14 @@ export struct alignas(64) IoSlotContext {
     IoSlotContext(net::EventLoop &loop, runtime::WorkerPool &workers, KvState &kv,
                   std::size_t io_id)
         : loop(loop), workers(workers), kv(kv), io_id(io_id),
-          terminal_mgr(std::make_shared<server::TerminalManager>(
-              loop,
-              [this](int fd, Frame &&event) {
-                  // PTY 回调由同一 EventLoop 执行；停读之后只发已接受请求的响应。
-                  auto *conn = connections.find(fd);
-                  if (conn && conn->accepting_requests())
-                      connections.send_async_frame(*conn, event);
-              })),
-          connections(loop, [this](int fd) noexcept { terminal_mgr->close_for_connection(fd); }),
+          terminal_mgr(loop,
+                       [this](int fd, Frame &&event) {
+                           // PTY 回调由同一 EventLoop 执行；停读之后只发已接受请求的响应。
+                           auto *conn = connections.find(fd);
+                           if (conn && conn->accepting_requests())
+                               connections.send_async_frame(*conn, event);
+                       }),
+          connections(loop, [this](int fd) noexcept { terminal_mgr.close_for_connection(fd); }),
           watcher(loop, connections, workers, io_id) {
         task_pool_.reserve(max_pooled_tasks);
         for (std::size_t i = 0; i < 64; ++i)
@@ -82,10 +82,8 @@ export struct alignas(64) IoSlotContext {
             loop.wakeup();
     }
 
-    // 从本线程空闲栈借节点。只有所有节点都在途时才分配，借出后由 Worker 独占，
-    // 直至回包投回本线程。仅当 Worker 需要解析请求负载时才拷贝进池化缓冲。
-    RpcTaskContext *acquire_task(const Connection &conn, const FrameView &request,
-                                 bool copy_payload) {
+    // 从本线程空闲栈借节点。只有所有节点都在途时才分配，借出后由 Worker 独占，直至回包投回本线程。
+    RpcTaskContext *acquire_task(const Connection &conn, const FrameView &request) {
         std::unique_ptr<RpcTaskContext> guard;
         if (task_pool_.empty()) {
             guard = std::make_unique<RpcTaskContext>(*this);
@@ -99,10 +97,7 @@ export struct alignas(64) IoSlotContext {
         guard->frame.request_id = request.request_id;
         guard->frame.method = request.method;
         guard->frame.status = Status::ok;
-        if (copy_payload)
-            guard->frame.payload.assign(request.payload);
-        else
-            guard->frame.payload.clear();
+        guard->frame.payload.assign(request.payload);
         return guard.release();
     }
 

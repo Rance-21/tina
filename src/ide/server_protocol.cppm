@@ -87,20 +87,15 @@ decode_workspace_write_file_view(std::string_view payload) noexcept {
 
 // 零拷贝解码 0x0205 (workspace_close_dir) 请求负载：
 // 格式：[u16 pathLength][path bytes]（即 len + data，同时兼容 4 字节大端 len 编码）。
-// is_canonical_u16 非空时返回是否已满足标准 2 字节长度头，便于服务端原样零拷贝回传响应。
-std::optional<std::string_view>
-decode_workspace_close_dir_view(std::string_view payload,
-                                bool *is_canonical_u16 = nullptr) noexcept {
+std::optional<std::string_view> decode_workspace_close_dir_view(std::string_view payload) noexcept {
     PayloadReader reader(payload);
     auto path_len = reader.read_int<std::uint16_t>();
     if (!path_len)
         return std::nullopt;
 
-    bool canonical = false;
     std::optional<std::string_view> path;
     if (*path_len > 0) {
         path = reader.read_bytes(*path_len);
-        canonical = true;
     } else if (reader.remaining_size() >= 2) {
         auto low_len = reader.read_int<std::uint16_t>();
         if (low_len && *low_len > 0)
@@ -109,9 +104,6 @@ decode_workspace_close_dir_view(std::string_view payload,
 
     if (!path || !reader.finished() || path->find('\0') != std::string_view::npos)
         return std::nullopt;
-
-    if (is_canonical_u16 != nullptr)
-        *is_canonical_u16 = canonical;
     return *path;
 }
 

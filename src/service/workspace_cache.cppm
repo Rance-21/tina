@@ -145,38 +145,51 @@ class WorkspaceCache {
     return instance;
 }
 
-// 每 I/O 线程独立的直映热表：仅接纳二次命中的真热点，命中时零原子借用 Pin 免除引用计数乒乓。
+// 每 I/O 线程独立的二路组相联热表（每桶 2 x 32B 恰好独占单条 64B 缓存行）：
+// 仅接纳二次命中的真热点，命中时零原子借用 Pin 免除跨簇引用计数乒乓与直映冲突抖动。
 class WorkspaceHotCache {
-    template <class T, std::size_t N> struct Table {
+    template <class T, std::size_t Buckets> struct Table {
         struct Entry {
             std::size_t hash{};
             std::string_view key{};
             detail::CacheHandle<T> pin{};
         };
-        std::array<Entry, N> slots{};
+        struct alignas(64) Bucket {
+            Entry ways[2]{};
+        };
+        static_assert(sizeof(Bucket) == 64, "HotCache 2-way bucket must fit in one cache line");
+
+        std::unique_ptr<Bucket[]> buckets{std::make_unique<Bucket[]>(Buckets)};
 
         detail::CacheHandle<T> get(detail::ShardedLruCache<T> &cache, std::string_view path,
                                    std::vector<PayloadPin> &deferred, auto bytes_of) {
             const auto h = detail::TransparentStringHash{}(path);
-            auto &e = slots[h & (N - 1)];
-            if (e.hash == h && e.pin) {
-                if (e.pin.active()) {
-                    if (e.key == path)
-                        return e.pin.borrow();
-                } else {
-                    deferred.push_back(std::move(e.pin));
-                    e = {};
+            auto &b = buckets[h & (Buckets - 1)];
+            for (auto &e : b.ways) {
+                if (e.hash == h && e.pin) {
+                    if (e.pin.active()) {
+                        if (e.key == path)
+                            return e.pin.borrow();
+                    } else {
+                        deferred.push_back(std::move(e.pin));
+                        e = {};
+                    }
                 }
             }
             std::string_view pinned_key;
             bool was_hot = false;
             auto pin = cache.get_hashed(path, h, nullptr, &pinned_key, &was_hot);
-            if (!pin || !was_hot || bytes_of(*pin) > 64 * 1024 || (e.pin && e.pin.active()))
+            if (!pin || !was_hot || bytes_of(*pin) > 64 * 1024)
                 return pin;
-            if (e.pin)
-                deferred.push_back(std::move(e.pin));
-            e = {h, pinned_key, std::move(pin)};
-            return e.pin.borrow();
+            for (auto &e : b.ways) {
+                if (!e.pin || !e.pin.active()) {
+                    if (e.pin)
+                        deferred.push_back(std::move(e.pin));
+                    e = {h, pinned_key, std::move(pin)};
+                    return e.pin.borrow();
+                }
+            }
+            return pin;
         }
     };
 
@@ -196,8 +209,8 @@ class WorkspaceHotCache {
     }
 
   private:
-    Table<std::string, 512> dirs_;
-    Table<ReadFileResponse, 128> files_;
+    Table<std::string, 2048> dirs_;
+    Table<ReadFileResponse, 256> files_;
     std::vector<PayloadPin> deferred_;
 };
 

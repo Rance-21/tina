@@ -40,7 +40,6 @@ template <class T> class ShardedLruCache {
 
     struct alignas(64) Slot : PayloadPin::Slot {
         Slot *free_next{};
-        std::atomic<std::uint8_t> used{};
 
         alignas(64) std::atomic<std::size_t> hash{};
         std::atomic<Slot *> chain{};
@@ -93,18 +92,16 @@ template <class T> class ShardedLruCache {
                 return {};
             auto st = s.state.load(std::memory_order_relaxed);
             while (!(st & Slot::retired)) {
-                if (s.state.compare_exchange_weak(st, st + 1, std::memory_order_acquire,
+                if (s.state.compare_exchange_weak(st, (st | Slot::used) + 1,
+                                                  std::memory_order_acquire,
                                                   std::memory_order_relaxed)) {
                     CacheHandle<T> handle(s);
                     if (s.hash.load(std::memory_order_relaxed) != h || s.key != key)
                         return {};
-                    const bool hot = s.used.load(std::memory_order_relaxed) != 0;
-                    if (!hot)
-                        s.used.store(1, std::memory_order_relaxed);
                     if (pinned_key)
                         *pinned_key = s.key;
                     if (was_hot)
-                        *was_hot = hot;
+                        *was_hot = (st & Slot::used) != 0;
                     return handle;
                 }
             }
@@ -118,7 +115,8 @@ template <class T> class ShardedLruCache {
                 link = &link->load(std::memory_order_relaxed)->chain;
             link->store(s.chain.load(std::memory_order_relaxed), std::memory_order_relaxed);
             b.epoch.fetch_add(1, std::memory_order_release);
-            if (s.state.fetch_or(Slot::retired, std::memory_order_acq_rel) != 0)
+            if ((s.state.fetch_or(Slot::retired, std::memory_order_acq_rel) & Slot::count_mask) !=
+                0)
                 return false;
             bytes -= std::exchange(s.bytes, 0);
             return true;
@@ -260,7 +258,7 @@ template <class T> class ShardedLruCache {
             for (auto &s : shard.slots) {
                 if (can_fit)
                     break;
-                if (s.state.load(std::memory_order_relaxed) == 0)
+                if (!(s.state.load(std::memory_order_relaxed) & ~Slot::used))
                     can_fit = (avail += s.bytes) >= shard.bytes;
             }
 
@@ -272,10 +270,12 @@ template <class T> class ShardedLruCache {
                      ++step) {
                     auto &s = shard.slots[shard.clock_hand];
                     shard.clock_hand = (shard.clock_hand + 1 == n) ? 0 : shard.clock_hand + 1;
-                    if (s.state.load(std::memory_order_relaxed) != 0)
+                    auto st = s.state.load(std::memory_order_relaxed);
+                    if (st & ~Slot::used)
                         continue;
-                    if (step < n && s.used.load(std::memory_order_relaxed)) {
-                        s.used.store(0, std::memory_order_relaxed);
+                    if (step < n && (st & Slot::used)) {
+                        (void)s.state.compare_exchange_strong(st, 0, std::memory_order_relaxed,
+                                                              std::memory_order_relaxed);
                         continue;
                     }
                     if (shard.retire(s)) {
@@ -298,7 +298,6 @@ template <class T> class ShardedLruCache {
                     dest->bytes = bytes;
                     shard.bytes += bytes;
                     dest->hash.store(h, std::memory_order_relaxed);
-                    dest->used.store(0, std::memory_order_relaxed);
                     dest->chain.store(b.first.load(std::memory_order_relaxed),
                                       std::memory_order_relaxed);
                     dest->state.store(1, std::memory_order_release);

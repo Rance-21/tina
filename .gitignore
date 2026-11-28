@@ -52,3 +52,5 @@ benchmark/sweep_20261120_170630
 cpu.data
 perf.data
 perf.data.old
+io.data
+
